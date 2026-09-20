@@ -36,7 +36,10 @@ jobs:
         env:
           # The custom hook builds a Go binary; we don't need it for import smoke.
           HATCH_BUILD_HOOK_ENABLE_CUSTOM: 'false'
-        run: uv sync --frozen --no-install-package strix-agent && uv pip install -e . --no-build-isolation
+        run: |
+          uv sync --frozen --no-install-package strix-agent
+          uv pip install --no-build-isolation hatchling editables
+          uv pip install --no-build-isolation -e .
 
       - name: touch the import graph
         run: |
