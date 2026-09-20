@@ -2,6 +2,7 @@
 name: deep
 description: Exhaustive security assessment with maximum coverage, depth, and vulnerability chaining
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Deep Testing Mode
 

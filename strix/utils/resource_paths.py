@@ -1,11 +1,12 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 import sys
 from pathlib import Path
 
 
-def get_strix_resource_path(*parts: str) -> Path:
+def get_recon_resource_path(*parts: str) -> Path:
     frozen_base = getattr(sys, "_MEIPASS", None)
     if frozen_base:
-        base = Path(frozen_base) / "strix"
+        base = Path(frozen_base) / "reconcore"
         if base.exists():
             return base.joinpath(*parts)
 

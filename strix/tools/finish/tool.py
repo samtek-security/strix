@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """``finish_scan`` — root-agent termination + executive report persistence."""
 
 from __future__ import annotations

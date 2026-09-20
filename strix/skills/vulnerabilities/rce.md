@@ -2,6 +2,7 @@
 name: rce
 description: RCE testing covering command injection, deserialization, template injection, and code evaluation
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # RCE
 

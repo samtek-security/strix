@@ -2,6 +2,7 @@
 name: information-disclosure
 description: Information disclosure testing covering error messages, debug endpoints, metadata leakage, and source exposure
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Information Disclosure
 

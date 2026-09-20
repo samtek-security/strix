@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """SDK-native LLM usage aggregation for scan reports."""
 
 from __future__ import annotations
@@ -83,6 +84,7 @@ class LLMUsageLedger:
         usage: Usage | None,
         agent_name: str | None = None,
         model: str | None = None,
+        tier: str | None = None,
     ) -> bool:
         if usage is None or not _usage_has_activity(usage):
             return False
@@ -96,6 +98,8 @@ class LLMUsageLedger:
             metadata["agent_name"] = agent_name
         if model:
             metadata["model"] = model
+        if tier:
+            metadata["tier"] = tier
 
         if not self.zero_cost:
             estimated = _estimate_litellm_cost(usage, model)
@@ -184,6 +188,7 @@ class LLMUsageLedger:
                     "agent_id": agent_id,
                     "agent_name": metadata.get("agent_name") or agent_id,
                     "model": metadata.get("model"),
+                    "tier": metadata.get("tier"),
                     "cost": _round_cost(agent_cost),
                 }
             )
@@ -235,10 +240,13 @@ class LLMUsageLedger:
             metadata: dict[str, str] = {}
             agent_name = raw_agent.get("agent_name")
             model = raw_agent.get("model")
+            tier = raw_agent.get("tier")
             if isinstance(agent_name, str) and agent_name:
                 metadata["agent_name"] = agent_name
             if isinstance(model, str) and model:
                 metadata["model"] = model
+            if isinstance(tier, str) and tier:
+                metadata["tier"] = tier
             self._agent_metadata[agent_id] = metadata
 
 

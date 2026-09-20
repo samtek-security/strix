@@ -2,6 +2,7 @@
 name: ssrf
 description: SSRF testing for cloud metadata access, internal service discovery, and protocol smuggling
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # SSRF
 

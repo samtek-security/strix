@@ -2,6 +2,7 @@
 name: xss
 description: XSS and HTML injection testing covering reflected, stored, DOM-based, and normalization-dependent vectors
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # XSS
 

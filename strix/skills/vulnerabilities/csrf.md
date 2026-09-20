@@ -2,6 +2,7 @@
 name: csrf
 description: CSRF testing covering token bypass, SameSite cookies, CORS misconfigurations, and state-changing request abuse
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # CSRF
 

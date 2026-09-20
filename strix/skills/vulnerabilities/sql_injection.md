@@ -2,6 +2,7 @@
 name: sql-injection
 description: SQL injection testing covering union, blind, error-based, and ORM bypass techniques
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # SQL Injection
 

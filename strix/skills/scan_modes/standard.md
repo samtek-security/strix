@@ -2,6 +2,7 @@
 name: standard
 description: Balanced security assessment with systematic methodology and full attack surface coverage
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Standard Testing Mode
 

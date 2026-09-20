@@ -2,6 +2,7 @@
 name: xxe
 description: XXE testing for external entity injection, file disclosure, and SSRF via XML parsers
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # XXE
 

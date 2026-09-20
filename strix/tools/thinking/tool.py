@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """``think`` — record a private chain-of-thought note with no side effects."""
 
 from __future__ import annotations

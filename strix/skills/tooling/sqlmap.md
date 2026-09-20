@@ -2,6 +2,7 @@
 name: sqlmap
 description: sqlmap target syntax, non-interactive execution, and common validation/enumeration workflows.
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # sqlmap CLI Playbook
 

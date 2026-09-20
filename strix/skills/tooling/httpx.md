@@ -2,6 +2,7 @@
 name: httpx
 description: ProjectDiscovery httpx probing syntax, exact probe flags, and automation-safe output patterns.
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # httpx CLI Playbook
 

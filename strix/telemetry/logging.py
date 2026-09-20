@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Per-scan logging setup."""
 
 from __future__ import annotations
@@ -6,7 +7,6 @@ import contextlib
 import functools
 import logging
 import os
-import sys
 import warnings
 from contextvars import ContextVar
 from pathlib import Path  # noqa: TC003  used at runtime by ``setup_scan_logging``
@@ -17,8 +17,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-_SCAN_ID: ContextVar[str | None] = ContextVar("strix_scan_id", default=None)
-_AGENT_ID: ContextVar[str | None] = ContextVar("strix_agent_id", default=None)
+_SCAN_ID: ContextVar[str | None] = ContextVar("recon_scan_id", default=None)
+_AGENT_ID: ContextVar[str | None] = ContextVar("recon_agent_id", default=None)
 
 
 def set_scan_id(scan_id: str) -> None:
@@ -36,7 +36,7 @@ def set_agent_id(agent_id: str | None) -> None:
     _AGENT_ID.set(agent_id)
 
 
-class _StrixContextFilter(logging.Filter):
+class _ReconContextFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.scan_id = _SCAN_ID.get() or "-"
         record.agent_id = _AGENT_ID.get() or "-"
@@ -48,7 +48,7 @@ _DATEFMT = "%Y-%m-%d %H:%M:%S"
 
 
 # Third-party loggers that get noisy at DEBUG. Capped so the file isn't
-# drowned in their internals when STRIX_DEBUG=1.
+# drowned in their internals when RECON_DEBUG=1.
 _NOISY_LIBS: tuple[str, ...] = (
     "httpx",
     "httpcore",
@@ -66,18 +66,6 @@ _STREAM_TAG = "_strix_stream_handler"
 # ``openai.agents`` is the openai-agents SDK's canonical logger root.
 _TRACKED_ROOTS: tuple[str, ...] = ("strix", "openai.agents")
 
-_STDOUT_QUIET_ROOTS: frozenset[str] = frozenset({"openai.agents"})
-
-
-class _StdoutQuietFilter(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        if record.levelno >= logging.WARNING:
-            return True
-        return not any(
-            record.name == root or record.name.startswith(root + ".")
-            for root in _STDOUT_QUIET_ROOTS
-        )
-
 
 class _PtyThresholdFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
@@ -90,11 +78,12 @@ def _silence_pty_threshold_warning() -> None:
 
 
 def configure_dependency_logging() -> None:
-    """Quiet dependency logging/warnings that obscure Strix scan logs."""
-    litellm = sys.modules.get("litellm")
-    if litellm is not None:
-        with contextlib.suppress(Exception):
-            litellm._logging._disable_debugging()
+    """Quiet dependency logging/warnings that obscure Recon scan logs."""
+    with contextlib.suppress(Exception):
+        import litellm
+
+        litellm_logging = litellm._logging
+        litellm_logging._disable_debugging()  # type: ignore[no-untyped-call]
 
     logging.getLogger("asyncio").setLevel(logging.CRITICAL)
     logging.getLogger("asyncio").propagate = False
@@ -132,13 +121,13 @@ class _CurrentStderrHandler(logging.StreamHandler):  # type: ignore[type-arg]
 def _debug_enabled(debug: bool | None) -> bool:
     if debug is not None:
         return debug
-    return (os.environ.get("STRIX_DEBUG") or "").strip().lower() in {"1", "true", "yes", "on"}
+    return (os.environ.get("RECON_DEBUG") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _stream_handler(debug: bool) -> logging.Handler:
     handler = _CurrentStderrHandler(logging.DEBUG if debug else logging.ERROR)
     handler.setFormatter(logging.Formatter(_FORMAT, datefmt=_DATEFMT))
-    handler.addFilter(_StrixContextFilter())
+    handler.addFilter(_ReconContextFilter())
     handler.addFilter(_StdoutQuietFilter())
     setattr(handler, _STREAM_TAG, True)
     return handler
@@ -162,11 +151,11 @@ def setup_scan_logging(run_dir: Path, *, debug: bool | None = None) -> Callable[
     """Attach scan-scoped handlers; return a teardown callable.
 
     Args:
-        run_dir: Per-scan output directory. ``{run_dir}/strix.log`` is
+        run_dir: Per-scan output directory. ``{run_dir}/recon.log`` is
             created if missing and opened append-mode (so re-runs of the
             same scan_id concatenate cleanly).
         debug: When ``True``, stderr handler runs at DEBUG instead of
-            ERROR. ``None`` (default) reads ``STRIX_DEBUG`` env: ``1`` /
+            ERROR. ``None`` (default) reads ``RECON_DEBUG`` env: ``1`` /
             ``true`` / ``yes`` / ``on`` enables debug.
 
     Returns:
@@ -179,12 +168,12 @@ def setup_scan_logging(run_dir: Path, *, debug: bool | None = None) -> Callable[
     debug = _debug_enabled(debug)
 
     run_dir.mkdir(parents=True, exist_ok=True)
-    log_path = run_dir / "strix.log"
+    log_path = run_dir / "reconcore.log"
 
     file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(_FORMAT, datefmt=_DATEFMT))
-    file_handler.addFilter(_StrixContextFilter())
+    file_handler.addFilter(_ReconContextFilter())
     setattr(file_handler, _HANDLER_TAG, True)
 
     tracked_loggers = [logging.getLogger(name) for name in _TRACKED_ROOTS]

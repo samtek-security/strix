@@ -110,7 +110,7 @@ hiddenimports = [
     # CVSS scoring
     'cvss',
 
-    # Strix modules
+    # Recon modules
     'strix',
     'strix.interface',
     'strix.interface.main',

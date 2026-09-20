@@ -2,6 +2,7 @@
 name: naabu
 description: Naabu port-scanning syntax with host input, scan-type, verification, and rate controls.
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Naabu CLI Playbook
 

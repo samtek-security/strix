@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Per-agent todo tools — mirrored to {state_dir}/todos.json."""
 
 from __future__ import annotations

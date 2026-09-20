@@ -2,6 +2,7 @@
 name: nextjs
 description: Security testing playbook for Next.js covering App Router, Server Actions, RSC, and Edge runtime vulnerabilities
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Next.js
 

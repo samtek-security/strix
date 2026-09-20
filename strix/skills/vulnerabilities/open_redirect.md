@@ -2,6 +2,7 @@
 name: open-redirect
 description: Open redirect testing for phishing pivots, OAuth token theft, and allowlist bypass
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Open Redirect
 

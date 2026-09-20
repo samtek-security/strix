@@ -1,7 +1,8 @@
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 # shell — `exec_command` + `write_stdin`
 
 SDK-provided shell tools wired per-run from the sandbox session. Every CLI
-invocation the agent makes (nmap, ffuf, agent-browser, python3, …) goes
+invocation the agent makes (nmap, ffuf, recon-browser, python3, …) goes
 through `exec_command`. `write_stdin` streams input to a still-running
 process started by an earlier `exec_command` (for interactive prompts).
 

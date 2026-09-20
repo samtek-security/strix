@@ -1,12 +1,12 @@
 [project]
 name = "strix-agent"
 version = "1.7.0"
-description = "Open-source AI Hackers for your apps"
+description = "Recon engine core — Samtek fork of Apache-2.0 Strix (OmniSecure Inc.)"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.12"
 authors = [
-  { name = "Strix", email = "hi@usestrix.com" },
+  { name = "Samtek", email = "recon@samtek.io" },
 ]
 keywords = [
   "cybersecurity",
@@ -42,6 +42,7 @@ dependencies = [
   "pydantic-settings>=2.13.0",
   "rich",
   "docker>=7.1.0",
+  "textual>=6.0.0",
   "requests>=2.32.0",
   "cvss>=3.2",
   "caido-sdk-client>=0.2.0",
@@ -55,7 +56,7 @@ dependencies = [
 ]
 
 [project.scripts]
-strix = "strix.interface.main:main"
+recon = "strix.interface.main:main"
 
 [dependency-groups]
 dev = [
