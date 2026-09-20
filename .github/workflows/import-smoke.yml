@@ -33,10 +33,22 @@ jobs:
       - uses: astral-sh/setup-uv@v5
 
       - name: install fork (from frozen lock, skip TUI hook)
-        env:
-          # The custom hook builds a Go binary; we don't need it for import smoke.
-          HATCH_BUILD_HOOK_ENABLE_CUSTOM: 'false'
         run: |
+          # The custom hook builds a Go binary; we don't need it for import
+          # smoke and the hook file itself fails to parse under installed
+          # hatchling. HATCH_BUILD_HOOK_ENABLE_CUSTOM=false doesn't skip
+          # parsing — it only skips execution — so drop the hook stanza from
+          # pyproject.toml for the CI install (not committed).
+          python -c "
+          import pathlib
+          p = pathlib.Path('pyproject.toml')
+          c = p.read_text()
+          c = c.replace(
+              '[tool.hatch.build.targets.wheel.hooks.custom]\npath = \"scripts/tui_sidecar_hook.py\"',
+              '# [tool.hatch.build.targets.wheel.hooks.custom] disabled in import-smoke CI'
+          )
+          p.write_text(c)
+          "
           uv sync --frozen --no-install-package strix-agent
           uv pip install --no-build-isolation hatchling editables
           uv pip install --no-build-isolation -e .
