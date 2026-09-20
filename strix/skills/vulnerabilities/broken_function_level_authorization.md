@@ -2,6 +2,7 @@
 name: broken-function-level-authorization
 description: BFLA testing for action-level authorization failures across endpoints, admin functions, and API operations
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Broken Function Level Authorization (BFLA)
 

@@ -2,6 +2,7 @@
 name: mass-assignment
 description: Mass assignment testing for unauthorized field binding and privilege escalation via API parameters
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Mass Assignment
 

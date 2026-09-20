@@ -2,6 +2,7 @@
 name: xss
 description: XSS testing covering reflected, stored, and DOM-based vectors with CSP bypass techniques
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # XSS
 

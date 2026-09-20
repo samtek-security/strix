@@ -2,6 +2,7 @@
 name: quick
 description: Time-boxed rapid assessment targeting high-impact vulnerabilities
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Quick Testing Mode
 
@@ -44,6 +45,19 @@ Skip for quick scans:
 - Full directory bruteforcing
 - Low-severity information disclosure
 - Theoretical issues without working PoC
+
+## Budget discipline (spend on findings, not on mapping)
+
+You have a bounded token budget. Orientation is a means, not the goal — do NOT exhaustively map the
+app before you test anything. As soon as a surface looks suspicious, act on it:
+
+- **Queue candidates the moment you suspect them** with `queue_finding` (title, guard_evidence,
+  minimal_witness) — don't wait until mapping is "done". Queue-then-exploit means a candidate is
+  never lost if the budget runs out mid-run, and the host enforces that every queued item is
+  resolved to a verdict before the scan can finish.
+- Reach the highest-value surfaces (auth, access control, injection sinks) FAST and test them; come
+  back to lower-value breadth only if budget remains.
+- Prefer one proven exploit over ten mapped-but-untested endpoints.
 
 ## Phase 3: Validation
 

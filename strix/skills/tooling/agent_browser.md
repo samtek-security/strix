@@ -1,10 +1,11 @@
 ---
 name: agent_browser
-description: agent-browser CLI for headless Chrome via shell. Snapshot-and-ref workflow, click/fill/extract, screenshots, multi-tab, multi-session, network mocking. Pre-installed in the sandbox; invoke via exec_command.
+description: recon-browser CLI for headless Chrome via shell. Snapshot-and-ref workflow, click/fill/extract, screenshots, multi-tab, multi-session, network mocking. Pre-installed in the sandbox; invoke via exec_command.
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 
-# agent-browser core
+# recon-browser core
 
 Fast browser automation CLI for AI agents. Chrome/Chromium via CDP, no
 Playwright or Puppeteer dependency. Accessibility-tree snapshots with compact
@@ -14,21 +15,21 @@ parsing raw HTML.
 Pre-installed in the sandbox image. Always invoke via the
 ``exec_command`` shell tool. The Caido HTTP/HTTPS proxy is already
 wired via ``http_proxy`` / ``https_proxy`` env vars — **do not pass
-``--proxy``**; agent-browser picks it up automatically and Caido
+``--proxy``**; recon-browser picks it up automatically and Caido
 captures all page traffic. Localhost (CDP) traffic is excluded via
 ``NO_PROXY=localhost,127.0.0.1``.
 
 Default viewport is 1280×720. For sites that gate behavior on real
 desktop dimensions (responsive breakpoints, bot fingerprinting), run
-``agent-browser viewport 1920 1080`` once per session.
+``recon-browser viewport 1920 1080`` once per session.
 
 ## The core loop
 
 ```bash
-agent-browser open <url>        # 1. Open a page
-agent-browser snapshot -i       # 2. See what's on it (interactive elements only)
-agent-browser click @e3         # 3. Act on refs from the snapshot
-agent-browser snapshot -i       # 4. Re-snapshot after any page change
+recon-browser open <url>        # 1. Open a page
+recon-browser snapshot -i       # 2. See what's on it (interactive elements only)
+recon-browser click @e3         # 3. Act on refs from the snapshot
+recon-browser snapshot -i       # 4. Re-snapshot after any page change
 ```
 
 Refs (`@e1`, `@e2`, ...) are assigned fresh on every snapshot. They become
@@ -40,23 +41,23 @@ next ref interaction.
 
 ```bash
 # Take a screenshot of a page
-agent-browser open https://example.com
-agent-browser screenshot
-agent-browser close
+recon-browser open https://example.com
+recon-browser screenshot
+recon-browser close
 
 # Search, click a result, and capture it
-agent-browser open https://duckduckgo.com
-agent-browser snapshot -i                      # find the search box ref
-agent-browser fill @e1 "agent-browser cli"
-agent-browser press Enter
-agent-browser wait --load networkidle
-agent-browser snapshot -i                      # refs now reflect results
-agent-browser click @e5                        # click a result
-agent-browser screenshot
+recon-browser open https://duckduckgo.com
+recon-browser snapshot -i                      # find the search box ref
+recon-browser fill @e1 "recon-browser cli"
+recon-browser press Enter
+recon-browser wait --load networkidle
+recon-browser snapshot -i                      # refs now reflect results
+recon-browser click @e5                        # click a result
+recon-browser screenshot
 ```
 
 The browser stays running across commands so these feel like a single
-session. Use `agent-browser close` (or `close --all`) when you're done.
+session. Use `recon-browser close` (or `close --all`) when you're done.
 
 The default session is **shared with every other agent in the sandbox** — if
 another agent navigates it, your page and your refs are gone from under you. So
@@ -81,13 +82,13 @@ while, save the state first (see
 ## Reading a page
 
 ```bash
-agent-browser snapshot                    # full tree (verbose)
-agent-browser snapshot -i                 # interactive elements only (preferred)
-agent-browser snapshot -i -u              # include href urls on links
-agent-browser snapshot -i -c              # compact (no empty structural nodes)
-agent-browser snapshot -i -d 3            # cap depth at 3 levels
-agent-browser snapshot -s "#main"         # scope to a CSS selector
-agent-browser snapshot -i --json          # machine-readable output
+recon-browser snapshot                    # full tree (verbose)
+recon-browser snapshot -i                 # interactive elements only (preferred)
+recon-browser snapshot -i -u              # include href urls on links
+recon-browser snapshot -i -c              # compact (no empty structural nodes)
+recon-browser snapshot -i -d 3            # cap depth at 3 levels
+recon-browser snapshot -s "#main"         # scope to a CSS selector
+recon-browser snapshot -i --json          # machine-readable output
 ```
 
 Snapshot output looks like:
@@ -107,35 +108,35 @@ URL: https://example.com/login
 For unstructured reading (no refs needed):
 
 ```bash
-agent-browser get text @e1                # visible text of an element
-agent-browser get html @e1                # innerHTML
-agent-browser get attr @e1 href           # any attribute
-agent-browser get value @e1               # input value
-agent-browser get title                   # page title
-agent-browser get url                     # current URL
-agent-browser get count ".item"           # count matching elements
+recon-browser get text @e1                # visible text of an element
+recon-browser get html @e1                # innerHTML
+recon-browser get attr @e1 href           # any attribute
+recon-browser get value @e1               # input value
+recon-browser get title                   # page title
+recon-browser get url                     # current URL
+recon-browser get count ".item"           # count matching elements
 ```
 
 ## Interacting
 
 ```bash
-agent-browser click @e1                   # click
-agent-browser click @e1 --new-tab         # open link in new tab instead of navigating
-agent-browser dblclick @e1                # double-click
-agent-browser hover @e1                   # hover
-agent-browser focus @e1                   # focus (useful before keyboard input)
-agent-browser fill @e2 "hello"            # clear then type
-agent-browser type @e2 " world"           # type without clearing
-agent-browser press Enter                 # press a key at current focus
-agent-browser press Control+a             # key combination
-agent-browser check @e3                   # check checkbox
-agent-browser uncheck @e3                 # uncheck
-agent-browser select @e4 "option-value"   # select dropdown option
-agent-browser select @e4 "a" "b"          # select multiple
-agent-browser upload @e5 file1.pdf        # upload file(s)
-agent-browser scroll down 500             # scroll page (up/down/left/right)
-agent-browser scrollintoview @e1          # scroll element into view
-agent-browser drag @e1 @e2                # drag and drop
+recon-browser click @e1                   # click
+recon-browser click @e1 --new-tab         # open link in new tab instead of navigating
+recon-browser dblclick @e1                # double-click
+recon-browser hover @e1                   # hover
+recon-browser focus @e1                   # focus (useful before keyboard input)
+recon-browser fill @e2 "hello"            # clear then type
+recon-browser type @e2 " world"           # type without clearing
+recon-browser press Enter                 # press a key at current focus
+recon-browser press Control+a             # key combination
+recon-browser check @e3                   # check checkbox
+recon-browser uncheck @e3                 # uncheck
+recon-browser select @e4 "option-value"   # select dropdown option
+recon-browser select @e4 "a" "b"          # select multiple
+recon-browser upload @e5 file1.pdf        # upload file(s)
+recon-browser scroll down 500             # scroll page (up/down/left/right)
+recon-browser scrollintoview @e1          # scroll element into view
+recon-browser drag @e1 @e2                # drag and drop
 ```
 
 ### When refs don't work or you don't want to snapshot
@@ -143,22 +144,22 @@ agent-browser drag @e1 @e2                # drag and drop
 Use semantic locators:
 
 ```bash
-agent-browser find role button click --name "Submit"
-agent-browser find text "Sign In" click
-agent-browser find text "Sign In" click --exact     # exact match only
-agent-browser find label "Email" fill "user@test.com"
-agent-browser find placeholder "Search" type "query"
-agent-browser find testid "submit-btn" click
-agent-browser find first ".card" click
-agent-browser find nth 2 ".card" hover
+recon-browser find role button click --name "Submit"
+recon-browser find text "Sign In" click
+recon-browser find text "Sign In" click --exact     # exact match only
+recon-browser find label "Email" fill "user@test.com"
+recon-browser find placeholder "Search" type "query"
+recon-browser find testid "submit-btn" click
+recon-browser find first ".card" click
+recon-browser find nth 2 ".card" hover
 ```
 
 Or a raw CSS selector:
 
 ```bash
-agent-browser click "#submit"
-agent-browser fill "input[name=email]" "user@test.com"
-agent-browser click "button.primary"
+recon-browser click "#submit"
+recon-browser fill "input[name=email]" "user@test.com"
+recon-browser click "button.primary"
 ```
 
 Rule of thumb: snapshot + `@eN` refs are fastest and most reliable for
@@ -171,13 +172,13 @@ Agents fail more often from bad waits than from bad selectors. Pick the
 right wait for the situation:
 
 ```bash
-agent-browser wait @e1                     # until an element appears
-agent-browser wait 2000                    # dumb wait, milliseconds (last resort)
-agent-browser wait --text "Success"        # until the text appears on the page
-agent-browser wait --url "**/dashboard"    # until URL matches pattern (glob)
-agent-browser wait --load networkidle      # until network idle (post-navigation)
-agent-browser wait --load domcontentloaded # until DOMContentLoaded
-agent-browser wait --fn "window.myApp.ready === true"  # until JS condition
+recon-browser wait @e1                     # until an element appears
+recon-browser wait 2000                    # dumb wait, milliseconds (last resort)
+recon-browser wait --text "Success"        # until the text appears on the page
+recon-browser wait --url "**/dashboard"    # until URL matches pattern (glob)
+recon-browser wait --load networkidle      # until network idle (post-navigation)
+recon-browser wait --load domcontentloaded # until DOMContentLoaded
+recon-browser wait --fn "window.myApp.ready === true"  # until JS condition
 ```
 
 After any page-changing action, pick one:
@@ -194,42 +195,42 @@ flaky. Timeouts default to 25 seconds.
 ### Log in
 
 ```bash
-agent-browser open https://app.example.com/login
-agent-browser snapshot -i
+recon-browser open https://app.example.com/login
+recon-browser snapshot -i
 
 # Pick the email/password refs out of the snapshot, then:
-agent-browser fill @e3 "user@example.com"
-agent-browser fill @e4 "hunter2"
-agent-browser click @e5
-agent-browser wait --url "**/dashboard"
-agent-browser snapshot -i
+recon-browser fill @e3 "user@example.com"
+recon-browser fill @e4 "hunter2"
+recon-browser click @e5
+recon-browser wait --url "**/dashboard"
+recon-browser snapshot -i
 ```
 
 Credentials in shell history are a leak. For anything sensitive, use the
 auth vault (see [references/authentication.md](references/authentication.md)):
 
 ```bash
-agent-browser auth save my-app --url https://app.example.com/login \
+recon-browser auth save my-app --url https://app.example.com/login \
   --username user@example.com --password-stdin
 # (type password, Ctrl+D)
 
-agent-browser auth login my-app    # fills + clicks, waits for form
+recon-browser auth login my-app    # fills + clicks, waits for form
 ```
 
 ### Persist session across runs
 
 ```bash
 # Log in once, save cookies + localStorage
-agent-browser state save ./auth.json
+recon-browser state save ./auth.json
 
 # Later runs start already-logged-in
-agent-browser --state ./auth.json open https://app.example.com
+recon-browser --state ./auth.json open https://app.example.com
 ```
 
 Or use `--session-name` for auto-save/restore:
 
 ```bash
-AGENT_BROWSER_SESSION_NAME=my-app agent-browser open https://app.example.com
+AGENT_BROWSER_SESSION_NAME=my-app recon-browser open https://app.example.com
 # State is auto-saved and restored on subsequent runs with the same name.
 ```
 
@@ -237,15 +238,15 @@ AGENT_BROWSER_SESSION_NAME=my-app agent-browser open https://app.example.com
 
 ```bash
 # Structured snapshot (best for AI reasoning over page content)
-agent-browser snapshot -i --json > page.json
+recon-browser snapshot -i --json > page.json
 
 # Targeted extraction with refs
-agent-browser snapshot -i
-agent-browser get text @e5
-agent-browser get attr @e10 href
+recon-browser snapshot -i
+recon-browser get text @e5
+recon-browser get attr @e10 href
 
 # Arbitrary shape via JavaScript
-cat <<'EOF' | agent-browser eval --stdin
+cat <<'EOF' | recon-browser eval --stdin
 const rows = document.querySelectorAll("table tbody tr");
 Array.from(rows).map(r => ({
   name: r.cells[0].innerText,
@@ -255,21 +256,21 @@ EOF
 ```
 
 Prefer `eval --stdin` (heredoc) or `eval -b <base64>` for any JS with
-quotes or special characters. Inline `agent-browser eval "..."` works
+quotes or special characters. Inline `recon-browser eval "..."` works
 only for simple expressions.
 
 ### Screenshot
 
-`agent-browser screenshot` writes a PNG to disk in the sandbox. The
+`recon-browser screenshot` writes a PNG to disk in the sandbox. The
 shell command alone does **not** put the image into your context —
 chain it with the SDK ``view_image`` tool to actually see it:
 
 ```bash
-exec_command:  agent-browser screenshot
+exec_command:  recon-browser screenshot
 view_image:    {"path": "<path printed on stdout>"}
 ```
 
-Default output directory is ``/workspace/.agent-browser-screenshots/``,
+Default output directory is ``/workspace/.recon-browser-screenshots/``,
 which ``view_image`` can read. Prefer the no-arg form (the CLI prints
 the full path on stdout — pass that to ``view_image``). If you need a
 specific filename, keep it inside that directory or a sibling hidden
@@ -277,10 +278,10 @@ dir under ``/workspace``. Never write screenshots to ``/tmp`` —
 ``view_image`` rejects anything outside the workspace root.
 
 ```bash
-agent-browser screenshot                        # path printed on stdout
-agent-browser screenshot /workspace/.agent-browser-screenshots/page.png
-agent-browser screenshot --full                 # full scroll height
-agent-browser screenshot --annotate             # numbered labels + legend keyed to snapshot refs
+recon-browser screenshot                        # path printed on stdout
+recon-browser screenshot /workspace/.recon-browser-screenshots/page.png
+recon-browser screenshot --full                 # full scroll height
+recon-browser screenshot --annotate             # numbered labels + legend keyed to snapshot refs
 ```
 
 `--annotate` is designed for multimodal models: each label `[N]` maps
@@ -302,10 +303,10 @@ calling it and stop taking screenshots. Drive the page entirely from
 ### Handle multiple pages via tabs
 
 ```bash
-agent-browser tab                      # list open tabs (with stable tabId)
-agent-browser tab new https://docs...  # open a new tab (and switch to it)
-agent-browser tab 2                    # switch to tab 2
-agent-browser tab close 2              # close tab 2
+recon-browser tab                      # list open tabs (with stable tabId)
+recon-browser tab new https://docs...  # open a new tab (and switch to it)
+recon-browser tab 2                    # switch to tab 2
+recon-browser tab close 2              # close tab 2
 ```
 
 Stable `tabId`s mean `tab 2` points at the same tab across commands even
@@ -318,10 +319,10 @@ Each `--session <name>` is an isolated browser with its own cookies, tabs,
 and refs. Useful for testing multi-user flows or parallel scraping:
 
 ```bash
-agent-browser --session a open https://app.example.com
-agent-browser --session b open https://app.example.com
-agent-browser --session a fill @e1 "alice@test.com"
-agent-browser --session b fill @e1 "bob@test.com"
+recon-browser --session a open https://app.example.com
+recon-browser --session b open https://app.example.com
+recon-browser --session a fill @e1 "alice@test.com"
+recon-browser --session b fill @e1 "bob@test.com"
 ```
 
 `AGENT_BROWSER_SESSION=myapp` sets the default session for the current
@@ -340,22 +341,22 @@ agent-browser --session b close
 ### Mock network requests
 
 ```bash
-agent-browser network route "**/api/users" --body '{"users":[]}'   # stub a response
-agent-browser network route "**/analytics" --abort                 # block entirely
-agent-browser network requests                                     # inspect what fired
-agent-browser network har start                                    # record all traffic
+recon-browser network route "**/api/users" --body '{"users":[]}'   # stub a response
+recon-browser network route "**/analytics" --abort                 # block entirely
+recon-browser network requests                                     # inspect what fired
+recon-browser network har start                                    # record all traffic
 # ... perform actions ...
-agent-browser network har stop /tmp/trace.har
+recon-browser network har stop /tmp/trace.har
 ```
 
 ### Record a video of the workflow
 
 ```bash
-agent-browser record start demo.webm
-agent-browser open https://example.com
-agent-browser snapshot -i
-agent-browser click @e3
-agent-browser record stop
+recon-browser record start demo.webm
+recon-browser open https://example.com
+recon-browser snapshot -i
+recon-browser click @e3
+recon-browser record stop
 ```
 
 See [references/video-recording.md](references/video-recording.md) for
@@ -366,21 +367,21 @@ codec options, GIF export, and more.
 Iframes are auto-inlined in the snapshot — their refs work transparently:
 
 ```bash
-agent-browser snapshot -i
+recon-browser snapshot -i
 # @e3 [Iframe] "payment-frame"
 #   @e4 [input] "Card number"
 #   @e5 [button] "Pay"
 
-agent-browser fill @e4 "4111111111111111"
-agent-browser click @e5
+recon-browser fill @e4 "4111111111111111"
+recon-browser click @e5
 ```
 
 To scope a snapshot to an iframe (for focus or deep nesting):
 
 ```bash
-agent-browser frame @e3      # switch context to the iframe
-agent-browser snapshot -i
-agent-browser frame main     # back to main frame
+recon-browser frame @e3      # switch context to the iframe
+recon-browser snapshot -i
+recon-browser frame main     # back to main frame
 ```
 
 ### Dialogs
@@ -389,10 +390,10 @@ agent-browser frame main     # back to main frame
 `confirm` and `prompt`:
 
 ```bash
-agent-browser dialog status          # is there a pending dialog?
-agent-browser dialog accept           # accept
-agent-browser dialog accept "text"    # accept with prompt input
-agent-browser dialog dismiss          # cancel
+recon-browser dialog status          # is there a pending dialog?
+recon-browser dialog accept           # accept
+recon-browser dialog accept "text"    # accept with prompt input
+recon-browser dialog dismiss          # cancel
 ```
 
 ## Readiness & recovery
@@ -422,10 +423,10 @@ stale daemons, version mismatches after `upgrade`, missing Chrome, etc.)
 run `doctor` before anything else:
 
 ```bash
-agent-browser doctor                     # full diagnosis (env, Chrome, daemons, config, providers, network, launch test)
-agent-browser doctor --offline --quick   # fast, local-only
-agent-browser doctor --fix               # also run destructive repairs (reinstall Chrome, purge old state, ...)
-agent-browser doctor --json              # structured output for programmatic consumption
+recon-browser doctor                     # full diagnosis (env, Chrome, daemons, config, providers, network, launch test)
+recon-browser doctor --offline --quick   # fast, local-only
+recon-browser doctor --fix               # also run destructive repairs (reinstall Chrome, purge old state, ...)
+recon-browser doctor --json              # structured output for programmatic consumption
 ```
 
 `doctor` auto-cleans stale socket/pid/version sidecar files on every run.
@@ -435,18 +436,18 @@ Destructive actions require `--fix`. Exit code is `0` if all checks pass
 ## Troubleshooting
 
 **"Ref not found" / "Element not found: @eN"**
-Page changed since the snapshot. Run `agent-browser snapshot -i` again,
+Page changed since the snapshot. Run `recon-browser snapshot -i` again,
 then use the new refs.
 
 **Element exists in the DOM but not in the snapshot**
 It's probably off-screen or not yet rendered. Try:
 
 ```bash
-agent-browser scroll down 1000
-agent-browser snapshot -i
+recon-browser scroll down 1000
+recon-browser snapshot -i
 # or
-agent-browser wait --text "..."
-agent-browser snapshot -i
+recon-browser wait --text "..."
+recon-browser snapshot -i
 ```
 
 **Click does nothing / overlay swallows the click**
@@ -457,17 +458,17 @@ dismiss/close button, click it, then re-snapshot.
 Some custom input components intercept key events. Try:
 
 ```bash
-agent-browser focus @e1
-agent-browser keyboard inserttext "text"    # bypasses key events
+recon-browser focus @e1
+recon-browser keyboard inserttext "text"    # bypasses key events
 # or
-agent-browser keyboard type "text"          # raw keystrokes, no selector
+recon-browser keyboard type "text"          # raw keystrokes, no selector
 ```
 
 **Page needs JS you can't get right in one shot**
 Use `eval --stdin` with a heredoc instead of inline:
 
 ```bash
-cat <<'EOF' | agent-browser eval --stdin
+cat <<'EOF' | recon-browser eval --stdin
 // Complex script with quotes, backticks, whatever
 document.querySelectorAll('[data-id]').length
 EOF
@@ -502,20 +503,20 @@ and [references/authentication.md](references/authentication.md).
 
 ## React / Web Vitals (built-in, any React app)
 
-agent-browser ships with first-class React introspection. Works on any
+recon-browser ships with first-class React introspection. Works on any
 React app — Next.js, Remix, Vite+React, CRA, TanStack Start, React Native
 Web, etc. The `react …` commands require the React DevTools hook to be
 installed at launch via `--enable react-devtools`:
 
 ```bash
-agent-browser open --enable react-devtools http://localhost:3000
-agent-browser react tree                         # component tree
-agent-browser react inspect <fiberId>            # props, hooks, state, source
-agent-browser react renders start                # begin re-render recording
-agent-browser react renders stop                 # print render profile
-agent-browser react suspense [--only-dynamic]    # Suspense boundaries + classifier
-agent-browser vitals [url]                       # LCP/CLS/TTFB/FCP/INP + hydration
-agent-browser pushstate <url>                    # SPA navigation (auto-detects Next router)
+recon-browser open --enable react-devtools http://localhost:3000
+recon-browser react tree                         # component tree
+recon-browser react inspect <fiberId>            # props, hooks, state, source
+recon-browser react renders start                # begin re-render recording
+recon-browser react renders stop                 # print render profile
+recon-browser react suspense [--only-dynamic]    # Suspense boundaries + classifier
+recon-browser vitals [url]                       # LCP/CLS/TTFB/FCP/INP + hydration
+recon-browser pushstate <url>                    # SPA navigation (auto-detects Next router)
 ```
 
 Without `--enable react-devtools`, the `react …` commands error. `vitals`
@@ -535,7 +536,7 @@ instructed. See `references/trust-boundaries.md` for the full rules.
 Everything covered here plus the complete command/flag/env listing:
 
 ```bash
-agent-browser skills get core --full
+recon-browser skills get core --full
 ```
 
 That pulls in:

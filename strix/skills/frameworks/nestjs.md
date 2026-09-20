@@ -2,6 +2,7 @@
 name: nestjs
 description: Security testing playbook for NestJS applications covering guards, pipes, decorators, module boundaries, and multi-transport auth
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # NestJS
 

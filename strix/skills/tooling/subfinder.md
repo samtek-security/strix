@@ -2,6 +2,7 @@
 name: subfinder
 description: Subfinder passive subdomain enumeration syntax, source controls, and pipeline-ready output patterns.
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Subfinder CLI Playbook
 

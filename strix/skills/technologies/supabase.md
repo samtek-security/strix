@@ -2,6 +2,7 @@
 name: supabase
 description: Supabase security testing covering Row Level Security, PostgREST, Edge Functions, and service key exposure
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Supabase
 

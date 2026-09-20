@@ -10,7 +10,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}🦉 Strix Build Script${NC}"
+echo -e "${BLUE}🦉 Recon Build Script${NC}"
 echo "================================"
 
 OS="$(uname -s)"
@@ -63,20 +63,20 @@ mkdir -p build/sidecar
 (cd strix/interface/tui && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "../../../$TUI_BINARY" ./cmd/strix-tui)
 
 echo -e "\n${BLUE}Building binary with PyInstaller...${NC}"
-uv run pyinstaller strix.spec --noconfirm
+uv run pyinstaller recon.spec --noconfirm
 
 RELEASE_DIR="dist/release"
 mkdir -p "$RELEASE_DIR"
 
-BINARY_NAME="strix-${VERSION}-${OS_NAME}-${ARCH_NAME}"
+BINARY_NAME="recon-${VERSION}-${OS_NAME}-${ARCH_NAME}"
 
 if [ "$OS_NAME" = "windows" ]; then
-    if [ ! -f "dist/strix.exe" ]; then
+    if [ ! -f "dist/recon.exe" ]; then
         echo -e "${RED}Build failed: Binary not found${NC}"
         exit 1
     fi
     BINARY_NAME="${BINARY_NAME}.exe"
-    cp "dist/strix.exe" "$RELEASE_DIR/$BINARY_NAME"
+    cp "dist/recon.exe" "$RELEASE_DIR/$BINARY_NAME"
     echo -e "\n${BLUE}Creating zip...${NC}"
     ARCHIVE_NAME="${BINARY_NAME%.exe}.zip"
 
@@ -87,11 +87,11 @@ if [ "$OS_NAME" = "windows" ]; then
     fi
     echo -e "${GREEN}Created:${NC} $RELEASE_DIR/$ARCHIVE_NAME"
 else
-    if [ ! -f "dist/strix" ]; then
+    if [ ! -f "dist/recon" ]; then
         echo -e "${RED}Build failed: Binary not found${NC}"
         exit 1
     fi
-    cp "dist/strix" "$RELEASE_DIR/$BINARY_NAME"
+    cp "dist/recon" "$RELEASE_DIR/$BINARY_NAME"
     chmod +x "$RELEASE_DIR/$BINARY_NAME"
     echo -e "\n${BLUE}Creating tarball...${NC}"
     ARCHIVE_NAME="${BINARY_NAME}.tar.gz"

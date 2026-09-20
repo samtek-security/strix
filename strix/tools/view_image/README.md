@@ -1,3 +1,4 @@
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 # view_image
 
 SDK-provided tool that loads an image from the sandbox workspace and
@@ -8,7 +9,7 @@ returns it as an image content block for vision-capable models.
 - **Wired in:** `strix/agents/factory.py` — added per-run via the SDK
   `Filesystem` capability.
 - **Strix defaults:** screenshots default to
-  `/workspace/.agent-browser-screenshots/` via `AGENT_BROWSER_SCREENSHOT_DIR`
+  `/workspace/.recon-browser-screenshots/` via `AGENT_BROWSER_SCREENSHOT_DIR`
   (set in `containers/Dockerfile`; dir is created at container start in
   `containers/docker-entrypoint.sh`).
 - **Skill:** screenshot workflow lives in `strix/skills/tooling/agent_browser.md`.

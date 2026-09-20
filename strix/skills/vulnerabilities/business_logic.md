@@ -2,6 +2,7 @@
 name: business-logic
 description: Business logic testing for workflow bypass, state manipulation, and domain invariant violations
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Business Logic Flaws
 

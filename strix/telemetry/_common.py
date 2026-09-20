@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 from __future__ import annotations
 
 import logging
@@ -24,9 +25,9 @@ _FIRST_RUN_CACHED: bool | None = None
 
 def get_version() -> str:
     try:
-        return version("strix-agent")
+        return version("recon-agent")
     except PackageNotFoundError:
-        logger.debug("strix-agent version lookup failed", exc_info=True)
+        logger.debug("recon-agent version lookup failed", exc_info=True)
         return "unknown"
 
 
@@ -34,7 +35,7 @@ def is_first_run() -> bool:
     global _FIRST_RUN_CACHED  # noqa: PLW0603
     if _FIRST_RUN_CACHED is not None:
         return _FIRST_RUN_CACHED
-    marker = Path.home() / ".strix" / ".seen"
+    marker = Path.home() / ".recon" / ".seen"
     if marker.exists():
         _FIRST_RUN_CACHED = False
         return False
@@ -52,7 +53,7 @@ def base_props() -> dict[str, Any]:
         "os": platform.system().lower(),
         "arch": platform.machine(),
         "python": f"{sys.version_info.major}.{sys.version_info.minor}",
-        "strix_version": get_version(),
+        "recon_version": get_version(),
     }
 
 

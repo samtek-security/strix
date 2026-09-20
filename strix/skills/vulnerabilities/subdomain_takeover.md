@@ -2,6 +2,7 @@
 name: subdomain-takeover
 description: Subdomain takeover testing for dangling DNS records and unclaimed cloud resources
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Subdomain Takeover
 

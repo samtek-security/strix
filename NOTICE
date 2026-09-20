@@ -1,0 +1,10 @@
+Recon engine (Samtek fork of Apache-2.0 Strix)
+Copyright 2025 OmniSecure Inc.
+Copyright 2026 Samtek
+
+This directory is a modified Apache-2.0 derivative of Strix
+(https://github.com/usestrix/strix), originally published by OmniSecure Inc.
+The original LICENSE file is retained in this directory.
+
+See NOTICE.CHANGES for the mark-changed record required by Apache License 2.0
+§4(b). See the repository-root NOTICE for product-level attribution.

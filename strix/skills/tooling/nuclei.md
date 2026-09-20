@@ -2,6 +2,7 @@
 name: nuclei
 description: Exact Nuclei command structure, template selection, and bounded high-throughput execution controls.
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Nuclei CLI Playbook
 

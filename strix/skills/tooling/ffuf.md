@@ -2,6 +2,7 @@
 name: ffuf
 description: ffuf fuzzing syntax with matcher/filter strategy and non-interactive defaults.
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # ffuf CLI Playbook
 

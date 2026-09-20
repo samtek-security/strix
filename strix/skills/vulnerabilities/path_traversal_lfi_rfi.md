@@ -2,6 +2,7 @@
 name: path-traversal-lfi-rfi
 description: Path traversal and file inclusion testing for local/remote file access and code execution
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Path Traversal / LFI / RFI
 

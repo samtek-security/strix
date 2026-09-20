@@ -2,6 +2,7 @@
 name: idor
 description: IDOR/BOLA testing for object-level authorization failures and cross-account data access
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # IDOR
 

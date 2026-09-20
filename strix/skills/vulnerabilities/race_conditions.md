@@ -2,6 +2,7 @@
 name: race-conditions
 description: Race condition testing for TOCTOU bugs, double-spend, and concurrent state manipulation
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Race Conditions
 

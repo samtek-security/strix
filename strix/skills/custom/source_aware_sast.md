@@ -2,6 +2,7 @@
 name: source-aware-sast
 description: Practical source-aware SAST and AST playbook for semgrep, ast-grep, gitleaks, and trivy fs
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Source-Aware SAST Playbook
 

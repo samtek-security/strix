@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """``load_skill`` — fetch skill reference material into the conversation."""
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ async def load_skill(ctx: RunContextWrapper, skills: list[str]) -> str:
     Args:
         skills: List of skill names (e.g. ``["xss", "sql_injection"]``).
             Max 5. Names match the bare files under
-            ``strix/skills/<category>/<name>.md``.
+            ``recon/skills/<category>/<name>.md``.
     """
     del ctx
     requested = list(skills or [])

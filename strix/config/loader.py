@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Settings loader, override switch, and disk persistence."""
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_PATH: Path = Path.home() / ".strix" / "cli-config.json"
+_DEFAULT_PATH: Path = Path.home() / ".recon" / "cli-config.json"
 _override: Path | None = None
 _cached: Settings | None = None
 

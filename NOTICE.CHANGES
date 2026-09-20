@@ -1,0 +1,49 @@
+Apache License 2.0 §4(b) — modified-file notice
+================================================
+
+Every file under strix/ (the Python package) is a modified work relative to
+Strix v1.0.4 (OmniSecure Inc., Apache-2.0). Samtek applied the Recon
+control-plane patches listed in the recon repo's docs/strix-fork-patches.md
+on top of the upstream v1.0.4 tag; the package name is kept as `strix` to
+minimise merge cost against future upstream releases (an earlier version of
+this fork had renamed the package to `reconcore`; that rename was reverted
+2026-09-20 as part of the upstream-merge-mechanism work).
+
+This file is the catalog of change classes. Every modified source file under
+strix/ and containers/docker-entrypoint.sh also carries a one-line "Modified
+by Samtek" banner (Apache License 2.0 §4(b)). CI fails if a strix/*.py file
+is missing that banner. Do not present strix/ as unmodified upstream Strix,
+and do not drop LICENSE.
+
+Material classes of change (not an exhaustive git path list):
+
+- Product rebrand: operator-visible strings say "Recon"; CLI entry is `recon`;
+  sandbox image is `recon-sandbox`. The internal Python package stays `strix`
+  (matches upstream, easier merges).
+- Browser CLI alias: agent-browser → recon-browser (image symlink + prompts).
+- Env/config: STRIX_* / RECON_STRIX_* → RECON_* / RECON_ENGINE_*.
+- Telemetry: vendor analytics hard-off.
+- Containment: RECON_EGRESS_PROXY in front of Caido; k8s sandbox client;
+  sandboxnet destination-pinned egress; gVisor/runtime-class wiring;
+  Sandbox CRD adoption hooks.
+- Auth preflight / mailbox / host-side session contracts.
+- Vulnerability report screenshots and extra_env credential injection.
+- Skills, prompts, and system text rewritten for the Recon operator model.
+- Rebased onto upstream v1.6.2 on 2026-09-20 (was v1.0.4). Brings 13 minor
+  upstream releases of new capability. Adopted upstream skills (OAuth, AWS,
+  Django, insecure_deserialization, prototype_pollution, OWASP LLM Top 10,
+  Azure/Entra, AD/Kerberos, argument injection, ecosystem supply-chain,
+  Hurl/Hypothesis, semantic browser, Electron, Grafana/Prometheus,
+  weak-password, GCP+Auth0 recon, Firebase storage rules) and upstream's
+  SARIF+STRIDE emitter, replacing our v1.0.4-era vendored copies. The MCP
+  server module (strix/tools/mcp/, added in upstream v1.6.0) is present in
+  the tree because upstream code (agents/factory, core/runner, TUI) imports
+  it structurally; it is disabled at runtime in Recon deployments by
+  configuration (no MCP servers registered) rather than by structural
+  deletion — see docs/CAPABILITIES.md for the deferred structural-exclude
+  work. The pinned agent-SDK / provider / router dep triple (openai-agents
+  ==0.14.6 / openai==2.44.0 / litellm==1.90.3) is intentionally held at the
+  T11 Vertex-baseline pins pending a live-run re-validation.
+
+containers/Dockerfile is also modified (tool pins, strix/ COPY paths).
+scripts/ and packaging files in this directory are modified for the rebrand.

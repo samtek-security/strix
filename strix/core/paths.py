@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Run directory path helpers."""
 
 from __future__ import annotations
@@ -5,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-RUNS_DIR_NAME = "strix_runs"
+RUNS_DIR_NAME = "recon_runs"
 RUNTIME_STATE_DIR_NAME = ".state"
 RUN_RECORD_FILENAME = "run.json"
 

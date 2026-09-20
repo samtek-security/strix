@@ -2,6 +2,7 @@
 name: insecure-file-uploads
 description: File upload security testing covering extension bypass, content-type manipulation, and path traversal
 ---
+<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. -->
 
 # Insecure File Uploads
 

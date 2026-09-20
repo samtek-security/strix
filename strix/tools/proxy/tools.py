@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Caido proxy host-side @function_tool wrappers around caido_api.py."""
 
 from __future__ import annotations
@@ -371,7 +372,7 @@ async def repeat_request(
 
     The standard pentesting workflow with this tool:
 
-    1. ``agent-browser`` (via ``exec_command``) or live target traffic
+    1. ``recon-browser`` (via ``exec_command``) or live target traffic
        → request gets captured by Caido.
     2. ``list_requests`` → find the request ID you want to manipulate.
     3. ``repeat_request`` → send a modified version (auth-bypass test,
