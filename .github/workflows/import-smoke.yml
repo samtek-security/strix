@@ -1,0 +1,95 @@
+# Import smoke — the fork's minimum fail-fast on rebase.
+#
+# The v1.6.2 rebase (samtek-main afb44ec) landed with three latent bugs (fork PR #1)
+# that crashed every downstream install at scan launch. None showed up in Recon's
+# CI because Recon never imports strix modules from its test suite. This workflow
+# closes that gap: on every push/PR to samtek-main, install the fork and touch the
+# import graph that a real `recon` invocation would.
+#
+# Runs on ubuntu-latest, no Docker, no LLM. ~30s. Adding this is cheap; not adding
+# it means the next rebase can silently break every downstream install again.
+
+name: import smoke
+
+on:
+  push:
+    branches: [samtek-main]
+  pull_request:
+    branches: [samtek-main]
+
+jobs:
+  import-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Match upstream's release-build environment: Python 3.12 + uv-sync from
+      # the frozen uv.lock. Skips the Go TUI sidecar toolchain (we only want an
+      # import graph; sidecar isn't on the import path).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: install fork (from frozen lock, skip TUI hook)
+        run: |
+          # The custom hook builds a Go binary; we don't need it for import
+          # smoke and the hook file itself fails to parse under installed
+          # hatchling. HATCH_BUILD_HOOK_ENABLE_CUSTOM=false doesn't skip
+          # parsing — it only skips execution — so drop the hook stanza from
+          # pyproject.toml for the CI install (not committed).
+          python -c "
+          import pathlib
+          p = pathlib.Path('pyproject.toml')
+          c = p.read_text()
+          c = c.replace(
+              '[tool.hatch.build.targets.wheel.hooks.custom]\npath = \"scripts/tui_sidecar_hook.py\"',
+              '# [tool.hatch.build.targets.wheel.hooks.custom] disabled in import-smoke CI'
+          )
+          p.write_text(c)
+          "
+          uv sync --frozen --no-install-package strix-agent
+          uv pip install --no-build-isolation hatchling editables
+          uv pip install --no-build-isolation -e .
+
+      - name: touch the import graph
+        run: |
+          # Anything an actual `recon`/`strix` invocation walks through.
+          uv run python -c "
+          import strix.interface.main
+          import strix.interface.cli_args
+          import strix.telemetry
+          import strix.report.state
+          import strix.report.usage
+          import strix.runtime.session_manager
+          import strix.runtime.caido_bootstrap
+          import strix.utils.resource_paths
+          print('import graph OK')
+          "
+
+      - name: construct ReportState/LLMUsageLedger
+        run: |
+          # This caught fork PR #1's bug #2 (duplicate total_cost referenced
+          # nonexistent self._total_cost, crashing every ReportState()).
+          uv run python -c "
+          from strix.report.usage import LLMUsageLedger
+          l = LLMUsageLedger()
+          rec = l.to_record()
+          assert rec.get('cost') == 0.0, rec
+          print('LLMUsageLedger.to_record OK:', rec.get('cost'))
+          "
+
+      - name: signature contract — create_or_reuse accepts upstream kwargs
+        run: |
+          # This caught fork PR #1's bug #3 (session_manager.create_or_reuse
+          # kept the pre-v1.6.0 signature; upstream's runner.py passes
+          # extra_files and status_sink and crashed TypeError).
+          uv run python -c "
+          import inspect
+          from strix.runtime import session_manager
+          sig = inspect.signature(session_manager.create_or_reuse)
+          for k in ('extra_files', 'status_sink'):
+              assert k in sig.parameters, f'missing kwarg: {k} — upstream runner.py passes it'
+          print('create_or_reuse signature OK:', list(sig.parameters))
+          "
