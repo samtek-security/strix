@@ -23,22 +23,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Match upstream's release-build environment: Python 3.12 + uv-sync from
+      # the frozen uv.lock. Skips the Go TUI sidecar toolchain (we only want an
+      # import graph; sidecar isn't on the import path).
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: '3.12'
 
-      # No build isolation so the sidecar hook picks up an installed hatchling
-      # rather than an old pinned one from the isolated build env.
-      - name: install fork
-        run: |
-          python -m pip install --upgrade pip
-          pip install 'hatchling>=1.27' editables
-          pip install --no-build-isolation -e .
+      - uses: astral-sh/setup-uv@v5
+
+      - name: install fork (from frozen lock, skip TUI hook)
+        env:
+          # The custom hook builds a Go binary; we don't need it for import smoke.
+          HATCH_BUILD_HOOK_ENABLE_CUSTOM: 'false'
+        run: uv sync --frozen --no-install-package strix-agent && uv pip install -e . --no-build-isolation
 
       - name: touch the import graph
         run: |
           # Anything an actual `recon`/`strix` invocation walks through.
-          python -c "
+          uv run python -c "
           import strix.interface.main
           import strix.interface.cli_args
           import strix.telemetry
@@ -54,7 +57,7 @@ jobs:
         run: |
           # This caught fork PR #1's bug #2 (duplicate total_cost referenced
           # nonexistent self._total_cost, crashing every ReportState()).
-          python -c "
+          uv run python -c "
           from strix.report.usage import LLMUsageLedger
           l = LLMUsageLedger()
           rec = l.to_record()
@@ -67,7 +70,7 @@ jobs:
           # This caught fork PR #1's bug #3 (session_manager.create_or_reuse
           # kept the pre-v1.6.0 signature; upstream's runner.py passes
           # extra_files and status_sink and crashed TypeError).
-          python -c "
+          uv run python -c "
           import inspect
           from strix.runtime import session_manager
           sig = inspect.signature(session_manager.create_or_reuse)
