@@ -141,6 +141,8 @@ async def create_or_reuse(
     gateway_spec_path: str = "",
     gateway_spec_json: str = "",
     gateway_target_ports: tuple[int, ...] = (),
+    extra_files: list[dict[str, Any]] | None = None,
+    status_sink: object | None = None,
 ) -> dict[str, Any]:
     """Return the existing session bundle for ``scan_id`` or create a new one.
 

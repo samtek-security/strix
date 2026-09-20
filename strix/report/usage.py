@@ -35,7 +35,6 @@ class LLMUsageLedger:
         usage: Usage | None,
         agent_name: str | None = None,
         model: str | None = None,
-        tier: str | None = None,
     ) -> bool:
         if usage is None or not _usage_has_activity(usage):
             return False
@@ -49,8 +48,6 @@ class LLMUsageLedger:
             metadata["agent_name"] = agent_name
         if model:
             metadata["model"] = model
-        if tier:
-            metadata["tier"] = tier
 
         if not self.zero_cost:
             estimated = _estimate_litellm_cost(usage, model)
@@ -72,10 +69,6 @@ class LLMUsageLedger:
             return 0.0
         return _round_cost(self._observed_cost if self._has_observed_cost else self._estimated_cost)
 
-    @property
-    def total_cost(self) -> float:
-        return _round_cost(self._total_cost)
-
     def to_record(self) -> dict[str, Any]:
         record = serialize_usage(self._total_usage)
         record["cost"] = self.total_cost
@@ -96,7 +89,6 @@ class LLMUsageLedger:
                     "agent_id": agent_id,
                     "agent_name": metadata.get("agent_name") or agent_id,
                     "model": metadata.get("model"),
-                    "tier": metadata.get("tier"),
                     "cost": _round_cost(agent_cost),
                 }
             )
@@ -140,13 +132,10 @@ class LLMUsageLedger:
             metadata: dict[str, str] = {}
             agent_name = raw_agent.get("agent_name")
             model = raw_agent.get("model")
-            tier = raw_agent.get("tier")
             if isinstance(agent_name, str) and agent_name:
                 metadata["agent_name"] = agent_name
             if isinstance(model, str) and model:
                 metadata["model"] = model
-            if isinstance(tier, str) and tier:
-                metadata["tier"] = tier
             self._agent_metadata[agent_id] = metadata
 
 
