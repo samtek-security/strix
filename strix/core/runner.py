@@ -1,4 +1,14 @@
-"""Top-level Strix scan runner."""
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
+"""Top-level Strix scan runner.
+
+Two public entrypoints share one scan body (:func:`_run_scan`):
+
+* :func:`run_strix_scan` — upstream-compatible entrypoint used by the CLI and
+  TUI. Its signature and behaviour are unchanged from upstream.
+* :func:`run_recon_scan` — Recon's entrypoint. A superset that additionally
+  threads the trusted-egress gateway policy into the sandbox and runs the
+  engine's deterministic coverage worker before sandbox teardown.
+"""
 
 from __future__ import annotations
 
@@ -187,7 +197,7 @@ def _compose_root_instructions_override(
     )
 
 
-async def run_strix_scan(
+async def _run_scan(
     *,
     scan_config: dict[str, Any],
     scan_id: str | None = None,
@@ -206,22 +216,19 @@ async def run_strix_scan(
     status_sink: StatusSink | None = None,
     mcp_connection_requests: list[McpConnectionRequest] | None = None,
     mcp_status_sink: McpStatusSink | None = None,
+    gateway_spec_path: str = "",
+    gateway_spec_json: str = "",
+    gateway_target_ports: tuple[int, ...] = (),
+    coverage_context: Any = None,
+    run_coverage_worker_on_exit: bool = False,
 ) -> RunResultBase | None:
-    """Run or resume one Strix scan against a sandbox.
+    """Shared scan body for :func:`run_strix_scan` and :func:`run_recon_scan`.
 
-    ``root_instructions_override`` adds root scan instructions to the rendered
-    root prompt without replacing the system-verified scope block.
-    ``extra_files`` entries (``{"workspace_path", "content"}``) are placed into
-    the sandbox workspace at session bring-up; see
-    :func:`strix.runtime.session_manager.create_or_reuse`.
-    ``extra_system_prompt_context`` is merged into the root agent's scan
-    context before prompt rendering. Child agents keep the standard scan prompt
-    and context.
-    ``mcp_connection_requests`` supplies the run's MCP connections from any
-    source: when given, the engine connects those requests; when ``None`` (the
-    command-line default) it reads ``~/.strix/mcp-servers.json`` itself. Either
-    way the engine does the connecting, so the caller passes inert configs plus
-    metadata and never live sessions.
+    The public contract for the shared parameters is documented on
+    :func:`run_strix_scan`. The Recon-only parameters are documented on
+    :func:`run_recon_scan`; they default to inert values so the upstream path
+    (empty gateway policy, no coverage worker) is byte-for-byte the old
+    behaviour.
     """
 
     def report(phase: str) -> None:
@@ -328,6 +335,9 @@ async def run_strix_scan(
         local_sources=local_sources or [],
         extra_files=extra_files,
         status_sink=status_sink,
+        gateway_spec_path=gateway_spec_path,
+        gateway_spec_json=gateway_spec_json,
+        gateway_target_ports=gateway_target_ports,
     )
     report("Waiting for the first model response")
     logger.info("Sandbox ready for scan %s", scan_id)
@@ -349,6 +359,7 @@ async def run_strix_scan(
 
     sessions_to_close: list[SQLiteSession] = []
     mcp_sessions: list[SupervisedMcpSession] = []
+    scan_cancelled = False
 
     try:
         targets = scan_config.get("targets") or []
@@ -641,6 +652,7 @@ async def run_strix_scan(
         return None
     except (asyncio.CancelledError, KeyboardInterrupt):
         logger.info("Scan %s interrupted by the user", scan_id)
+        scan_cancelled = True
         if root_id is not None:
             with contextlib.suppress(Exception):
                 await coordinator.set_status(root_id, "running")
@@ -666,8 +678,289 @@ async def run_strix_scan(
                 await mcp_session.aclose()
         with contextlib.suppress(Exception):
             await coordinator._maybe_snapshot()
-        if cleanup_on_exit:
-            logger.info("Tearing down sandbox session for scan %s", scan_id)
-            await session_manager.cleanup(scan_id)
-        logger.info("Strix scan %s done", scan_id)
-        teardown_logging()
+        # Recon: capture the gateway's observed traffic and run the engine's
+        # deterministic coverage worker while the sandbox session + gateway
+        # client are still live in the session cache — they exec through the
+        # gateway and write their revision-bound results to the run dir for the
+        # engine to fold onto the coverage ledger after this returns. This must
+        # precede teardown (cleanup() evicts the session they need), so it is
+        # wrapped in its own try/finally: teardown below runs even if coverage is
+        # cancelled or raises. Skipped on an interrupt — a cancelled scan is being
+        # torn down, not finished, and the worker's probe budget could run long.
+        # Gated by the flag the Recon entrypoint sets on its final phase; a no-op
+        # for run_strix_scan.
+        try:
+            if run_coverage_worker_on_exit and not scan_cancelled:
+                try:
+                    await asyncio.wait_for(
+                        _run_coverage_on_exit(
+                            scan_id, run_dir, scan_config, coverage_context, report,
+                        ),
+                        timeout=_COVERAGE_DEADLINE_S,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "coverage on exit exceeded its %.0fs deadline for scan %s; "
+                        "abandoning it and tearing down (the engine records the "
+                        "missing/partial coverage)",
+                        _COVERAGE_DEADLINE_S,
+                        scan_id,
+                    )
+        finally:
+            if cleanup_on_exit:
+                logger.info("Tearing down sandbox session for scan %s", scan_id)
+                await session_manager.cleanup(scan_id)
+            logger.info("Strix scan %s done", scan_id)
+            teardown_logging()
+
+
+def _ensure_engine_on_path() -> None:
+    """Best-effort add the ``engine/`` dir to sys.path so ``recon_engine`` imports.
+
+    The Recon venv normally has it on sys.path already; this is a safety net for
+    hosts that import this module from an unusual CWD. Mirrors the helper in
+    ``strix.tools.ledger.tools``.
+    """
+    import sys
+
+    here = Path(__file__).resolve()
+    # engine/ is the ancestor above third_party/strix/strix/core/runner.py.
+    engine_dir = here.parents[4]
+    if engine_dir.name == "engine" and str(engine_dir) not in sys.path:
+        sys.path.insert(0, str(engine_dir))
+
+
+def _primary_web_target_url(scan_config: dict[str, Any]) -> str:
+    """The first authorized web-application target URL in ``scan_config``, or ``""``.
+
+    The coverage worker uses observed gateway traffic to find the target base and
+    falls back to this declared origin when the agent never exercised the target
+    (e.g. an exhausted budget). Mirrors the ``web_application`` -> ``target_url``
+    mapping in :func:`strix.core.inputs.build_scope_context`.
+    """
+    for target in scan_config.get("targets") or []:
+        if not isinstance(target, dict) or target.get("type") != "web_application":
+            continue
+        details = target.get("details") or {}
+        url = str(details.get("target_url") or "").strip()
+        if url:
+            return url
+    return ""
+
+
+# How often the coverage phase reports progress to the status sink. The engine's
+# activity heartbeat ticker has a no-progress stall watchdog (default 600s) that
+# stops heartbeating so Temporal retries a hung agent; the deterministic coverage
+# worker can legitimately probe a large surface for longer than that AFTER the
+# agent loop has ended (so no agent events arrive). A steady progress ping keeps
+# a healthy coverage run from being mistaken for a hang. Well under any sane stall.
+_COVERAGE_PROGRESS_INTERVAL_S = 60.0
+
+# Hard upper bound on the whole coverage-on-exit phase. The progress ping above
+# keeps the stall watchdog quiet while coverage runs, which is correct for a
+# healthy run but would also hide a genuinely hung step forever — so the phase is
+# wrapped in this deadline. It is generous headroom over the worker's own probe
+# budget (worker _TOTAL_BUDGET_SECONDS is 1200s); past it, coverage is abandoned
+# and the sandbox is torn down, so the engine completes the run (its finalizer
+# records the missing/partial coverage) instead of the activity hanging.
+_COVERAGE_DEADLINE_S = 1800.0
+
+
+async def _run_coverage_on_exit(
+    scan_id: str,
+    run_dir: Path,
+    scan_config: dict[str, Any],
+    coverage_context: Any,
+    report: Callable[[str], None],
+) -> None:
+    """Capture gateway coverage, then run the engine's deterministic coverage worker.
+
+    Both steps run before sandbox teardown while the sandbox session and gateway
+    client are still live in ``session_manager._SESSION_CACHE`` — the Recon
+    entrypoint asks for this on its final/monolithic phase, right before this
+    runner evicts the session. Order matters: persisting the gateway's observed
+    traffic first writes ``gateway_endpoints.json``, which the authz worker reads
+    to find the exercised origin and GraphQL endpoint (and which the engine folds
+    into api-surface coverage); without it the worker falls back to the declared
+    target and loses observed-traffic evidence.
+
+    Both live in the Recon engine, which this package does not hard-depend on, so
+    they are imported lazily. Everything is best-effort: a missing ``recon_engine``
+    or a step failure is logged and never masks the scan's own outcome — the worker
+    writes a revision-bound failure envelope the engine reads back.
+
+    ``report`` is pinged on a timer throughout so the engine's heartbeat stall
+    watchdog does not kill a healthy but long coverage run (no agent events arrive
+    once the agent loop has ended).
+    """
+    try:
+        _ensure_engine_on_path()
+        from recon_engine.backends.gateway_capture_client import persist_gateway_coverage
+        from recon_engine.coverage_worker import run_authz_worker
+    except Exception:
+        logger.warning(
+            "coverage on exit requested but recon_engine is not importable; "
+            "skipping (install the engine or run via run_strix_scan for a plain scan)",
+            exc_info=True,
+        )
+        return
+
+    async def _progress_pump() -> None:
+        while True:
+            await asyncio.sleep(_COVERAGE_PROGRESS_INTERVAL_S)
+            with contextlib.suppress(Exception):
+                report("coverage worker running")
+
+    report("coverage: capturing gateway traffic")
+    pump = asyncio.create_task(_progress_pump())
+    try:
+        # Observed-traffic coverage first: the worker and the engine both read it.
+        with contextlib.suppress(Exception):
+            await persist_gateway_coverage(scan_id, run_dir)
+        target_url = _primary_web_target_url(scan_config)
+        try:
+            await run_authz_worker(
+                scan_id,
+                run_dir,
+                target_url=target_url,
+                coverage_context=coverage_context,
+            )
+        except Exception:
+            logger.exception("coverage worker on exit failed (non-fatal)")
+    finally:
+        pump.cancel()
+        with contextlib.suppress(BaseException):
+            await pump
+
+
+async def run_strix_scan(
+    *,
+    scan_config: dict[str, Any],
+    scan_id: str | None = None,
+    image: str,
+    local_sources: list[dict[str, Any]] | None = None,
+    extra_files: list[dict[str, Any]] | None = None,
+    coordinator: AgentCoordinator | None = None,
+    interactive: bool = False,
+    max_turns: int = DEFAULT_MAX_TURNS,
+    max_budget_usd: float | None = None,
+    model: str | None = None,
+    cleanup_on_exit: bool = True,
+    event_sink: StreamEventSink | None = None,
+    root_instructions_override: str | None = None,
+    extra_system_prompt_context: dict[str, Any] | None = None,
+    status_sink: StatusSink | None = None,
+    mcp_connection_requests: list[McpConnectionRequest] | None = None,
+    mcp_status_sink: McpStatusSink | None = None,
+) -> RunResultBase | None:
+    """Run or resume one Strix scan against a sandbox.
+
+    ``root_instructions_override`` adds root scan instructions to the rendered
+    root prompt without replacing the system-verified scope block.
+    ``extra_files`` entries (``{"workspace_path", "content"}``) are placed into
+    the sandbox workspace at session bring-up; see
+    :func:`strix.runtime.session_manager.create_or_reuse`.
+    ``extra_system_prompt_context`` is merged into the root agent's scan
+    context before prompt rendering. Child agents keep the standard scan prompt
+    and context.
+    ``mcp_connection_requests`` supplies the run's MCP connections from any
+    source: when given, the engine connects those requests; when ``None`` (the
+    command-line default) it reads ``~/.strix/mcp-servers.json`` itself. Either
+    way the engine does the connecting, so the caller passes inert configs plus
+    metadata and never live sessions.
+    """
+    return await _run_scan(
+        scan_config=scan_config,
+        scan_id=scan_id,
+        image=image,
+        local_sources=local_sources,
+        extra_files=extra_files,
+        coordinator=coordinator,
+        interactive=interactive,
+        max_turns=max_turns,
+        max_budget_usd=max_budget_usd,
+        model=model,
+        cleanup_on_exit=cleanup_on_exit,
+        event_sink=event_sink,
+        root_instructions_override=root_instructions_override,
+        extra_system_prompt_context=extra_system_prompt_context,
+        status_sink=status_sink,
+        mcp_connection_requests=mcp_connection_requests,
+        mcp_status_sink=mcp_status_sink,
+    )
+
+
+async def run_recon_scan(
+    *,
+    scan_config: dict[str, Any],
+    scan_id: str | None = None,
+    image: str,
+    local_sources: list[dict[str, Any]] | None = None,
+    extra_files: list[dict[str, Any]] | None = None,
+    coordinator: AgentCoordinator | None = None,
+    interactive: bool = False,
+    max_turns: int = DEFAULT_MAX_TURNS,
+    max_budget_usd: float | None = None,
+    model: str | None = None,
+    cleanup_on_exit: bool = True,
+    event_sink: StreamEventSink | None = None,
+    root_instructions_override: str | None = None,
+    extra_system_prompt_context: dict[str, Any] | None = None,
+    status_sink: StatusSink | None = None,
+    mcp_connection_requests: list[McpConnectionRequest] | None = None,
+    mcp_status_sink: McpStatusSink | None = None,
+    gateway_spec_path: str = "",
+    gateway_spec_json: str = "",
+    gateway_target_ports: tuple[int, ...] = (),
+    coverage_context: Any = None,
+    run_coverage_worker_on_exit: bool = False,
+) -> RunResultBase | None:
+    """Recon's scan entrypoint: :func:`run_strix_scan` plus trusted egress + coverage.
+
+    Accepts every :func:`run_strix_scan` parameter (same contract) and, on top:
+
+    ``gateway_spec_path`` / ``gateway_spec_json`` carry the engagement's
+    rules-of-engagement egress policy to the sandbox. Exactly one may be set
+    (path for the docker-contained backend's mounted spec, JSON for the k8s
+    sibling-gateway Pod). ``gateway_target_ports`` pins the non-standard target
+    port(s) the gateway allows. These are forwarded unchanged to
+    :func:`strix.runtime.session_manager.create_or_reuse`, which validates them
+    fail-closed; an empty policy leaves the sandbox exactly as a plain scan.
+
+    ``coverage_context`` is the engine's per-run coverage-ledger handle. It is
+    not consumed inside the scan loop; it is handed to the on-exit coverage
+    worker so the worker reads the exact pinned revision and the declared
+    GraphQL endpoint from it.
+
+    ``run_coverage_worker_on_exit`` asks this runner to invoke the engine's
+    deterministic coverage/authz worker once, before sandbox teardown, while the
+    sandbox session and gateway client are still live. The engine sets it on a
+    monolithic run and on the final phase of a phased run (aligned with
+    ``cleanup_on_exit``); on earlier phases it is ``False`` so the shared sandbox
+    survives. The worker writes its results to the run dir for the engine to
+    fold onto the coverage ledger after this returns.
+    """
+    return await _run_scan(
+        scan_config=scan_config,
+        scan_id=scan_id,
+        image=image,
+        local_sources=local_sources,
+        extra_files=extra_files,
+        coordinator=coordinator,
+        interactive=interactive,
+        max_turns=max_turns,
+        max_budget_usd=max_budget_usd,
+        model=model,
+        cleanup_on_exit=cleanup_on_exit,
+        event_sink=event_sink,
+        root_instructions_override=root_instructions_override,
+        extra_system_prompt_context=extra_system_prompt_context,
+        status_sink=status_sink,
+        mcp_connection_requests=mcp_connection_requests,
+        mcp_status_sink=mcp_status_sink,
+        gateway_spec_path=gateway_spec_path,
+        gateway_spec_json=gateway_spec_json,
+        gateway_target_ports=gateway_target_ports,
+        coverage_context=coverage_context,
+        run_coverage_worker_on_exit=run_coverage_worker_on_exit,
+    )
