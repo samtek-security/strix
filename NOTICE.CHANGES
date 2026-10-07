@@ -27,6 +27,10 @@ Material classes of change (not an exhaustive git path list):
   sandboxnet destination-pinned egress; gVisor/runtime-class wiring;
   Sandbox CRD adoption hooks.
 - Auth preflight / mailbox / host-side session contracts.
+- Recon scan entrypoint: core/runner.py adds run_recon_scan, a superset of
+  upstream's run_strix_scan that threads the trusted-egress gateway policy into
+  the sandbox and runs the engine's deterministic coverage worker before
+  teardown. run_strix_scan keeps its upstream signature for the CLI/TUI.
 - Vulnerability report screenshots and extra_env credential injection.
 - Skills, prompts, and system text rewritten for the Recon operator model.
 - Rebased onto upstream v1.6.2 on 2026-09-20 (was v1.0.4). Brings 13 minor
