@@ -93,3 +93,26 @@ jobs:
               assert k in sig.parameters, f'missing kwarg: {k} — upstream runner.py passes it'
           print('create_or_reuse signature OK:', list(sig.parameters))
           "
+
+      - name: signature contract — run_recon_scan is the Recon entrypoint
+        run: |
+          # Recon's engine imports run_recon_scan from strix.core.runner and calls
+          # it with the gateway + coverage kwargs. A rebase that dropped the Recon
+          # entrypoint (or its extra kwargs) would crash every live engine run at
+          # import/launch. run_strix_scan must stay too (CLI + TUI call it).
+          uv run python -c "
+          import inspect
+          from strix.core.runner import run_recon_scan, run_strix_scan
+          sig = inspect.signature(run_recon_scan)
+          for k in (
+              'coverage_context', 'run_coverage_worker_on_exit',
+              'gateway_spec_path', 'gateway_spec_json', 'gateway_target_ports',
+          ):
+              assert k in sig.parameters, f'run_recon_scan missing kwarg: {k}'
+          # The Recon entrypoint is a superset: every run_strix_scan kwarg too.
+          strix_params = set(inspect.signature(run_strix_scan).parameters)
+          recon_params = set(sig.parameters)
+          missing = strix_params - recon_params
+          assert not missing, f'run_recon_scan is not a superset; missing: {sorted(missing)}'
+          print('run_recon_scan signature OK:', list(sig.parameters))
+          "
