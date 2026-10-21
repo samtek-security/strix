@@ -36,7 +36,7 @@ def _stderr_handlers(logger: logging.Logger) -> list[logging.Handler]:
 
 @pytest.mark.usefixtures("clean_loggers")
 def test_console_logging_hides_warnings_and_shows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("STRIX_DEBUG", raising=False)
+    monkeypatch.delenv("RECON_DEBUG", raising=False)
     err = io.StringIO()
     monkeypatch.setattr(sys, "stderr", err)
     strix_logging.setup_console_logging()
@@ -53,7 +53,7 @@ def test_console_logging_hides_warnings_and_shows_errors(monkeypatch: pytest.Mon
 
 @pytest.mark.usefixtures("clean_loggers")
 def test_console_logging_follows_the_current_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("STRIX_DEBUG", raising=False)
+    monkeypatch.delenv("RECON_DEBUG", raising=False)
     first = io.StringIO()
     monkeypatch.setattr(sys, "stderr", first)
     strix_logging.setup_console_logging()
@@ -79,7 +79,7 @@ def test_console_logging_is_idempotent() -> None:
 def test_scan_logging_reuses_the_console_handler(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.delenv("STRIX_DEBUG", raising=False)
+    monkeypatch.delenv("RECON_DEBUG", raising=False)
     err = io.StringIO()
     monkeypatch.setattr(sys, "stderr", err)
     strix_logging.setup_console_logging()
@@ -89,7 +89,7 @@ def test_scan_logging_reuses_the_console_handler(
     assert len(_stderr_handlers(strix_logger)) == 1
     logging.getLogger("strix.test").error("once")
     assert err.getvalue().count("once") == 1
-    assert "once" in (tmp_path / "strix.log").read_text(encoding="utf-8")
+    assert "once" in (tmp_path / "reconcore.log").read_text(encoding="utf-8")
 
     teardown()
     assert len(_stderr_handlers(strix_logger)) == 1
