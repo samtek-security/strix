@@ -7,10 +7,13 @@ import contextlib
 import functools
 import logging
 import os
+import sys
 import warnings
 from contextvars import ContextVar
 from pathlib import Path  # noqa: TC003  used at runtime by ``setup_scan_logging``
 from typing import TYPE_CHECKING
+
+from strix.llm import redaction
 
 
 if TYPE_CHECKING:
@@ -65,6 +68,19 @@ _STREAM_TAG = "_strix_stream_handler"
 
 # ``openai.agents`` is the openai-agents SDK's canonical logger root.
 _TRACKED_ROOTS: tuple[str, ...] = ("strix", "openai.agents")
+
+# Roots whose sub-WARNING chatter is kept off the stderr stream handler.
+_STDOUT_QUIET_ROOTS: frozenset[str] = frozenset({"openai.agents"})
+
+
+class _StdoutQuietFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True
+        return not any(
+            record.name == root or record.name.startswith(root + ".")
+            for root in _STDOUT_QUIET_ROOTS
+        )
 
 
 class _PtyThresholdFilter(logging.Filter):
@@ -127,6 +143,7 @@ def _debug_enabled(debug: bool | None) -> bool:
 def _stream_handler(debug: bool) -> logging.Handler:
     handler = _CurrentStderrHandler(logging.DEBUG if debug else logging.ERROR)
     handler.setFormatter(logging.Formatter(_FORMAT, datefmt=_DATEFMT))
+    handler.addFilter(redaction.RedactingFilter())
     handler.addFilter(_ReconContextFilter())
     handler.addFilter(_StdoutQuietFilter())
     setattr(handler, _STREAM_TAG, True)
@@ -151,7 +168,7 @@ def setup_scan_logging(run_dir: Path, *, debug: bool | None = None) -> Callable[
     """Attach scan-scoped handlers; return a teardown callable.
 
     Args:
-        run_dir: Per-scan output directory. ``{run_dir}/recon.log`` is
+        run_dir: Per-scan output directory. ``{run_dir}/reconcore.log`` is
             created if missing and opened append-mode (so re-runs of the
             same scan_id concatenate cleanly).
         debug: When ``True``, stderr handler runs at DEBUG instead of
@@ -173,6 +190,7 @@ def setup_scan_logging(run_dir: Path, *, debug: bool | None = None) -> Callable[
     file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(_FORMAT, datefmt=_DATEFMT))
+    file_handler.addFilter(redaction.RedactingFilter())
     file_handler.addFilter(_ReconContextFilter())
     setattr(file_handler, _HANDLER_TAG, True)
 

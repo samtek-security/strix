@@ -60,6 +60,7 @@ from strix.core.inputs import (
 )
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.sessions import open_agent_session
+from strix.llm import redaction
 from strix.report.state import get_global_report_state
 from strix.runtime import session_manager
 from strix.telemetry import set_scan_phase
@@ -220,6 +221,23 @@ def _compose_root_instructions_override(
         "</root_scan_instructions_override>\n\n"
         f"{render_scope_prompt(system_prompt_context)}"
     )
+
+
+def _sanitized_failure(exc: BaseException) -> BaseException:
+    """A redacted stand-in for an exception leaving the engine.
+
+    A fatal scan exception re-raised from here crosses into the Temporal
+    activity and the control plane, where its message and cause chain are
+    serialized to disk. A provider exception can carry a key in that text, so
+    the engine never lets the raw object out: the message is scrubbed, the type
+    is preserved when it can be reconstructed, and the cause/context chain is
+    dropped (raise ... from None at the call site).
+    """
+    safe = redaction.redact_text(str(exc)) or type(exc).__name__
+    try:
+        return type(exc)(safe)
+    except Exception:  # noqa: BLE001 - some exceptions need more than a message
+        return RuntimeError(f"{type(exc).__module__}.{type(exc).__name__}: {safe}")
 
 
 async def _run_scan(
@@ -729,12 +747,14 @@ async def _run_scan(
             with contextlib.suppress(Exception):
                 await coordinator.set_status(root_id, "running")
         raise
-    except BaseException:
+    except BaseException as exc:
         logger.exception("Strix scan %s failed", scan_id)
         if root_id is not None:
             with contextlib.suppress(Exception):
                 await coordinator.set_status(root_id, "failed")
-        raise
+        # Scrub before the exception leaves the engine for the Temporal activity
+        # and control plane; drop the cause chain so no raw text rides along.
+        raise _sanitized_failure(exc) from None
     finally:
         configure_spill_writer(None)
         # Settle descendants before closing sessions: on a clean finish a child
@@ -770,8 +790,8 @@ async def _run_scan(
                         ),
                         timeout=_COVERAGE_DEADLINE_S,
                     )
-                except asyncio.TimeoutError:
-                    logger.error(
+                except TimeoutError:
+                    logger.exception(
                         "coverage on exit exceeded its %.0fs deadline for scan %s; "
                         "abandoning it and tearing down (the engine records the "
                         "missing/partial coverage)",
@@ -869,7 +889,7 @@ async def _run_coverage_on_exit(
         _ensure_engine_on_path()
         from recon_engine.backends.gateway_capture_client import persist_gateway_coverage
         from recon_engine.coverage_worker import run_authz_worker
-    except Exception:
+    except Exception:  # noqa: BLE001 - any import failure degrades to a plain scan
         logger.warning(
             "coverage on exit requested but recon_engine is not importable; "
             "skipping (install the engine or run via run_strix_scan for a plain scan)",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from dataclasses import dataclass
@@ -28,7 +29,8 @@ from openai.types.responses import Response, ResponseCompletedEvent, ResponseCre
 from openai.types.responses.response import IncompleteDetails
 
 from strix.config import codex, models
-from strix.llm import request_log
+from strix.llm import redaction, request_log
+from strix.telemetry.logging import setup_scan_logging
 
 
 if TYPE_CHECKING:
@@ -423,7 +425,7 @@ def test_log_line_names_upstream_recorded_during_attempt(
 # --------------------------------------------------------------------------- #
 
 
-def test_response_headers_keep_everything_as_sent() -> None:
+def test_response_headers_keep_everything_but_redact_credentials() -> None:
     picked = request_log.headers_from_response(
         {
             "llm_provider-anthropic-ratelimit-requests-remaining": "49",
@@ -442,6 +444,8 @@ def test_response_headers_keep_everything_as_sent() -> None:
             "x-object": {"not": "a string"},
         }
     )
+    # Benign headers pass through; credential-bearing ones are redacted by the
+    # enclave scrub applied at construction.
     assert picked == {
         "anthropic-ratelimit-requests-remaining": "49",
         "anthropic-ratelimit-tokens-reset": "2026-09-19T12:00:00Z",
@@ -452,8 +456,8 @@ def test_response_headers_keep_everything_as_sent() -> None:
         "cf-ray": "8f0-FRA",
         "x-should-retry": "false",
         "openai-processing-ms": "812",
-        "www-authenticate": "Bearer realm=x",
-        "set-cookie": "__cf_bm=abc",
+        "www-authenticate": redaction.REDACTED,
+        "set-cookie": redaction.REDACTED,
         "x-vendor-new-header": "kept without a code change",
     }
     assert request_log.headers_from_response({}) is None
@@ -590,11 +594,13 @@ def test_litellm_success_carries_sizes_finish_reason_headers_and_details() -> No
         "anthropic-organization-id": "org-123",
     }
     assert event.details is not None
+    # The credential-named nested field is redacted at construction; the rest
+    # of the request detail is unchanged.
     assert event.details["request"] == {
         "max_tokens": 4096,
         "temperature": 0,
         "tools": [{"name": "a"}, {"name": "b"}],
-        "extra_headers": {"authorization": "Bearer x"},
+        "extra_headers": {"authorization": redaction.REDACTED},
         "message_count": 1,
         "tool_count": 2,
     }
@@ -1075,7 +1081,8 @@ async def test_openai_route_success_reads_request_id_and_headers_from_the_wire(
     assert event.response_headers is not None
     assert event.response_headers["openai-processing-ms"] == "812"
     assert event.response_headers["x-ratelimit-remaining-tokens"] == "999"
-    assert event.response_headers["set-cookie"] == "__cf_bm=abc"
+    # The enclave scrub (emit) redacts session-cookie values before any sink.
+    assert event.response_headers["set-cookie"] == redaction.REDACTED
 
 
 @pytest.mark.asyncio
@@ -1499,3 +1506,356 @@ def test_codex_client_is_observed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(codex, "get_valid_token", lambda: ("access", "acct"))
     client = codex.build_openai_client()
     assert request_log.record_http_reply in client._client.event_hooks["response"]
+
+
+# --------------------------------------------------------------------------- #
+# Enclave redaction (A-boundary): no provider secret reaches a sink or the log #
+# --------------------------------------------------------------------------- #
+
+# A key that matches no shape, so only literal registration can catch it.
+_OPAQUE_SECRET = "corp-session-DEADBEEFCAFE-0123456789"  # noqa: S105 - fixture token
+
+
+@pytest.fixture
+def _clear_registered_secrets() -> Iterator[None]:
+    before = set(redaction._literal_secrets)
+    try:
+        yield
+    finally:
+        redaction._literal_secrets.clear()
+        redaction._literal_secrets.update(before)
+
+
+def test_redact_text_scrubs_known_secret_shapes() -> None:
+    cases = [
+        "Incorrect API key provided: sk-ant-api03-ABCdef0123456789ghijkl",
+        "key sk-proj-ABCdef0123456789 rejected",
+        "google key AIzaSyA0123456789abcdef_ghijklmnop",
+        "oauth ya29.a0ARbodytokenvalue0123456789",
+        "aws AKIAIOSFODNN7EXAMPLE denied",
+        "token xoxb-1234567890-abcdefghij",
+        "Authorization: Bearer eyJ0eXurceAbcdef.payload.sig",
+    ]
+    for text in cases:
+        out = redaction.redact_text(text)
+        assert redaction.REDACTED in out, text
+    scrubbed = redaction.redact_text(cases[0])
+    assert "sk-ant-api03-ABCdef0123456789ghijkl" not in scrubbed
+
+
+def test_redact_text_keeps_non_secret_text() -> None:
+    # The provider's own non-secret words must survive so triage still works.
+    for prose in (
+        "invalid x-api-key",
+        "Output blocked by content filtering policy",
+        "task-scheduling failed on disk-usage and risk-level checks",
+        "Bearer authentication required",
+        "Basic authentication required",
+    ):
+        assert redaction.redact_text(prose) == prose, prose
+
+
+def test_redact_text_scrubs_credential_assignments_and_schemes() -> None:
+    cases = {
+        "Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l": "YWxhZGRpbjpvcGVuc2VzYW1l",
+        "Authorization: Bearer eyJhbGci.payload123.sig456": "eyJhbGci.payload123.sig456",
+        "Cookie: session=opaque-session-9f8e7d6c": "opaque-session-9f8e7d6c",
+        "set-cookie: __Secure-3PSID=aQb1Cc2Dd3": "aQb1Cc2Dd3",
+        'error body {"access_token": "abc123def456ghi"}': "abc123def456ghi",
+        "client_secret=super-long-client-secret-value": "super-long-client-secret-value",
+    }
+    for text, secret in cases.items():
+        out = redaction.redact_text(text)
+        assert secret not in out, text
+        assert redaction.REDACTED in out, text
+
+
+def test_register_secret_redacts_an_opaque_literal(_clear_registered_secrets: None) -> None:
+    redaction.register_secret(_OPAQUE_SECRET)
+    out = redaction.redact_text(f"auth failed for {_OPAQUE_SECRET} on tenant x")
+    assert _OPAQUE_SECRET not in out
+    assert redaction.REDACTED in out
+    # Too-short values are ignored (they would redact ordinary prose).
+    redaction.register_secret("ab")
+    assert redaction.redact_text("ab cd") == "ab cd"
+
+
+def test_redact_headers_strips_credential_headers_keeps_benign() -> None:
+    out = redaction._redact_headers(
+        {
+            "authorization": "Bearer eyJsecretvalue",
+            "set-cookie": "session=abc123",
+            "x-api-key": "sk-ant-secretkeyvalue",
+            "x-request-id": "req_ok",
+            "openai-processing-ms": "812",
+        }
+    )
+    assert out["authorization"] == redaction.REDACTED
+    assert out["set-cookie"] == redaction.REDACTED
+    assert out["x-api-key"] == redaction.REDACTED
+    assert out["x-request-id"] == "req_ok"
+    assert out["openai-processing-ms"] == "812"
+
+
+def test_enclave_safe_scrubs_free_form_but_keeps_triage_handles() -> None:
+    event = request_log.LlmRequestEvent(
+        call_id="c1",
+        route="litellm",
+        provider="anthropic",
+        model="claude-sonnet-4-5",
+        api_host="api.anthropic.com",
+        streaming=False,
+        outcome="error",
+        status_code=401,
+        provider_request_id="req_triage",
+        response_id=None,
+        error_type="AuthenticationError",
+        error_message="Incorrect API key provided: sk-ant-api03-LEAK0123456789abcdef",
+        started_at=datetime(2026, 10, 21, tzinfo=UTC),
+        finished_at=datetime(2026, 10, 21, tzinfo=UTC),
+        duration_ms=12,
+        response_headers={"authorization": "Bearer eyJleak", "x-request-id": "req_triage"},
+        details={"error": {"body": {"message": "key sk-ant-api03-LEAK0123456789abcdef"}}},
+    )
+    safe = redaction.enclave_safe(event)
+    blob = str(safe.to_dict())
+    assert "sk-ant-api03-LEAK0123456789abcdef" not in blob
+    assert "eyJleak" not in blob
+    # Triage handles and scalar telemetry are untouched.
+    assert safe.error_type == "AuthenticationError"
+    assert safe.status_code == 401
+    assert safe.provider_request_id == "req_triage"
+    assert safe.duration_ms == 12
+    assert safe.response_headers["x-request-id"] == "req_triage"
+    assert safe.response_headers["authorization"] == redaction.REDACTED
+
+
+def test_enclave_safe_fails_closed_when_redaction_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(_text: str) -> str:
+        raise RuntimeError("redactor down")
+
+    monkeypatch.setattr(redaction, "redact_text", boom)
+    event = request_log.LlmRequestEvent(
+        call_id="c1",
+        route="litellm",
+        provider="anthropic",
+        model="m",
+        api_host="h",
+        streaming=False,
+        outcome="error",
+        status_code=500,
+        provider_request_id="req_x",
+        response_id=None,
+        error_type="Boom",
+        error_message="secret sk-ant-api03-LEAK0123456789abcdef",
+        started_at=datetime(2026, 10, 21, tzinfo=UTC),
+        finished_at=datetime(2026, 10, 21, tzinfo=UTC),
+        duration_ms=1,
+        details={"error": {"body": {"message": "sk-ant-api03-LEAK0123456789abcdef"}}},
+    )
+    safe = redaction.enclave_safe(event)
+    blob = str(safe.to_dict())
+    assert "sk-ant-api03-LEAK0123456789abcdef" not in blob
+    assert safe.error_message == redaction.REDACTED
+    assert safe.details is None
+    # The triage handles still survive the fail-closed path.
+    assert safe.error_type == "Boom"
+    assert safe.status_code == 500
+
+
+def _read_scan_log(run_dir: Any) -> str:
+    log_path = run_dir / "reconcore.log"
+    if not log_path.exists():
+        return ""
+    for handler in logging.getLogger("strix").handlers:
+        with contextlib.suppress(Exception):
+            handler.flush()
+    return log_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_litellm_secret_reaches_neither_scan_log_nor_sink(
+    captured: list[LlmRequestEvent],
+    tmp_path: Any,
+    _clear_registered_secrets: None,
+) -> None:
+    redaction.register_secret(_OPAQUE_SECRET)
+    body = (
+        '{"type":"error","error":{"message":"Incorrect API key provided: '
+        f"sk-ant-api03-LEAK0123456789abcdef; tenant {_OPAQUE_SECRET}"
+        '"},"request_id":"req_leak01"}'
+    )
+    exc = _anthropic_error(401, body, {"request-id": "req_leak01"})
+
+    teardown = setup_scan_logging(tmp_path, debug=True)
+    try:
+        # Real construction path, then the real delivery path (emit via dispatch).
+        request_log._dispatch(_anthropic_kwargs(exc), None, None, None, outcome="error")
+    finally:
+        log_text = _read_scan_log(tmp_path)
+        teardown()
+
+    assert len(captured) == 1
+    delivered = str(captured[0].to_dict())
+    for secret in ("sk-ant-api03-LEAK0123456789abcdef", _OPAQUE_SECRET):
+        assert secret not in delivered, "secret reached a registered sink"
+        assert secret not in log_text, "secret reached reconcore.log"
+    # The attempt is still logged and triageable.
+    assert "req_leak01" in log_text
+    assert captured[0].status_code == 401
+    assert captured[0].provider_request_id == "req_leak01"
+
+
+@pytest.mark.asyncio
+async def test_native_route_secret_reaches_neither_scan_log_nor_sink(
+    captured: list[LlmRequestEvent],
+    tmp_path: Any,
+) -> None:
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+    body = '{"error":{"message":"Incorrect API key: sk-proj-LEAK0123456789abcdef"}}'
+    response = httpx.Response(
+        401,
+        request=request,
+        headers={
+            "x-request-id": "req_native_leak",
+            "set-cookie": "session=SECRETSESSIONabc123",
+            "www-authenticate": "Bearer error=invalid_token",
+        },
+        text=body,
+    )
+    exc = APIStatusError("unauthorized", response=response, body=None)
+    model = request_log.RequestLoggingModel(
+        _Inner(exc=exc), model_name="gpt-5", provider="openai", base_url=None
+    )
+
+    teardown = setup_scan_logging(tmp_path, debug=True)
+    try:
+        with pytest.raises(APIStatusError):
+            await model.get_response(*_CALL_ARGS, **_CALL_KWARGS)
+    finally:
+        log_text = _read_scan_log(tmp_path)
+        teardown()
+
+    assert len(captured) == 1
+    delivered = str(captured[0].to_dict())
+    for secret in ("sk-proj-LEAK0123456789abcdef", "SECRETSESSIONabc123"):
+        assert secret not in delivered, "secret reached a registered sink"
+        assert secret not in log_text, "secret reached reconcore.log"
+    assert captured[0].status_code == 401
+    assert captured[0].provider_request_id == "req_native_leak"
+    assert captured[0].response_headers["set-cookie"] == redaction.REDACTED
+
+
+def test_enclave_safe_scrubs_ids_and_mapping_keys() -> None:
+    event = request_log.LlmRequestEvent(
+        call_id="c1",
+        route="litellm",
+        provider="anthropic",
+        model="m",
+        api_host="h",
+        streaming=False,
+        outcome="error",
+        status_code=500,
+        provider_request_id="sk-ant-api03-LEAKINID0123456789",
+        response_id="resp-sk-ant-api03-LEAKINRESP0123456789",
+        error_type="X",
+        error_message=None,
+        started_at=datetime(2026, 10, 21, tzinfo=UTC),
+        finished_at=datetime(2026, 10, 21, tzinfo=UTC),
+        duration_ms=1,
+        details={"error": {"sk-ant-api03-LEAKASKEY0123456789": "value"}},
+    )
+    safe = redaction.enclave_safe(event)
+    blob = str(safe.to_dict())
+    assert "LEAKINID" not in blob
+    assert "LEAKINRESP" not in blob
+    assert "LEAKASKEY" not in blob
+
+
+def test_failure_text_is_redacted(_clear_registered_secrets: None) -> None:
+    redaction.register_secret(_OPAQUE_SECRET)
+    exc = RuntimeError(
+        f"auth failed key sk-ant-api03-LEAK0123456789abcdef tenant {_OPAQUE_SECRET}"
+    )
+    text = request_log.failure_text(exc)
+    assert "sk-ant-api03-LEAK0123456789abcdef" not in text
+    assert _OPAQUE_SECRET not in text
+    assert redaction.REDACTED in text
+
+
+def test_clean_error_message_redacts_before_truncation(_clear_registered_secrets: None) -> None:
+    redaction.register_secret(_OPAQUE_SECRET)
+    # Push the opaque secret right up against the truncation cap: redaction must
+    # run first, or a clipped literal would survive.
+    filler = "x" * (request_log.ERROR_MESSAGE_MAX_CHARS - 10)
+    exc = RuntimeError(f"{filler}{_OPAQUE_SECRET}")
+    message = request_log.clean_error_message(exc)
+    assert _OPAQUE_SECRET not in message
+    assert len(message) <= request_log.ERROR_MESSAGE_MAX_CHARS
+
+
+def test_redacting_filter_scrubs_message_and_traceback(
+    tmp_path: Any, _clear_registered_secrets: None
+) -> None:
+    def _boom() -> None:
+        raise RuntimeError(f"boom Authorization: Bearer eyJleak.part2.part3 and {_OPAQUE_SECRET}")
+
+    redaction.register_secret(_OPAQUE_SECRET)
+    teardown = setup_scan_logging(tmp_path, debug=True)
+    log = logging.getLogger("strix.core.execution")
+    try:
+        log.warning("provider error: key sk-proj-LEAK0123456789abcdef for %s", _OPAQUE_SECRET)
+        try:
+            _boom()
+        except RuntimeError:
+            log.exception("agent run failed")
+    finally:
+        log_text = _read_scan_log(tmp_path)
+        teardown()
+
+    for secret in ("sk-proj-LEAK0123456789abcdef", "eyJleak.part2.part3", _OPAQUE_SECRET):
+        assert secret not in log_text, secret
+    # The record and its traceback are still present, just scrubbed.
+    assert "provider error" in log_text
+    assert "agent run failed" in log_text
+    assert "RuntimeError" in log_text
+    assert redaction.REDACTED in log_text
+
+
+def test_redact_text_handles_single_quotes_and_multi_cookie() -> None:
+    out = redaction.redact_text("{'access_token': 'opaqueProviderCredential123'}")
+    assert "opaqueProviderCredential123" not in out
+    # A cookie header owns the rest of its line: both values must go.
+    out = redaction.redact_text("Cookie: a=opaqueOne123; b=opaqueTwo456")
+    assert "opaqueOne123" not in out
+    assert "opaqueTwo456" not in out
+
+
+def test_redact_text_scrubs_a_secret_used_as_a_header_name(
+    _clear_registered_secrets: None,
+) -> None:
+    # Mixed case: the header name is normalized to lowercase before matching,
+    # so the scrub must also check the original key or the literal is missed.
+    secret = "X-Tenant-9F8E7D6C5B4A3210"  # noqa: S105 - fixture token
+    redaction.register_secret(secret)
+    picked = request_log.headers_from_response({secret: "1", "x-request-id": "req_ok"})
+    assert picked is not None
+    assert secret not in picked
+    assert secret.lower() not in picked
+    assert picked["x-request-id"] == "req_ok"
+
+
+def test_bounded_value_redacts_non_string_fallback_before_truncation(
+    _clear_registered_secrets: None,
+) -> None:
+    secret = "opaque-fallback-secret-1234567890"  # noqa: S105 - fixture token
+    redaction.register_secret(secret)
+
+    class _Weird:
+        def __str__(self) -> str:
+            return f"{'x' * (request_log.DETAILS_MAX_STRING - 5)}{secret}"
+
+    out = request_log._bounded_value(_Weird(), 0)
+    assert secret not in str(out)

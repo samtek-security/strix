@@ -46,6 +46,8 @@ from openai import APIError, APIStatusError
 from openai.types.responses import ResponseCompletedEvent
 from pydantic import BaseModel
 
+from strix.llm import redaction
+
 
 if TYPE_CHECKING:
     from agents.agent_output import AgentOutputSchemaBase
@@ -226,6 +228,15 @@ def unregister_sink(sink: LlmRequestSink) -> None:
 
 
 def emit(event: LlmRequestEvent) -> None:
+    # The enclave boundary: scrub provider secrets from the event's free-form
+    # fields before any sink (the log line, the run.json record, a deployment's
+    # own sink) sees it. Fail closed - a redaction failure drops the event
+    # rather than letting a raw secret reach a sink.
+    try:
+        event = redaction.enclave_safe(event)
+    except Exception:
+        logger.exception("request log redaction failed; dropping event")
+        return
     for sink in tuple(_sinks):
         try:
             sink(event)
@@ -234,7 +245,9 @@ def emit(event: LlmRequestEvent) -> None:
 
 
 def clean_error_message(exc: BaseException) -> str:
-    message = str(exc).strip() or type(exc).__name__
+    # Redact before truncation: a literal secret clipped at the cap would no
+    # longer match the delivery-time scrub (redaction.enclave_safe).
+    message = redaction.redact_text(str(exc).strip()) or type(exc).__name__
     if len(message) > ERROR_MESSAGE_MAX_CHARS:
         message = message[: ERROR_MESSAGE_MAX_CHARS - 1] + "…"
     return message
@@ -328,7 +341,19 @@ def headers_from_response(headers: Mapping[str, Any] | None) -> dict[str, str] |
         name = _normalize_header_name(key)
         if not name:
             continue
-        picked.setdefault(name, text[:HEADER_VALUE_MAX_CHARS])
+        # Redact before the length cap: a credential-bearing header value or a
+        # clipped secret must never survive into the event. The name is scrubbed
+        # too, checking the ORIGINAL key (case preserved, so a registered literal
+        # still matches) as well as its normalized form.
+        if redaction.is_sensitive_name(name):
+            safe_value = redaction.REDACTED
+        else:
+            safe_value = redaction.redact_text(text)[:HEADER_VALUE_MAX_CHARS]
+        if redaction.redact_text(str(key)) != str(key) or redaction.redact_text(name) != name:
+            safe_name = redaction.REDACTED
+        else:
+            safe_name = name
+        picked.setdefault(safe_name, safe_value)
         if len(picked) >= HEADERS_MAX_COUNT:
             break
     return picked or None
@@ -338,7 +363,8 @@ def _bounded_value(value: object, depth: int) -> object:  # noqa: PLR0911
     if value is None or isinstance(value, bool | int | float):
         return value
     if isinstance(value, str):
-        return value[:DETAILS_MAX_STRING]
+        # Redact before the length cap so a clipped secret cannot survive.
+        return redaction.redact_text(value)[:DETAILS_MAX_STRING]
     if isinstance(value, datetime | date):
         return value.isoformat()
     if depth >= DETAILS_MAX_DEPTH:
@@ -351,17 +377,24 @@ def _bounded_value(value: object, depth: int) -> object:  # noqa: PLR0911
         out: dict[str, object] = {}
         for raw_key, item in cast("Mapping[object, object]", value).items():
             key = str(raw_key)
-            cleaned = _bounded_value(item, depth + 1)
+            # A credential-named field (access_token, authorization, ...) is
+            # redacted wholesale; other keys and values pass through the scrub.
+            cleaned = (
+                redaction.REDACTED
+                if redaction.is_sensitive_name(key)
+                else _bounded_value(item, depth + 1)
+            )
             if cleaned is None or cleaned in ({}, []):
                 continue
-            out[key[:DETAILS_MAX_STRING]] = cleaned
+            out[redaction.redact_text(key)[:DETAILS_MAX_STRING]] = cleaned
             if len(out) >= DETAILS_MAX_ITEMS:
                 break
         return out
     if isinstance(value, Sequence | set | frozenset):
         items = list(cast("Sequence[object]", value))[:DETAILS_MAX_ITEMS]
         return [_bounded_value(item, depth + 1) for item in items]
-    return str(value)[:DETAILS_MAX_STRING]
+    # Redact the str() fallback before the cap, as for a plain string above.
+    return redaction.redact_text(str(value))[:DETAILS_MAX_STRING]
 
 
 def bound_details(value: object) -> dict[str, Any] | None:
@@ -502,7 +535,7 @@ def _litellm_usage(response: object) -> dict[str, int | None]:
 
 def _finish_reason(value: object) -> str | None:
     text = _str_or_none(value)
-    return text[:FINISH_REASON_MAX_CHARS] if text else None
+    return redaction.redact_text(text)[:FINISH_REASON_MAX_CHARS] if text else None
 
 
 def _litellm_finish_reason(response: object) -> str | None:
@@ -827,7 +860,7 @@ def _litellm_failure(
     error_type = error_type or _str_or_none(error_info.get("error_class")) or "Exception"
     if error_message is None:
         raw = _str_or_none(error_info.get("error_message")) or _str_or_none(slo.get("error_str"))
-        error_message = raw[:ERROR_MESSAGE_MAX_CHARS] if raw else error_type
+        error_message = redaction.redact_text(raw)[:ERROR_MESSAGE_MAX_CHARS] if raw else error_type
     provider = _str_or_none(error_info.get("llm_provider"))
     if provider:
         error.setdefault("llm_provider", provider)
@@ -1424,7 +1457,9 @@ def failure_text(exc: BaseException) -> str:
     request_id = request_id or request_id_from_reply(_exception_headers(exc), text)
     if request_id and request_id not in text:
         text = f"{text} [provider request id: {request_id}]"
-    return text
+    # This feeds the agent's failure status, which is snapshotted to disk and
+    # surfaced to the control plane: scrub before it leaves the engine.
+    return redaction.redact_text(text)
 
 
 __all__ = [

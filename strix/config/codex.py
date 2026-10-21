@@ -356,12 +356,13 @@ def build_openai_client() -> AsyncOpenAI:
     import httpx
     from openai import AsyncOpenAI
 
-    from strix.llm import request_log
+    from strix.llm import redaction, request_log
 
-    get_valid_token()  # fail fast at configure time if the sign-in is dead
+    redaction.register_secret(get_valid_token()[0])  # fail fast if the sign-in is dead
 
     async def _auth_hook(request: httpx.Request) -> None:
         access, account_id = await asyncio.to_thread(get_valid_token)
+        redaction.register_secret(access)  # a refresh mints a new token each time
         request.headers["Authorization"] = f"Bearer {access}"
         request.headers["chatgpt-account-id"] = account_id
 

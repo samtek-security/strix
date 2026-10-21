@@ -44,7 +44,7 @@ from strix.config.loader import load_settings
 from strix.config.tool_call_arguments import repair_input
 from strix.config.tool_call_ids import TurnCallIdRewriter, dedupe_input
 from strix.config.tool_call_limits import TurnToolCallLimiter
-from strix.llm import request_log
+from strix.llm import redaction, request_log
 
 
 if TYPE_CHECKING:
@@ -701,6 +701,23 @@ DEFAULT_MODEL_RETRY = ModelRetrySettings(
 )
 
 
+def _register_provider_secrets(settings: Settings) -> None:
+    """Register the exact credentials this process holds so the request-log
+    redactor can scrub them even when a provider echoes them without a
+    recognizable prefix. The subscription-backend access token is registered
+    where it is minted and refreshed, in the subscription auth module."""
+    for cfg in (settings.llm, settings.dedupe):
+        redaction.register_secret(getattr(cfg, "api_key", None))
+        for name, value in (getattr(cfg, "extra_headers", None) or {}).items():
+            if not redaction.is_sensitive_name(name) or not isinstance(value, str):
+                continue
+            redaction.register_secret(value)
+            # Register the token alone too, so "Authorization: Bearer <t>" and a
+            # bare echo of <t> are both caught.
+            _, _, token = value.partition(" ")
+            redaction.register_secret(token)
+
+
 def configure_sdk_model_defaults(settings: Settings) -> None:
     """Apply Strix config to SDK-native defaults."""
     llm = settings.llm
@@ -708,6 +725,7 @@ def configure_sdk_model_defaults(settings: Settings) -> None:
     from strix.report.state import record_llm_request
 
     request_log.install()
+    _register_provider_secrets(settings)
     if settings.telemetry.run_record_timings:
         request_log.register_sink(record_llm_request)
     if codex.subscription_model(llm.model):

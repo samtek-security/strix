@@ -1069,14 +1069,20 @@ def record_openrouter_provider(provider: Any, usage: Any) -> None:
     and prompt caching differ, so this is what shows where a scan's tokens went.
     """
     # Deferred: request_log pulls in the agents SDK, which strix.report must not import.
+    from strix.llm import redaction
     from strix.llm.request_log import current_call_context
 
     report_state = get_global_report_state()
     if report_state is None or not isinstance(usage, dict):
         return
     details = usage.get("prompt_tokens_details")
+    # The provider string becomes a usage-ledger key that reaches run.json and
+    # telemetry; scrub it so a pathological value cannot carry a secret out.
+    safe_provider = (
+        redaction.redact_text(provider) if isinstance(provider, str) and provider else "unknown"
+    )
     report_state.record_llm_provider(
-        provider if isinstance(provider, str) and provider else "unknown",
+        safe_provider,
         agent_id=current_call_context().agent_id,
         input_tokens=int(_number(usage.get("prompt_tokens"))),
         cached_tokens=int(_number(details.get("cached_tokens")))
