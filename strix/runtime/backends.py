@@ -36,7 +36,7 @@ async def _docker_backend(
 ) -> tuple[Any, Any]:
     """Bring up a session backed by the local Docker daemon.
 
-    Uses :class:`ReconDockerSandboxClient` to inject NET_ADMIN /
+    Uses :class:`StrixDockerSandboxClient` to inject NET_ADMIN /
     NET_RAW caps + ``host.docker.internal`` host-gateway, on the same
     endpoint the startup check resolved (``DOCKER_HOST``, docker context,
     default socket). Imports ``docker`` lazily so deployments that target
@@ -55,11 +55,11 @@ async def _docker_backend(
     """
     from agents.sandbox.sandboxes.docker import DockerSandboxClientOptions
 
-    from strix.runtime.docker_client import ReconDockerSandboxClient
+    from strix.runtime.docker_client import StrixDockerSandboxClient
     from strix.runtime.docker_connection import connect_docker
 
-    client = ReconDockerSandboxClient(connect_docker())
-    client.recon_bind_mounts = bind_mounts or []
+    client = StrixDockerSandboxClient(connect_docker())
+    client.strix_bind_mounts = bind_mounts or []
     client.recon_scan_id = scan_id  # stamped onto the container's recon.scan_id label for the reaper
     client.recon_heartbeat_path = heartbeat_path  # recon.heartbeat_path label (liveness signal)
     options = DockerSandboxClientOptions(image=image, exposed_ports=exposed_ports)
@@ -215,7 +215,9 @@ async def _contained_docker_backend(
     }
     capture_enabled = os.environ.get("RECON_GATEWAY_CAPTURE", "").strip().lower() in ("1", "true", "yes")
     if capture_enabled:
-        from strix.runtime.capture_token import capture_capability_token
+        # The token helper lives with the Recon wrapper's Kubernetes backend,
+        # which shares it; this path only runs inside the Recon engine.
+        from recon_engine.backends.capture_token import capture_capability_token
 
         # Fail closed: capture with no session secret would mint a publicly-computable token
         # (HMAC over an empty key), regressing the unguessable secret the gateway used before.
@@ -270,7 +272,7 @@ async def _contained_docker_backend(
 
     # 4. Agent, contained: joined to the internal network, caps dropped, no host route.
     client = ReconDockerSandboxClient(dc)
-    client.recon_bind_mounts = bind_mounts or []
+    client.strix_bind_mounts = bind_mounts or []
     client.recon_scan_id = scan_id
     client.recon_heartbeat_path = heartbeat_path
     client.recon_contained = True
@@ -363,6 +365,8 @@ _BACKENDS: dict[str, SandboxBackend] = {
     "docker-contained": _contained_docker_backend,
 }
 
+_BIND_MOUNT_BACKENDS: set[str] = {"docker", "docker-contained"}
+
 
 def effective_backend_name(name: str) -> str:
     """Resolve ``name`` applying the RECON_CONTAINED_EGRESS upgrade rule."""
@@ -390,15 +394,30 @@ def get_backend(name: str) -> SandboxBackend:
     return backend
 
 
-def register_backend(name: str, backend: SandboxBackend) -> None:
+def register_backend(
+    name: str,
+    backend: SandboxBackend,
+    *,
+    supports_bind_mounts: bool = False,
+) -> None:
     """Register a custom backend under ``name``.
 
     Intended for downstream users who ship their own runtime — register
     before any ``session_manager.create_or_reuse`` call. Re-registering
-    an existing name overwrites the prior entry.
+    an existing name overwrites the prior entry. ``supports_bind_mounts``
+    defaults to False: a remote runtime cannot see the caller's filesystem, so
+    it is handed local sources as manifest entries to upload instead.
     """
     _BACKENDS[name] = backend
-    logger.info("Registered sandbox backend: %s", name)
+    if supports_bind_mounts:
+        _BIND_MOUNT_BACKENDS.add(name)
+    else:
+        _BIND_MOUNT_BACKENDS.discard(name)
+    logger.info("Registered sandbox backend: %s (bind mounts: %s)", name, supports_bind_mounts)
+
+
+def backend_supports_bind_mounts(name: str) -> bool:
+    return name in _BIND_MOUNT_BACKENDS
 
 
 def supported_backends() -> list[str]:

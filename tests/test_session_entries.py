@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Tests for how local sources reach the sandbox: bind mounts or manifest upload."""
 
 from __future__ import annotations
@@ -65,14 +66,12 @@ def test_git_dir_is_remounted_read_only_when_protected(tmp_path: Path) -> None:
 
 def test_agent_instruction_dirs_are_protected_too(tmp_path: Path) -> None:
     (tmp_path / ".agents").mkdir()
-    (tmp_path / ".codex").mkdir()
 
     mounts = build_bind_mounts([_source("repo", str(tmp_path), protect_metadata=True)])
 
     assert [(m["target"], m["read_only"]) for m in mounts] == [
         ("/workspace/repo", False),
         ("/workspace/repo/.agents", True),
-        ("/workspace/repo/.codex", True),
     ]
 
 
@@ -411,7 +410,9 @@ async def test_extra_files_reach_every_backend_as_one_unpacked_archive(
         bundle = await session_manager.create_or_reuse(
             scan_id,
             image="img",
-            local_sources=[_source("repo", str(tmp_path))],
+            # Recon copies sources unless one asks to be mounted (the Docker
+            # daemon may be remote); ask, so the bind-capable case mounts.
+            local_sources=[{**_source("repo", str(tmp_path)), "mount": True}],
             extra_files=[
                 {"workspace_path": "/workspace/.strix/knowledge/org/notes.md", "content": "hi"},
                 {"workspace_path": "/workspace/repo/inside.txt", "content": b"x"},
