@@ -249,10 +249,8 @@ RUN set -eux; \
     test "$(dpkg-query -W -f='${Version}' libbrotli1)" = "1.2.0-4.1"; \
     node -e 'const z=require("zlib");z.brotliDecompressSync(z.brotliCompressSync(Buffer.from("ok")))'
 
-# Opengrep 1.31.0 (LGPL-2.1) replaces Semgrep for the agent's SAST skill:
-# checksummed release binary, and an offline community ruleset pinned by commit
-# and checksum, keeping only rule YAML and LICENSE and dropping rules marked
-# with a proprietary license.
+# Opengrep 1.31.0 (LGPL-2.1) replaces Semgrep for the agent's SAST skill, as a
+# checksummed release binary.
 RUN set -eux; \
     case "$(uname -m)" in \
         x86_64) OG_ARCH="x86"; OG_SHA="dbbe3c2058dbe600c449a8ba22ea79a1643a6660658400090d0323a8d0d31147" ;; \
@@ -264,18 +262,25 @@ RUN set -eux; \
     install -m 0755 /tmp/opengrep /usr/local/bin/opengrep; \
     rm -f /tmp/opengrep; \
     opengrep --version
+# The offline community ruleset is Semgrep, Inc.'s, licensed LGPL-2.1 plus a
+# Commons Clause that bars providing it to third parties for a fee, hosting
+# included. It stays out of the image unless the build opts in, once that use
+# is cleared. The Apache-2.0 Strix rules below always ship.
+ARG OPENGREP_COMMUNITY_RULES=0
 RUN set -eux; \
-    curl -fsSL -o /tmp/opengrep-rules.tgz "https://codeload.github.com/opengrep/opengrep-rules/tar.gz/f1d2b562b414783763fd02a6ed2736eaed622efa"; \
-    echo "9a5f1cd5c625418cc1c776120123e2d4371df9bb66e099426b17c3488e13619d  /tmp/opengrep-rules.tgz" | sha256sum -c; \
     mkdir -p /opt/opengrep-rules; \
-    tar -xzf /tmp/opengrep-rules.tgz --strip-components=1 -C /opt/opengrep-rules; \
-    rm -f /tmp/opengrep-rules.tgz; \
-    cd /opt/opengrep-rules; \
-    rm -rf .github scripts stats; \
-    find . -maxdepth 1 -type f ! -name LICENSE -delete; \
-    find . -mindepth 2 -type f \( ! \( -name '*.yaml' -o -name '*.yml' \) -o -name '*.test.yaml' -o -name '*.test.yml' -o -name '.*' \) -delete; \
-    grep -rlZ 'license: proprietary' . | xargs -0 -r rm -f; \
-    find . -type d -empty -delete; \
+    if [ "${OPENGREP_COMMUNITY_RULES}" = "1" ]; then \
+        curl -fsSL -o /tmp/opengrep-rules.tgz "https://codeload.github.com/opengrep/opengrep-rules/tar.gz/f1d2b562b414783763fd02a6ed2736eaed622efa"; \
+        echo "9a5f1cd5c625418cc1c776120123e2d4371df9bb66e099426b17c3488e13619d  /tmp/opengrep-rules.tgz" | sha256sum -c; \
+        tar -xzf /tmp/opengrep-rules.tgz --strip-components=1 -C /opt/opengrep-rules; \
+        rm -f /tmp/opengrep-rules.tgz; \
+        cd /opt/opengrep-rules; \
+        rm -rf .github scripts stats; \
+        find . -maxdepth 1 -type f ! -name LICENSE -delete; \
+        find . -mindepth 2 -type f \( ! \( -name '*.yaml' -o -name '*.yml' \) -o -name '*.test.yaml' -o -name '*.test.yml' -o -name '.*' \) -delete; \
+        grep -rlZ 'license: proprietary' . | xargs -0 -r rm -f; \
+        find . -type d -empty -delete; \
+    fi; \
     chmod -R a+rX /opt/opengrep-rules
 COPY containers/opengrep-rules/ /opt/opengrep-rules/strix/
 RUN chmod -R a+rX /opt/opengrep-rules/strix
