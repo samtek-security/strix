@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """``budget_policy="pause"``: agents park before a paid call and never hear about budgets."""
 
 from __future__ import annotations
@@ -212,6 +213,7 @@ class _Scan:
             name=f"recon-{child_id}",
             parent_id="root",
             task="probe things",
+            skills=[],
             initial_input=[],
             hooks=self.hooks,
         )
