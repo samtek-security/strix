@@ -52,6 +52,11 @@ ScopeAction = Literal["get", "list", "create", "update", "delete"]
 _CAIDO_CALL_LOCK = asyncio.Lock()
 
 
+async def resolve_proxy_client(ctx: RunContextWrapper) -> Client | None:
+    """The run's proxy client, waiting out a Caido bootstrap still in flight."""
+    return await _ctx_client(ctx)
+
+
 async def _ctx_client(ctx: RunContextWrapper) -> Client | None:
     inner: dict[str, Any] = ctx.context if isinstance(ctx.context, dict) else {}
     client: Client | CaidoBootstrapHandle | None = inner.get("caido_client")
@@ -75,6 +80,8 @@ _REQUEST_EXISTS_ATTEMPTS = 2
 
 
 async def _request_exists(client: Client, request_id: str) -> bool:
+    if caido_api.is_gateway_client(client):
+        return await client.view_request(request_id) is not None
     data = await client.graphql.query(_REQUEST_EXISTS_QUERY, {"id": request_id})
     return bool(data) and data.get("request") is not None
 
@@ -137,6 +144,21 @@ def _to_tool_json(value: Any) -> Any:
 def _no_client() -> str:
     return json.dumps(
         {"success": False, "error": "Caido client not available in run context"},
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+def _caido_only(name: str) -> str:
+    return json.dumps(
+        {
+            "success": False,
+            "error": (
+                f"{name} needs the in-sandbox Caido proxy, which contained egress replaces with "
+                "the gateway's capture store. list_requests and view_request still work; "
+                "resend traffic from the sandbox shell instead."
+            ),
+        },
         ensure_ascii=False,
         default=str,
     )
@@ -444,6 +466,8 @@ async def repeat_request(
     client = await _ctx_client(ctx)
     if client is None:
         return _no_client()
+    if caido_api.is_gateway_client(client):
+        return _caido_only("repeat_request")
     mods = modifications or {}
 
     async def _do(client: Client) -> dict[str, Any] | None:
@@ -526,6 +550,8 @@ async def list_sitemap(
     client = await _ctx_client(ctx)
     if client is None:
         return _no_client()
+    if caido_api.is_gateway_client(client):
+        return _caido_only("list_sitemap")
     scope_id = clean_optional(scope_id)
     parent_id = clean_optional(parent_id)
     try:
@@ -562,6 +588,8 @@ async def view_sitemap_entry(
     client = await _ctx_client(ctx)
     if client is None:
         return _no_client()
+    if caido_api.is_gateway_client(client):
+        return _caido_only("view_sitemap_entry")
     try:
         payload = await _call(
             client,
@@ -621,6 +649,8 @@ async def scope_rules(
     client = await _ctx_client(ctx)
     if client is None:
         return _no_client()
+    if caido_api.is_gateway_client(client):
+        return _caido_only("scope_rules")
 
     try:
         if action == "list":

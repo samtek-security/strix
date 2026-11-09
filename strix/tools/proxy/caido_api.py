@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Shared Caido proxy helpers and sandbox-importable ``caido_api`` module."""
 
 from __future__ import annotations
@@ -127,6 +128,16 @@ async def close_client() -> None:
     await client.aclose()
 
 
+def is_gateway_client(client: Any) -> bool:
+    """True for Recon's contained-egress capture client.
+
+    Under contained egress the agent's traffic is captured by the trusted
+    gateway, not an in-sandbox Caido. That client serves listing and viewing
+    in Caido's shapes but has no replay, sitemap or scope API.
+    """
+    return bool(getattr(client, "_is_gateway_capture", False))
+
+
 async def list_requests_with_client(
     client: CaidoClient,
     *,
@@ -137,6 +148,8 @@ async def list_requests_with_client(
     sort_order: SortOrder = "desc",
     scope_id: str | None = None,
 ) -> Any:
+    if is_gateway_client(client):
+        return await client.list_requests_connection(httpql_filter=httpql_filter, first=first)
     builder = client.request.list().first(first)
     if httpql_filter:
         builder = builder.filter(httpql_filter)
@@ -161,6 +174,8 @@ async def get_request_with_client(
     # Passing False for either causes pydantic validation to fail with
     # "Field required" on the missing raw field. Always request both —
     # the caller picks which one to surface via ``part``.
+    if is_gateway_client(client):
+        return await client.view_request(request_id, part=part)
     from caido_sdk_client.types import RequestGetOptions
 
     opts = RequestGetOptions(request_raw=True, response_raw=True)
