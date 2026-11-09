@@ -32,6 +32,7 @@ from strix.runtime.caido_handle import CaidoBootstrapHandle
 from strix.runtime.deferred_session import DeferredSandboxSession
 from strix.tools.exploitation import tool as exploitation
 from strix.tools.proxy import caido_api, tools
+from strix.tools.reporting import tool as reporting
 
 
 @dataclass
@@ -594,3 +595,27 @@ async def test_exploit_evidence_waits_for_the_caido_bootstrap() -> None:
     assert request_text is not None
     assert request_text.startswith("GET /a")
     assert response_text is None
+
+
+_GW_ID = "gw-0123456789ab-" + "f" * 32
+
+
+@pytest.mark.asyncio
+async def test_a_report_can_cite_a_gateway_capture() -> None:
+    gateway = _GatewayCapture()
+    gateway.captures[_GW_ID] = b"POST /api/login HTTP/1.1\r\n\r\n"
+    ctx = _tool_ctx({"caido_client": gateway}, "create_vulnerability_report")
+
+    ids, errors, warning = await reporting._verify_http_exchange_ids(ctx, [_GW_ID, "42"])
+    assert errors == ["http_exchange_ids do not exist in the current proxy project: 42"]
+    assert ids is None
+
+    ids, errors, warning = await reporting._verify_http_exchange_ids(ctx, [_GW_ID])
+    assert (ids, errors, warning) == ([_GW_ID], [], None)
+
+
+@pytest.mark.parametrize("bad", ["gw-abc-123", "gw--" + "f" * 32, "cap-1", "gw-a b-" + "f" * 32])
+def test_malformed_evidence_ids_are_still_rejected(bad: str) -> None:
+    ids, errors = reporting._normalize_http_exchange_ids([bad])
+    assert errors
+    assert ids == []

@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Reporting tools — file vuln findings (with dedup + CVSS) and read them back.
 
 ``create_vulnerability_report`` / ``create_dependency_report`` file findings;
@@ -171,6 +172,9 @@ _VALID_FIX_EFFORT = frozenset({"trivial", "low", "medium", "high"})
 _VALID_CONFIDENCE = frozenset({"high", "medium", "low"})
 _MAX_HTTP_EXCHANGE_IDS = 10
 _MAX_HTTP_EXCHANGE_ID_CHARS = 128
+# Under contained egress the trusted gateway, not Caido, records the traffic and
+# names each exchange ``gw-<instance>-<uuid4 hex>``.
+_GATEWAY_CAPTURE_ID = re.compile(r"gw-[A-Za-z0-9._-]{1,64}-[0-9a-f]{32}")
 
 
 def _validate_required_text(fields: dict[str, str]) -> list[str]:
@@ -207,8 +211,11 @@ def _normalize_http_exchange_ids(raw: Any) -> tuple[list[str] | None, list[str]]
         if any(ord(char) < 0x21 or ord(char) > 0x7E for char in request_id):
             errors.append(f"http_exchange_ids[{index}] must contain only visible ASCII characters")
             continue
-        if not request_id.isdigit():
-            errors.append(f"http_exchange_ids[{index}] must be a numeric proxy request id")
+        if not request_id.isdigit() and not _GATEWAY_CAPTURE_ID.fullmatch(request_id):
+            errors.append(
+                f"http_exchange_ids[{index}] must be a numeric proxy request id "
+                "or a gateway capture id"
+            )
             continue
         if request_id not in seen:
             seen.add(request_id)
