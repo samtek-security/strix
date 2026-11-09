@@ -3,6 +3,7 @@ name: agent_browser
 description: recon-browser CLI for headless Chrome via shell. Snapshot-and-ref workflow, click/fill/extract, screenshots, multi-tab, multi-session, network mocking. Pre-installed in the sandbox; invoke via exec_command.
 template: jinja
 ---
+{# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE. #}
 
 
 # recon-browser core

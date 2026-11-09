@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Structured record of every model provider call.
 
 One :class:`LlmRequestEvent` per HTTP attempt against a provider, whatever the

@@ -48,6 +48,17 @@ Material classes of change (not an exhaustive git path list):
   work. The pinned agent-SDK / provider / router dep triple (openai-agents
   ==0.14.6 / openai==2.44.0 / litellm==1.90.3) is intentionally held at the
   T11 Vertex-baseline pins pending a live-run re-validation.
+- Rebased onto upstream main (after v1.7.0) on 2026-11-09.
+  Upstream base commit: 215482eb2204cd30ac6b87520e3f5c6511e2e2e8
+  Adopts upstream's extra-file staging, deferred sandbox bring-up (off for
+  Recon's contained backends), bind-mount backend registry, caller-chosen
+  finish/report tools, and container log/resource caps, merged with Recon's
+  contained-egress, gateway-capture and Kubernetes source paths. Provider
+  secrets are redacted from engine logs, request-log sinks, agent failure
+  text and the engine's exit exception (strix/llm/redaction.py).
+- Sandbox image: Opengrep replaces Semgrep for the agent's SAST skill;
+  trufflehog, trivy and the brotli decoder are pinned past known CVEs, each
+  download checksummed.
 
 containers/Dockerfile is also modified (tool pins, strix/ COPY paths).
 scripts/ and packaging files in this directory are modified for the rebrand.
