@@ -641,14 +641,26 @@ async def create_or_reuse(  # noqa: PLR0915
 
     client, session = await _bring_up()
     caido_client: Any
-    if contained:
-        # Proxy tools degrade to "client unavailable" when this is None.
-        caido_client = _gateway_capture_client(client, session, scan_id)
-    else:
-        host_caido_url = await _caido_url(session)
-        caido_client = CaidoBootstrapHandle(
-            asyncio.create_task(_caido(session, host_caido_url), name=f"caido-bootstrap-{scan_id}")
-        )
+    # Until the bundle is cached nothing else can tear this sandbox down, so a
+    # failed or cancelled proxy setup discards it here.
+    try:
+        if contained:
+            # Proxy tools degrade to "client unavailable" when this is None.
+            caido_client = _gateway_capture_client(client, session, scan_id)
+        else:
+            host_caido_url = await _caido_url(session)
+            caido_client = CaidoBootstrapHandle(
+                asyncio.create_task(
+                    _caido(session, host_caido_url), name=f"caido-bootstrap-{scan_id}"
+                )
+            )
+    except BaseException:
+        discard = asyncio.ensure_future(_discard_session(client, session))
+        _DISCARD_TASKS.add(discard)
+        discard.add_done_callback(_DISCARD_TASKS.discard)
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(discard)
+        raise
 
     bundle = {
         "client": client,

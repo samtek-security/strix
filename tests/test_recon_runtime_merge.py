@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import tarfile
 import types
 from dataclasses import dataclass
@@ -20,13 +21,17 @@ from typing import Any
 import pytest
 from agents import ModelSettings, function_tool
 from agents.sandbox.entries import LocalDir
+from agents.tool_context import ToolContext
 
 import strix.tools.notes.tools as notes_tools
 import strix.tools.todo.tools as todo_tools
 from strix.core import runner
 from strix.runtime import docker_client, session_manager
 from strix.runtime.backends import _BACKENDS, _BIND_MOUNT_BACKENDS, register_backend
+from strix.runtime.caido_handle import CaidoBootstrapHandle
 from strix.runtime.deferred_session import DeferredSandboxSession
+from strix.tools.exploitation import tool as exploitation
+from strix.tools.proxy import caido_api, tools
 
 
 @dataclass
@@ -491,3 +496,101 @@ async def test_entrypoints_forward_the_upstream_scan_options(
     await getattr(runner, entrypoint)(scan_config={}, image="img", **options)
 
     assert {key: forwarded[key] for key in options} == options
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cancel", [False, True], ids=["proxy-setup-fails", "proxy-setup-cancelled"]
+)
+async def test_a_failed_proxy_setup_discards_the_sandbox(backend: Any, *, cancel: bool) -> None:
+    started = asyncio.Event()
+
+    class _Unreachable(_Session):
+        async def resolve_exposed_port(self, port: int) -> Any:
+            del port
+            started.set()
+            if cancel:
+                await asyncio.Event().wait()
+            raise RuntimeError("port not published")
+
+    session = _Unreachable()
+    captured = backend("test-proxy-setup", session=session)
+    task = asyncio.create_task(
+        session_manager.create_or_reuse("proxy-setup", image="img", local_sources=[])
+    )
+    await started.wait()
+    if cancel:
+        task.cancel()
+    with pytest.raises((RuntimeError, asyncio.CancelledError)):
+        await task
+
+    assert captured["client"].deleted == [session]
+    assert "proxy-setup" not in session_manager._SESSION_CACHE
+
+
+class _GatewayCapture:
+    _is_gateway_capture = True
+
+    def __init__(self) -> None:
+        self.captures = {"cap-1": b"GET /a HTTP/1.1\r\n\r\n"}
+
+    async def list_requests_connection(self, *, httpql_filter: Any = None, first: int = 50) -> Any:
+        node = types.SimpleNamespace(request=types.SimpleNamespace(id="cap-1"), response=None)
+        return types.SimpleNamespace(
+            edges=[types.SimpleNamespace(cursor="cap-1", node=node)][:first],
+            page_info=None,
+            filter=httpql_filter,
+        )
+
+    async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+        raw = self.captures.get(request_id)
+        if raw is None:
+            return None
+        return types.SimpleNamespace(
+            request=types.SimpleNamespace(raw=raw), response=None, part=part
+        )
+
+
+def _tool_ctx(context: dict[str, Any], name: str) -> Any:
+    return ToolContext(context=context, tool_name=name, tool_call_id="call-1", tool_arguments="{}")
+
+
+@pytest.mark.asyncio
+async def test_gateway_capture_serves_listing_viewing_and_evidence_checks() -> None:
+    gateway = _GatewayCapture()
+    listed = await caido_api.list_requests_with_client(gateway, httpql_filter="x", first=5)
+    assert [edge.cursor for edge in listed.edges] == ["cap-1"]
+    viewed = await caido_api.get_request_with_client(gateway, "cap-1", part="response")
+    assert viewed.request.raw.startswith(b"GET /a")
+
+    ctx = _tool_ctx({"caido_client": gateway}, "create_vulnerability_report")
+    assert await tools.existing_request_ids(ctx, ["cap-1", "cap-9"]) == {"cap-1"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["repeat_request", "list_sitemap", "scope_rules"])
+async def test_caido_only_tools_say_so_under_gateway_capture(tool_name: str) -> None:
+    tool = getattr(tools, tool_name)
+    args = {"repeat_request": {"request_id": "cap-1"}, "scope_rules": {"action": "list"}}
+    ctx = _tool_ctx({"caido_client": _GatewayCapture()}, tool.name)
+    raw = await tool.on_invoke_tool(ctx, json.dumps(args.get(tool_name, {})))
+    result = json.loads(raw)
+    assert result["success"] is False
+    assert "contained egress" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_exploit_evidence_waits_for_the_caido_bootstrap() -> None:
+    gateway = _GatewayCapture()
+
+    async def _bootstrap() -> Any:
+        await asyncio.sleep(0)
+        return gateway
+
+    handle = CaidoBootstrapHandle(asyncio.create_task(_bootstrap()))
+    ctx = _tool_ctx({"caido_client": handle}, "promote_finding")
+    request_text, response_text = await exploitation._fetch_caido_raw(ctx, "cap-1")
+
+    assert request_text is not None
+    assert request_text.startswith("GET /a")
+    assert response_text is None
