@@ -183,11 +183,11 @@ USER root
 RUN set -eux; \
     ARCH="$(uname -m)"; \
     case "$ARCH" in \
-        x86_64) TH_ARCH="amd64"; TH_SHA="dc24007c2f233bd61c05beabeb44aa27ea9b43288166279209abe0458c5ce76b" ;; \
-        aarch64|arm64) TH_ARCH="arm64"; TH_SHA="7e65e771d2a247964056aa5edba0f8ae3945895e5dce867fe0ffbc7b0128239a" ;; \
+        x86_64) TH_ARCH="amd64"; TH_SHA="3c7b0d1dc4278294269bfdd7594bca8bb28c78da0a4a06ad202ded37b48deca4" ;; \
+        aarch64|arm64) TH_ARCH="arm64"; TH_SHA="929b81efffca752eafd58bf6f17bf725d354f338636a7bbbee65c086d2f9ddf3" ;; \
         *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL -o /tmp/trufflehog.tgz "https://github.com/trufflesecurity/trufflehog/releases/download/v3.97.4/trufflehog_3.97.4_linux_${TH_ARCH}.tar.gz"; \
+    curl -fsSL -o /tmp/trufflehog.tgz "https://github.com/trufflesecurity/trufflehog/releases/download/v3.99.2/trufflehog_3.99.2_linux_${TH_ARCH}.tar.gz"; \
     echo "${TH_SHA}  /tmp/trufflehog.tgz" | sha256sum -c; \
     tar -xzf /tmp/trufflehog.tgz -C /tmp trufflehog; \
     install -m 0755 /tmp/trufflehog /usr/local/bin/trufflehog; \
@@ -213,11 +213,11 @@ RUN apt-get update && \
 RUN set -eux; \
     ARCH="$(uname -m)"; \
     case "$ARCH" in \
-        x86_64) TRIVY_ARCH="64bit"; TRIVY_SHA="2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a" ;; \
-        aarch64|arm64) TRIVY_ARCH="ARM64"; TRIVY_SHA="b94ce1976bbf3c15b514b605ee88be7c6d94a29be2302847ff01cb794d47aad5" ;; \
+        x86_64) TRIVY_ARCH="64bit"; TRIVY_SHA="c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0" ;; \
+        aarch64|arm64) TRIVY_ARCH="ARM64"; TRIVY_SHA="e174dff2a6dba5e3ae41f8d0537a6324405bd08132497340304c6b20e0f16a1f" ;; \
         *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL -o /tmp/trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-${TRIVY_ARCH}.tar.gz"; \
+    curl -fsSL -o /tmp/trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v0.76.1/trivy_0.76.1_Linux-${TRIVY_ARCH}.tar.gz"; \
     echo "${TRIVY_SHA}  /tmp/trivy.tgz" | sha256sum -c; \
     tar -xzf /tmp/trivy.tgz -C /tmp trivy; \
     install -m 0755 /tmp/trivy /usr/local/bin/trivy; \
@@ -228,10 +228,61 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# CVE-2026-111497: out-of-bounds write in the brotli decoder, fixed in Debian
+# 1.2.0-4.1. Kali still ships 1.2.0-4, and node, curl and python3 here all load
+# the shared libbrotlidec, so every HTTP client in the image would decode a
+# malicious `Content-Encoding: br` response with the vulnerable code. Install
+# the fixed Debian packages, checksummed against the Debian archive index.
+RUN set -eux; \
+    ARCH="$(dpkg --print-architecture)"; \
+    case "$ARCH" in \
+        amd64) LIB_SHA="2d58db32250aa535e27c62e98451debd43b539aa026066806432e842d5b56c00"; PY_SHA="3b62003bf956337d2ae672b40174cd303e740ea0e013d8405e503a4b5abaf061" ;; \
+        arm64) LIB_SHA="ff90055f0c42dc39fdf8f12d7f68c7da32da2ec90d0a49eb39e80b764988ee02"; PY_SHA="0923c03d9293e45cd8f744f1de5103b97603f0ae0c54b275d8f03ebf87b29750" ;; \
+        *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/libbrotli1.deb "https://deb.debian.org/debian/pool/main/b/brotli/libbrotli1_1.2.0-4.1_${ARCH}.deb"; \
+    curl -fsSL -o /tmp/python3-brotli.deb "https://deb.debian.org/debian/pool/main/b/brotli/python3-brotli_1.2.0-4.1_${ARCH}.deb"; \
+    echo "${LIB_SHA}  /tmp/libbrotli1.deb" | sha256sum -c; \
+    echo "${PY_SHA}  /tmp/python3-brotli.deb" | sha256sum -c; \
+    dpkg -i /tmp/libbrotli1.deb /tmp/python3-brotli.deb; \
+    rm -f /tmp/libbrotli1.deb /tmp/python3-brotli.deb; \
+    test "$(dpkg-query -W -f='${Version}' libbrotli1)" = "1.2.0-4.1"; \
+    node -e 'const z=require("zlib");z.brotliDecompressSync(z.brotliCompressSync(Buffer.from("ok")))'
+
+# Opengrep 1.31.0 (LGPL-2.1) replaces Semgrep for the agent's SAST skill:
+# checksummed release binary, and an offline community ruleset pinned by commit
+# and checksum, keeping only rule YAML and LICENSE and dropping rules marked
+# with a proprietary license.
+RUN set -eux; \
+    case "$(uname -m)" in \
+        x86_64) OG_ARCH="x86"; OG_SHA="dbbe3c2058dbe600c449a8ba22ea79a1643a6660658400090d0323a8d0d31147" ;; \
+        aarch64|arm64) OG_ARCH="aarch64"; OG_SHA="2b713a29a00237f85408b83002fc111db5b94c7fa8d263f0a93184a960655d9d" ;; \
+        *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/opengrep "https://github.com/opengrep/opengrep/releases/download/v1.31.0/opengrep_manylinux_${OG_ARCH}"; \
+    echo "${OG_SHA}  /tmp/opengrep" | sha256sum -c; \
+    install -m 0755 /tmp/opengrep /usr/local/bin/opengrep; \
+    rm -f /tmp/opengrep; \
+    opengrep --version
+RUN set -eux; \
+    curl -fsSL -o /tmp/opengrep-rules.tgz "https://codeload.github.com/opengrep/opengrep-rules/tar.gz/f1d2b562b414783763fd02a6ed2736eaed622efa"; \
+    echo "9a5f1cd5c625418cc1c776120123e2d4371df9bb66e099426b17c3488e13619d  /tmp/opengrep-rules.tgz" | sha256sum -c; \
+    mkdir -p /opt/opengrep-rules; \
+    tar -xzf /tmp/opengrep-rules.tgz --strip-components=1 -C /opt/opengrep-rules; \
+    rm -f /tmp/opengrep-rules.tgz; \
+    cd /opt/opengrep-rules; \
+    rm -rf .github scripts stats; \
+    find . -maxdepth 1 -type f ! -name LICENSE -delete; \
+    find . -mindepth 2 -type f \( ! \( -name '*.yaml' -o -name '*.yml' \) -o -name '*.test.yaml' -o -name '*.test.yml' -o -name '.*' \) -delete; \
+    grep -rlZ 'license: proprietary' . | xargs -0 -r rm -f; \
+    find . -type d -empty -delete; \
+    chmod -R a+rX /opt/opengrep-rules
+COPY containers/opengrep-rules/ /opt/opengrep-rules/strix/
+RUN chmod -R a+rX /opt/opengrep-rules/strix
+
 USER pentester
 
-RUN pipx install semgrep && \
-    pipx install bandit && \
+RUN pipx install bandit && \
     rm -rf /home/pentester/.cache/pip /home/pentester/.cache/uv
 
 RUN npm install -g jshint && \
