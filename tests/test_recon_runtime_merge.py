@@ -543,6 +543,9 @@ class _GatewayCapture:
             filter=httpql_filter,
         )
 
+    async def capture_exists(self, request_id: str) -> bool:
+        return request_id in self.captures
+
     async def view_request(self, request_id: str, *, part: str = "request") -> Any:
         raw = self.captures.get(request_id)
         if raw is None:
@@ -619,3 +622,17 @@ def test_malformed_evidence_ids_are_still_rejected(bad: str) -> None:
     ids, errors = reporting._normalize_http_exchange_ids([bad])
     assert errors
     assert ids == []
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_gateway_keeps_evidence_with_a_warning() -> None:
+    class _TimingOut(_GatewayCapture):
+        async def capture_exists(self, request_id: str) -> bool:
+            raise TimeoutError(f"gateway exec timed out for {request_id}")
+
+    ctx = _tool_ctx({"caido_client": _TimingOut()}, "create_vulnerability_report")
+    ids, errors, warning = await reporting._verify_http_exchange_ids(ctx, [_GW_ID])
+
+    assert ids == [_GW_ID]
+    assert errors == []
+    assert warning is not None

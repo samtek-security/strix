@@ -81,7 +81,9 @@ _REQUEST_EXISTS_ATTEMPTS = 2
 
 async def _request_exists(client: Client, request_id: str) -> bool:
     if caido_api.is_gateway_client(client):
-        return await client.view_request(request_id) is not None
+        # Raises when the gateway cannot answer, so the caller retries and then
+        # keeps the id with a warning instead of calling valid evidence missing.
+        return await client.capture_exists(request_id)
     data = await client.graphql.query(_REQUEST_EXISTS_QUERY, {"id": request_id})
     return bool(data) and data.get("request") is not None
 
