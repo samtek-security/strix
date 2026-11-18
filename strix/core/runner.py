@@ -690,67 +690,6 @@ async def _run_scan(
 
     sandbox_session = bundle["session"]
 
-    # Cred-expiry piece 2: preflight credential verdicts BEFORE any agent turn.
-    # One declared-endpoint probe per fixed-header role through the sandbox's
-    # enforced egress; a `dead` role fails the scan non-retryably before any
-    # budget is spent. Inserted inside the protected body so failures flow
-    # through the existing finally (spill writer reset, descendant cancel,
-    # session close) and the _sanitized_failure boundary.
-    cred_verdicts: dict[str, str] = {}
-    try:
-        _gq_path = ""
-        if coverage_context is not None:
-            _ref = getattr(coverage_context, "ref", None)
-            if isinstance(_ref, dict):
-                from recon_engine.preflight_probe import normalize_declared_graphql
-
-                _gq_path = normalize_declared_graphql(str(_ref.get("graphql_endpoint") or ""))
-        cred_verdicts = await _preflight_credential_verdicts(
-            sandbox_session, scan_config, _gq_path
-        )
-        if "dead" in cred_verdicts.values():
-            _dead = sorted(r for r, v in cred_verdicts.items() if v == "dead")
-            report("credential preflight: dead role(s) " + ",".join(_dead))
-            scan_cancelled = True  # before raising: suppresses coverage-on-exit
-            if ApplicationError is None:  # pragma: no cover - non-Temporal host
-                raise RuntimeError("credentials expired (" + ", ".join(_dead) + ")")
-            raise ApplicationError(
-                "credentials expired (" + ", ".join(_dead) + ")",
-                type="CredentialExpiredError",
-                non_retryable=True,
-            )
-    except ApplicationError:
-        raise
-    except Exception:  # noqa: BLE001 - a broken probe harness must not kill a healthy run
-        logger.exception("credential preflight failed (non-fatal); proceeding")
-        cred_verdicts = {}
-
-    # Cred-expiry piece 3: periodic mid-run re-probe for every role preflight did not already find
-    # dead (the incident: a credential dying AFTER preflight, not before it). Only spawned when the
-    # caller wired both hooks and there is at least one role with a declared probe target; a plain
-    # run_strix_scan call (cred_watchdog_reserve=None) never starts it - byte-for-byte old behaviour.
-    _cred_watchdog_task: asyncio.Task[None] | None = None
-    if cred_watchdog_reserve is not None and cred_verdicts and "dead" not in cred_verdicts.values():
-        try:
-            from recon_engine.preflight_probe import role_probe_targets
-
-            _watchdog_specs = role_probe_targets(scan_config, _gq_path)
-        except Exception:  # noqa: BLE001 - a broken probe harness must not kill a healthy run
-            logger.exception("cred watchdog: role/target derivation failed; watchdog not started")
-            _watchdog_specs = {}
-        # Preflight's own probe is attempt 1 of the durable cap - charged HERE, at the time it
-        # actually happened, not after the fact (the engine's own post-scan fold no longer
-        # double-charges this). Best-effort: a reservation failure is bookkeeping noise, never
-        # a reason to skip starting the watchdog.
-        for _role, (_url, *_rest) in _watchdog_specs.items():
-            if _url:
-                with contextlib.suppress(Exception):
-                    cred_watchdog_reserve(_role)
-        if any(url for url, *_ in _watchdog_specs.values()):
-            _cred_watchdog_task = asyncio.create_task(_cred_watchdog_loop(
-                sandbox_session, _watchdog_specs, cred_verdicts, cred_watchdog_reserve, cred_watchdog_sink,
-            ))
-
     async def _spill_to_workspace(output_id: str, text: str) -> str | None:
         """Write an oversized tool result into the sandbox; return its path or None."""
         path = f"{WORKSPACE_SPILL_DIR}/{output_id}.txt"
@@ -766,8 +705,70 @@ async def _run_scan(
     sessions_to_close: list[SQLiteSession] = []
     mcp_registry: McpRegistry | None = None
     scan_cancelled = False
+    # Declared here (not inside the try below) so the finally's cancellation check is always
+    # bound, even when the preflight raises before the watchdog task is ever created.
+    _cred_watchdog_task: asyncio.Task[None] | None = None
 
     try:
+        # Cred-expiry piece 2: preflight credential verdicts BEFORE any agent turn. One
+        # declared-endpoint probe per fixed-header role through the sandbox's enforced
+        # egress; a `dead` role fails the scan non-retryably before any budget is spent.
+        # Inside the protected try so a raise here still reaches the finally below (spill
+        # writer reset, descendant cancel, session close) instead of leaking the sandbox
+        # this function already brought up.
+        cred_verdicts: dict[str, str] = {}
+        _gq_path = ""
+        if coverage_context is not None:
+            _ref = getattr(coverage_context, "ref", None)
+            if isinstance(_ref, dict):
+                from recon_engine.preflight_probe import normalize_declared_graphql
+
+                _gq_path = normalize_declared_graphql(str(_ref.get("graphql_endpoint") or ""))
+        try:
+            cred_verdicts = await _preflight_credential_verdicts(
+                sandbox_session, scan_config, _gq_path
+            )
+        except Exception:  # noqa: BLE001 - a broken probe harness must not kill a healthy run
+            logger.exception("credential preflight failed (non-fatal); proceeding")
+            cred_verdicts = {}
+        # Cred-expiry piece 3: preflight's own probe is attempt 1 of the durable probe-cap,
+        # charged HERE regardless of outcome (dead, ok, or unknown) - unlike the watchdog's
+        # re-probes below, this mandatory probe is never GATED on the reservation: piece 2's
+        # safety guarantee (catch a dead role before any budget is spent) must not degrade
+        # to "unknown, proceed" just because a bookkeeping reservation call failed.
+        _preflight_specs: dict[str, tuple[str, str, str, str, str]] = {}
+        if cred_watchdog_reserve is not None and cred_verdicts:
+            try:
+                from recon_engine.preflight_probe import role_probe_targets
+
+                _preflight_specs = role_probe_targets(scan_config, _gq_path)
+            except Exception:  # noqa: BLE001 - a broken probe harness must not kill a healthy run
+                logger.exception("cred watchdog: role/target derivation failed")
+            for _role, (_url, *_rest) in _preflight_specs.items():
+                if _url:
+                    with contextlib.suppress(Exception):
+                        cred_watchdog_reserve(_role)
+        if "dead" in cred_verdicts.values():
+            _dead = sorted(r for r, v in cred_verdicts.items() if v == "dead")
+            report("credential preflight: dead role(s) " + ",".join(_dead))
+            scan_cancelled = True  # before raising: suppresses coverage-on-exit
+            if ApplicationError is None:  # pragma: no cover - non-Temporal host
+                raise RuntimeError("credentials expired (" + ", ".join(_dead) + ")")
+            raise ApplicationError(
+                "credentials expired (" + ", ".join(_dead) + ")",
+                type="CredentialExpiredError",
+                non_retryable=True,
+            )
+        # Cred-expiry piece 3: periodic mid-run re-probe for every role preflight did not
+        # already find dead (the incident: a credential dying AFTER preflight, not before
+        # it). Only spawned when the caller wired both hooks and there is at least one role
+        # with a declared probe target; a plain run_strix_scan call (cred_watchdog_reserve=
+        # None) never starts it - byte-for-byte old behaviour.
+        if cred_watchdog_reserve is not None and any(url for url, *_ in _preflight_specs.values()):
+            _cred_watchdog_task = asyncio.create_task(_cred_watchdog_loop(
+                sandbox_session, _preflight_specs, cred_verdicts, cred_watchdog_reserve, cred_watchdog_sink,
+            ))
+
         targets = scan_config.get("targets") or []
         scan_mode = str(scan_config.get("scan_mode") or "deep")
         is_whitebox = any(t.get("type") == "local_code" for t in targets)
