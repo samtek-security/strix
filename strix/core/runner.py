@@ -26,6 +26,11 @@ from agents import RunConfig
 from agents.sandbox import SandboxRunConfig
 from openai import RateLimitError
 
+try:
+    from temporalio.exceptions import ApplicationError
+except ImportError:  # pragma: no cover - non-Temporal host (CLI-only strix usage)
+    ApplicationError = None  # type: ignore[assignment]
+
 from strix.agents.factory import build_strix_agent, make_child_factory
 from strix.agents.prompt import render_scope_prompt, render_system_prompt
 from strix.config import codex, load_settings
@@ -223,6 +228,142 @@ def _compose_root_instructions_override(
     )
 
 
+# Cred-expiry piece 2: the closed set of typed credential failure names the
+# sanitizer preserves through the engine boundary (values only; recognition is
+# by the ApplicationError.type field, never by message text).
+_CRED_ERROR_TYPES = frozenset(
+    {"CredentialPurgedError", "CredentialRejectedError", "CredentialExpiredError"}
+)
+
+# Cred-expiry piece 2 (preflight credential verdict): how long one in-sandbox
+# probe request may take, and the {role: verdict} recorded when no role has a
+# declared probe target. Three-valued per the plan: ok / dead / unknown.
+_CRED_PROBE_TIMEOUT_S = 15.0
+
+
+def _parse_success_condition(cond: str) -> tuple[str, str]:
+    """``('url_contains:/dashboard')`` -> ``('url_contains', '/dashboard')``.
+
+    Local mirror of ``strix.runtime.auth_preflight._parse_success_condition``
+    (kept identical so the preflight probe's declared-API reading cannot drift
+    from the login preflight's).
+    """
+    cond = (cond or "").strip()
+    if ":" in cond:
+        kind, _, val = cond.partition(":")
+        return kind.strip().lower(), val.strip()
+    return (cond.lower(), "") if cond else ("", "")
+
+
+def _declared_probe_target_for_role(flow: dict, base: str, graphql_path: str) -> tuple[str, str]:
+    """The declared probe target for one role, or ``("", "")`` to record ``unknown``.
+
+    Declared endpoints only, never guessed (cred-expiry piece 2): the
+    engagement's ``GraphqlEndpoint`` (``graphql_path``, already normalized
+    path-only) when declared, else the role's ``api_ok`` success-condition
+    value (the declared API path) joined to the target origin. Returns
+    ``(url, kind)`` with kind ``"graphql"`` or ``"api_ok"``.
+    """
+    if graphql_path:
+        return base.rstrip("/") + graphql_path, "graphql"
+    kind, val = _parse_success_condition(flow.get("success_condition") or "")
+    if kind == "api_ok" and val:
+        return base.rstrip("/") + ("" if val.startswith("/") else "/") + val, "api_ok"
+    return "", ""
+
+
+def _gql_identity_ok(body: bytes) -> bool:
+    """Whether a GraphQL 2xx body proves identity (cred-expiry piece 2).
+
+    A 2xx counts ONLY when the body is a JSON object whose ``data`` key is
+    present, not null, and non-empty, with zero GraphQL ``errors``. A public
+    endpoint answering ``{"data": {}}`` to anyone is the known gap recorded in
+    the run metadata as a limitation.
+    """
+    try:
+        v = json.loads(body.decode("utf-8", errors="replace"))
+    except (ValueError, AttributeError):
+        return False
+    if not isinstance(v, dict) or v.get("errors"):
+        return False
+    d = v.get("data")
+    return not (d is None or d == "" or d == [] or d == {})
+
+
+def _record_cred_verdicts(verdicts: dict[str, str], limitation: bool) -> None:
+    """Persist the run's preflight credential verdicts into run.json (best-effort).
+
+    Non-secret (role + verdict only). ``limitation`` marks that some verdict
+    came from the public-``{"data":{}}``-acceptable GraphQL evidence rule.
+    """
+    try:
+        state = get_global_report_state()
+        if state is None:
+            return
+        state.run_record["credential_preflight"] = {
+            "verdicts": dict(verdicts),
+            "graphql_empty_data_gap": bool(limitation),
+        }
+        state.save_run_data()
+    except Exception:  # noqa: BLE001 - telemetry must never break the scan
+        logger.exception("failed to record credential preflight verdicts")
+
+
+async def _preflight_credential_verdicts(
+    session: Any,
+    scan_config: dict[str, Any],
+    graphql_path: str,
+) -> dict[str, str]:
+    """One declared-endpoint identity probe per fixed-header role, in-sandbox.
+
+    Cred-expiry piece 2: after the sandbox is up and before any agent turn.
+    Reuses the exact header the agent guidance documents (role -> header spec
+    computed host-side and mirrored into the probe worklist) so the probe
+    cannot drift from what agents send. Values come from the sandbox env
+    (``RECON_CRED_<role>``); the probe runs through the sandbox's enforced
+    egress with redirects disabled. Returns ``{role: verdict}`` with verdict
+    ``ok`` / ``dead`` / ``unknown``. Never raises: a probe harness failure
+    records ``unknown`` roles and proceeds.
+    """
+    from recon_engine.preflight_probe import (
+        probe_role_verdicts,
+        role_probe_targets,
+    )
+
+    verdicts: dict[str, str] = {}
+    limitation = False
+    try:
+        specs = role_probe_targets(scan_config, graphql_path)
+    except Exception:  # noqa: BLE001
+        logger.exception("credential preflight role/target derivation failed")
+        return {}
+    for role, (url, kind, header_env, header_name, prefix) in specs.items():
+        if not url:
+            verdicts[role] = "unknown"
+            continue
+        try:
+            status, body, data_ok, empty_data = await probe_role_verdicts(
+                session, url, kind, header_env, header_name, prefix,
+                timeout=_CRED_PROBE_TIMEOUT_S,
+            )
+        except Exception:  # noqa: BLE001 - transport failure is unknown, never fatal here
+            logger.exception("credential preflight probe failed for role %s", role)
+            verdicts[role] = "unknown"
+            continue
+        if status is None:
+            verdicts[role] = "unknown"
+        elif status == 401:
+            verdicts[role] = "dead"
+        elif 200 <= status < 300 and (kind != "graphql" or data_ok):
+            if empty_data:
+                limitation = True
+            verdicts[role] = "ok"
+        else:
+            verdicts[role] = "unknown"
+    _record_cred_verdicts(verdicts, limitation)
+    return verdicts
+
+
 def _sanitized_failure(exc: BaseException) -> BaseException:
     """A redacted stand-in for an exception leaving the engine.
 
@@ -232,8 +373,31 @@ def _sanitized_failure(exc: BaseException) -> BaseException:
     the engine never lets the raw object out: the message is scrubbed, the type
     is preserved when it can be reconstructed, and the cause/context chain is
     dropped (raise ... from None at the call site).
+
+    Cred-expiry piece 2: the three typed credential failures keep their
+    Temporal metadata (``type`` + ``non_retryable``). Today's reconstruction
+    builds a fresh exception from the message only, which would downgrade a
+    non-retryable ``CredentialExpiredError`` to a retryable generic failure
+    and re-burn every attempt on sandbox re-creation. The credential branch
+    fires ONLY for a ``temporalio.exceptions.ApplicationError`` whose ``type``
+    is in the closed set below AND ``non_retryable`` is True; the rebuilt
+    error carries approved fields only (type verbatim, redacted message,
+    ``non_retryable=True`` — no details, no cause). Every other exception,
+    including a non-credential non-retryable ApplicationError (ConfigError),
+    takes the generic message-only path. Recognition is by the type field,
+    never by message text.
     """
     safe = redaction.redact_text(str(exc)) or type(exc).__name__
+    try:
+        if (
+            ApplicationError is not None
+            and isinstance(exc, ApplicationError)
+            and getattr(exc, "type", None) in _CRED_ERROR_TYPES
+            and getattr(exc, "non_retryable", False)
+        ):
+            return ApplicationError(safe, type=exc.type, non_retryable=True)
+    except Exception:  # noqa: BLE001 - never let sanitization itself crash
+        logger.exception("sanitized_failure credential branch failed; using generic path")
     try:
         return type(exc)(safe)
     except Exception:  # noqa: BLE001 - some exceptions need more than a message
@@ -444,6 +608,41 @@ async def _run_scan(
     set_scan_phase("agent_setup")
 
     sandbox_session = bundle["session"]
+
+    # Cred-expiry piece 2: preflight credential verdicts BEFORE any agent turn.
+    # One declared-endpoint probe per fixed-header role through the sandbox's
+    # enforced egress; a `dead` role fails the scan non-retryably before any
+    # budget is spent. Inserted inside the protected body so failures flow
+    # through the existing finally (spill writer reset, descendant cancel,
+    # session close) and the _sanitized_failure boundary.
+    cred_verdicts: dict[str, str] = {}
+    try:
+        _gq_path = ""
+        if coverage_context is not None:
+            _ref = getattr(coverage_context, "ref", None)
+            if isinstance(_ref, dict):
+                from recon_engine.preflight_probe import normalize_declared_graphql
+
+                _gq_path = normalize_declared_graphql(str(_ref.get("graphql_endpoint") or ""))
+        cred_verdicts = await _preflight_credential_verdicts(
+            sandbox_session, scan_config, _gq_path
+        )
+        if "dead" in cred_verdicts.values():
+            _dead = sorted(r for r, v in cred_verdicts.items() if v == "dead")
+            report("credential preflight: dead role(s) " + ",".join(_dead))
+            scan_cancelled = True  # before raising: suppresses coverage-on-exit
+            if ApplicationError is None:  # pragma: no cover - non-Temporal host
+                raise RuntimeError("credentials expired (" + ", ".join(_dead) + ")")
+            raise ApplicationError(
+                "credentials expired (" + ", ".join(_dead) + ")",
+                type="CredentialExpiredError",
+                non_retryable=True,
+            )
+    except ApplicationError:
+        raise
+    except Exception:  # noqa: BLE001 - a broken probe harness must not kill a healthy run
+        logger.exception("credential preflight failed (non-fatal); proceeding")
+        cred_verdicts = {}
 
     async def _spill_to_workspace(output_id: str, text: str) -> str | None:
         """Write an oversized tool result into the sandbox; return its path or None."""
