@@ -336,6 +336,7 @@ async def _preflight_credential_verdicts(
     session: Any,
     scan_config: dict[str, Any],
     graphql_path: str,
+    reserve: Callable[[str], Awaitable[bool]] | None = None,
 ) -> dict[str, str]:
     """One declared-endpoint identity probe per fixed-header role, in-sandbox.
 
@@ -347,6 +348,18 @@ async def _preflight_credential_verdicts(
     egress with redirects disabled. Returns ``{role: verdict}`` with verdict
     ``ok`` / ``dead`` / ``unknown``. Never raises: a probe harness failure
     records ``unknown`` roles and proceeds.
+
+    Cred-expiry piece 3: ``reserve`` (when given) charges the durable per-run
+    probe-cap reservation BEFORE issuing the probe - a phased run's later
+    phases and retries all charge the same counter as attempt 1, so the
+    counter (and its diagnostics) reflect the true probe volume against the
+    target, and correspondingly shrink what the watchdog's OWN re-probes have
+    left. Reserving before probing means a cancellation mid-probe still
+    leaves the attempt charged. Unlike the watchdog's optional re-probes, a
+    refused reservation (cap already saturated) does NOT skip this probe:
+    piece 2's safety guarantee (catch a dead role before any budget is
+    spent) must never degrade to "unknown, proceed" just because a
+    bookkeeping counter saturated.
     """
     from recon_engine.preflight_probe import (
         probe_role_verdicts,
@@ -364,6 +377,9 @@ async def _preflight_credential_verdicts(
         if not url:
             verdicts[role] = "unknown"
             continue
+        if reserve is not None:
+            with contextlib.suppress(Exception):  # a broken reservation channel must never abort the run
+                await reserve(role)
         try:
             status, body, data_ok, empty_data = await probe_role_verdicts(
                 session, url, kind, header_env, header_name, prefix,
@@ -393,7 +409,7 @@ async def _cred_watchdog_loop(
     session: Any,
     specs: dict[str, tuple[str, str, str, str, str]],
     verdicts: dict[str, str],
-    reserve: Callable[[str], bool],
+    reserve: Callable[[str], Awaitable[bool]],
     sink: Callable[[str, str], None] | None,
 ) -> None:
     """Cred-expiry piece 3 containment: periodic mid-run re-probe for every role not yet known
@@ -412,10 +428,15 @@ async def _cred_watchdog_loop(
     while True:
         await asyncio.sleep(_CRED_WATCHDOG_INTERVAL_S)
         for role, (url, kind, header_env, header_name, prefix) in specs.items():
-            if not url or verdicts.get(role) == "dead":
+            # `dead` is sticky and wins no matter which of the two independent sources (this
+            # loop's own re-probes, or activities.py's local-exp ticker writing straight into
+            # _LAST_CRED_VERDICTS) got there first - checked again right before the write below
+            # so a probe that was already in flight when the OTHER source went dead can never
+            # resurrect the role to ok/unknown.
+            if not url or verdicts.get(role) == "dead" or _LAST_CRED_VERDICTS.get(role) == "dead":
                 continue  # no declared target, or already terminal - never re-probed
             try:
-                if not reserve(role):
+                if not await reserve(role):
                     continue
             except Exception:  # noqa: BLE001 - a broken reservation channel must never abort the run
                 logger.exception("cred watchdog: probe reservation failed for role %s", role)
@@ -428,6 +449,8 @@ async def _cred_watchdog_loop(
                 logger.exception("cred watchdog: probe failed for role %s", role)
                 continue
             new_verdict, _limited = _classify_cred_probe(status, kind, data_ok, empty_data)
+            if verdicts.get(role) == "dead" or _LAST_CRED_VERDICTS.get(role) == "dead":
+                continue  # went dead elsewhere while this probe was in flight
             if new_verdict == verdicts.get(role):
                 continue
             verdicts[role] = new_verdict
@@ -512,7 +535,7 @@ async def _run_scan(
     gateway_target_ports: tuple[int, ...] = (),
     coverage_context: Any = None,
     run_coverage_worker_on_exit: bool = False,
-    cred_watchdog_reserve: Callable[[str], bool] | None = None,
+    cred_watchdog_reserve: Callable[[str], Awaitable[bool]] | None = None,
     cred_watchdog_sink: Callable[[str, str], None] | None = None,
 ) -> RunResultBase | None:
     """Shared scan body for :func:`run_strix_scan` and :func:`run_recon_scan`.
@@ -726,16 +749,14 @@ async def _run_scan(
                 _gq_path = normalize_declared_graphql(str(_ref.get("graphql_endpoint") or ""))
         try:
             cred_verdicts = await _preflight_credential_verdicts(
-                sandbox_session, scan_config, _gq_path
+                sandbox_session, scan_config, _gq_path, reserve=cred_watchdog_reserve,
             )
         except Exception:  # noqa: BLE001 - a broken probe harness must not kill a healthy run
             logger.exception("credential preflight failed (non-fatal); proceeding")
             cred_verdicts = {}
-        # Cred-expiry piece 3: preflight's own probe is attempt 1 of the durable probe-cap,
-        # charged HERE regardless of outcome (dead, ok, or unknown) - unlike the watchdog's
-        # re-probes below, this mandatory probe is never GATED on the reservation: piece 2's
-        # safety guarantee (catch a dead role before any budget is spent) must not degrade
-        # to "unknown, proceed" just because a bookkeeping reservation call failed.
+        # Cred-expiry piece 3: role/target derivation for the watchdog spawn below (reused, not
+        # recomputed - role_probe_targets is pure, but _preflight_credential_verdicts already
+        # did this work for the SAME scan_config/graphql_path).
         _preflight_specs: dict[str, tuple[str, str, str, str, str]] = {}
         if cred_watchdog_reserve is not None and cred_verdicts:
             try:
@@ -744,10 +765,6 @@ async def _run_scan(
                 _preflight_specs = role_probe_targets(scan_config, _gq_path)
             except Exception:  # noqa: BLE001 - a broken probe harness must not kill a healthy run
                 logger.exception("cred watchdog: role/target derivation failed")
-            for _role, (_url, *_rest) in _preflight_specs.items():
-                if _url:
-                    with contextlib.suppress(Exception):
-                        cred_watchdog_reserve(_role)
         if "dead" in cred_verdicts.values():
             _dead = sorted(r for r, v in cred_verdicts.items() if v == "dead")
             report("credential preflight: dead role(s) " + ",".join(_dead))
@@ -763,7 +780,7 @@ async def _run_scan(
         # already find dead (the incident: a credential dying AFTER preflight, not before
         # it). Only spawned when the caller wired both hooks and there is at least one role
         # with a declared probe target; a plain run_strix_scan call (cred_watchdog_reserve=
-        # None) never starts it - byte-for-byte old behaviour.
+        # None) never starts it.
         if cred_watchdog_reserve is not None and any(url for url, *_ in _preflight_specs.values()):
             _cred_watchdog_task = asyncio.create_task(_cred_watchdog_loop(
                 sandbox_session, _preflight_specs, cred_verdicts, cred_watchdog_reserve, cred_watchdog_sink,
@@ -1342,7 +1359,7 @@ async def run_recon_scan(
     gateway_target_ports: tuple[int, ...] = (),
     coverage_context: Any = None,
     run_coverage_worker_on_exit: bool = False,
-    cred_watchdog_reserve: Callable[[str], bool] | None = None,
+    cred_watchdog_reserve: Callable[[str], Awaitable[bool]] | None = None,
     cred_watchdog_sink: Callable[[str, str], None] | None = None,
 ) -> RunResultBase | None:
     """Recon's scan entrypoint: :func:`run_strix_scan` plus trusted egress + coverage.
