@@ -441,6 +441,12 @@ async def _cred_watchdog_loop(
             except Exception:  # noqa: BLE001 - a broken reservation channel must never abort the run
                 logger.exception("cred watchdog: probe reservation failed for role %s", role)
                 continue
+            # The reservation call awaited; re-check dead before spending a probe on a role
+            # that went dead elsewhere while this coroutine was suspended. Not required for
+            # correctness (the post-probe check below still refuses the write either way) -
+            # just avoids an avoidable request to an already-known-dead target.
+            if verdicts.get(role) == "dead" or _LAST_CRED_VERDICTS.get(role) == "dead":
+                continue
             try:
                 status, _body, data_ok, empty_data = await probe_role_verdicts(
                     session, url, kind, header_env, header_name, prefix, timeout=_CRED_PROBE_TIMEOUT_S,
@@ -754,9 +760,10 @@ async def _run_scan(
         except Exception:  # noqa: BLE001 - a broken probe harness must not kill a healthy run
             logger.exception("credential preflight failed (non-fatal); proceeding")
             cred_verdicts = {}
-        # Cred-expiry piece 3: role/target derivation for the watchdog spawn below (reused, not
-        # recomputed - role_probe_targets is pure, but _preflight_credential_verdicts already
-        # did this work for the SAME scan_config/graphql_path).
+        # Cred-expiry piece 3: role/target derivation for the watchdog spawn below. Recomputed
+        # (role_probe_targets is pure and cheap - no I/O) rather than threaded out of
+        # _preflight_credential_verdicts, which keeps that function's signature unchanged for
+        # non-watchdog callers.
         _preflight_specs: dict[str, tuple[str, str, str, str, str]] = {}
         if cred_watchdog_reserve is not None and cred_verdicts:
             try:
