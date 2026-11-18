@@ -434,6 +434,10 @@ async def _run_scan(
         gateway_spec_path=gateway_spec_path,
         gateway_spec_json=gateway_spec_json,
         gateway_target_ports=gateway_target_ports,
+        # Brokered credentials injected into the sandbox env, not the prompt (#34):
+        # {RECON_CRED_<role>: password} lands in the container Environment so the
+        # agent (and the header-auth authz probes) read the secret from env.
+        extra_env=scan_config.get("sandbox_env") or {},
     )
     report("Waiting for the first model response")
     logger.info("Sandbox ready for scan %s", scan_id)
