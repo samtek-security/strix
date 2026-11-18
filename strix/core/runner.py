@@ -738,6 +738,14 @@ async def _run_scan(
         except Exception:  # noqa: BLE001 - a broken probe harness must not kill a healthy run
             logger.exception("cred watchdog: role/target derivation failed; watchdog not started")
             _watchdog_specs = {}
+        # Preflight's own probe is attempt 1 of the durable cap - charged HERE, at the time it
+        # actually happened, not after the fact (the engine's own post-scan fold no longer
+        # double-charges this). Best-effort: a reservation failure is bookkeeping noise, never
+        # a reason to skip starting the watchdog.
+        for _role, (_url, *_rest) in _watchdog_specs.items():
+            if _url:
+                with contextlib.suppress(Exception):
+                    cred_watchdog_reserve(_role)
         if any(url for url, *_ in _watchdog_specs.values()):
             _cred_watchdog_task = asyncio.create_task(_cred_watchdog_loop(
                 sandbox_session, _watchdog_specs, cred_verdicts, cred_watchdog_reserve, cred_watchdog_sink,
