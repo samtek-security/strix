@@ -306,14 +306,20 @@ def _record_cred_verdicts(verdicts: dict[str, str], limitation: bool) -> None:
 
     Non-secret (role + verdict only). ``limitation`` marks that some verdict
     came from the public-``{"data":{}}``-acceptable GraphQL evidence rule.
-    """
+
+    Sticky like the dead verdicts themselves: the watchdog loop re-saves this same record on
+    every later verdict CHANGE (one role dying mid-run must not erase evidence from a
+    completely different role's EARLIER preflight probe) - OR'd with whatever was already
+    persisted so a TRUE gap, once observed, is never reset back to False by an unrelated
+    later write."""
     try:
         state = get_global_report_state()
         if state is None:
             return
+        prior = (state.run_record.get("credential_preflight") or {}).get("graphql_empty_data_gap")
         state.run_record["credential_preflight"] = {
             "verdicts": dict(verdicts),
-            "graphql_empty_data_gap": bool(limitation),
+            "graphql_empty_data_gap": bool(limitation) or bool(prior),
         }
         state.save_run_data()
     except Exception:  # noqa: BLE001 - telemetry must never break the scan
@@ -397,6 +403,13 @@ async def _preflight_credential_verdicts(
     for role, (url, kind, header_env, header_name, prefix) in specs.items():
         if not url:
             verdicts[role] = "unknown"
+            continue
+        # Sticky dead, checked BEFORE spending a reservation or sending a probe (matching the
+        # watchdog loop's own pre-check): a role this run already confirmed dead must never
+        # consume another attempt of the probe cap, nor have its credential sent again, only to
+        # have the overlay below force the same "dead" verdict anyway.
+        if sticky_dead is not None and sticky_dead.get(role) == "dead":
+            verdicts[role] = "dead"
             continue
         if reserve is not None:
             try:
@@ -494,14 +507,14 @@ async def _cred_watchdog_loop(
             except Exception:  # noqa: BLE001 - transport failure: leave the verdict as-is, never escalate
                 logger.exception("cred watchdog: probe failed for role %s", role)
                 continue
-            new_verdict, _limited = _classify_cred_probe(status, kind, data_ok, empty_data)
+            new_verdict, limited = _classify_cred_probe(status, kind, data_ok, empty_data)
             if verdicts.get(role) == "dead" or _LAST_CRED_VERDICTS.get(role) == "dead":
                 continue  # went dead elsewhere while this probe was in flight
             if new_verdict == verdicts.get(role):
                 continue
             verdicts[role] = new_verdict
             _LAST_CRED_VERDICTS[role] = new_verdict
-            _record_cred_verdicts(verdicts, False)
+            _record_cred_verdicts(verdicts, limited)
             if new_verdict == "dead":
                 logger.warning("cred watchdog: role %s died mid-run", role)
             if sink is not None:
