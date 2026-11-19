@@ -416,6 +416,14 @@ async def _preflight_credential_verdicts(
 _CRED_WATCHDOG_INTERVAL_S = float(os.environ.get("RECON_CRED_WATCHDOG_SECONDS", "600") or 0)
 
 
+def _watchdog_should_spawn(reserve: Any, interval_s: float, specs: dict) -> bool:
+    """Whether cred-expiry piece 3's mid-run watchdog should spawn: the caller wired the
+    reserve hook, the interval is positive (<=0 is the documented disable switch -
+    asyncio.sleep(<=0) would otherwise make the loop spin continuously instead of being
+    disabled), and at least one role has a declared probe target."""
+    return reserve is not None and interval_s > 0 and any(url for url, *_ in specs.values())
+
+
 async def _cred_watchdog_loop(
     session: Any,
     specs: dict[str, tuple[str, str, str, str, str]],
@@ -809,10 +817,8 @@ async def _run_scan(
             )
         # Cred-expiry piece 3: periodic mid-run re-probe for every role preflight did not
         # already find dead (the incident: a credential dying AFTER preflight, not before
-        # it). Only spawned when the caller wired both hooks and there is at least one role
-        # with a declared probe target; a plain run_strix_scan call (cred_watchdog_reserve=
-        # None) never starts it.
-        if cred_watchdog_reserve is not None and any(url for url, *_ in _preflight_specs.values()):
+        # it). A plain run_strix_scan call (cred_watchdog_reserve=None) never starts it either way.
+        if _watchdog_should_spawn(cred_watchdog_reserve, _CRED_WATCHDOG_INTERVAL_S, _preflight_specs):
             _cred_watchdog_task = asyncio.create_task(_cred_watchdog_loop(
                 sandbox_session, _preflight_specs, cred_verdicts, cred_watchdog_reserve, cred_watchdog_sink,
             ))
