@@ -379,6 +379,59 @@ def _classify_cred_probe(status: int | None, kind: str, data_ok: bool, empty_dat
     return "unknown", False
 
 
+async def _retry_dead_verdict_with_fallback(
+    session: Any,
+    role: str,
+    verdict: str,
+    limited: bool,
+    fallback: tuple[str, str, str, str, str] | None,
+    reserve: Callable[[str], Awaitable[bool]] | None,
+    sticky_dead: dict[str, str] | None,
+    timeout: float,
+) -> tuple[str, bool]:
+    """A ``dead`` verdict can be a FALSE dead: the identity's primary probe tests only ONE
+    declared auth delivery, but the exact same credential can be declared a second time under a
+    DIFFERENT delivery (bearer vs api-key) for the same role identity - a 401 under one scheme
+    proves nothing about the other. Shared by piece 2's preflight and piece 3's watchdog
+    re-probe, both of which reuse ``role_probe_targets``/``role_probe_target_fallbacks`` (round
+    22 review, reproduced: declaration order alone decided whether a live credential aborted
+    the run).
+
+    Retries ONCE, only when ``verdict`` is already ``dead`` and a fallback target exists for
+    this role - never for ``ok``/``unknown``, and never a second fallback beyond this one. Only
+    an ``ok`` fallback probe overrides the verdict: a ``dead`` or inconclusive (``unknown``)
+    fallback leaves the primary's concrete dead evidence standing, so a credential genuinely
+    dead under every declared delivery is still correctly reported dead."""
+    if verdict != "dead" or fallback is None:
+        return verdict, limited
+    if sticky_dead is not None and _role_already_dead(sticky_dead, role):
+        return verdict, limited
+    from recon_engine.preflight_probe import probe_role_verdicts
+
+    if reserve is not None:
+        try:
+            granted = await reserve(role)
+        except Exception:  # noqa: BLE001 - a broken reservation channel must never abort the run
+            logger.exception("credential preflight: fallback probe reservation failed for role %s", role)
+            return verdict, limited
+        if not granted:
+            return verdict, limited
+        if sticky_dead is not None and _role_already_dead(sticky_dead, role):
+            return verdict, limited
+    fb_url, fb_kind, fb_env, fb_header, fb_prefix = fallback
+    try:
+        fb_status, _fb_body, fb_data_ok, fb_empty = await probe_role_verdicts(
+            session, fb_url, fb_kind, fb_env, fb_header, fb_prefix, timeout=timeout,
+        )
+    except Exception:  # noqa: BLE001 - transport failure: leave the primary verdict as-is
+        logger.exception("credential preflight: fallback probe failed for role %s", role)
+        return verdict, limited
+    fb_verdict, fb_limited = _classify_cred_probe(fb_status, fb_kind, fb_data_ok, fb_empty)
+    if fb_verdict == "ok":
+        return "ok", limited or fb_limited
+    return verdict, limited or fb_limited
+
+
 async def _preflight_credential_verdicts(
     session: Any,
     scan_config: dict[str, Any],
@@ -409,6 +462,7 @@ async def _preflight_credential_verdicts(
     """
     from recon_engine.preflight_probe import (
         probe_role_verdicts,
+        role_probe_target_fallbacks,
         role_probe_targets,
     )
 
@@ -419,6 +473,11 @@ async def _preflight_credential_verdicts(
     except Exception:  # noqa: BLE001
         logger.exception("credential preflight role/target derivation failed")
         specs = {}
+    try:
+        fallbacks = role_probe_target_fallbacks(scan_config, graphql_path)
+    except Exception:  # noqa: BLE001 - a broken fallback derivation must never abort the run
+        logger.exception("credential preflight fallback target derivation failed")
+        fallbacks = {}
     for role, (url, kind, header_env, header_name, prefix) in specs.items():
         if not url:
             verdicts[role] = "unknown"
@@ -456,6 +515,9 @@ async def _preflight_credential_verdicts(
             verdicts[role] = "unknown"
             continue
         verdict, limited = _classify_cred_probe(status, kind, data_ok, empty_data)
+        verdict, limited = await _retry_dead_verdict_with_fallback(
+            session, role, verdict, limited, fallbacks.get(role), reserve, sticky_dead, _CRED_PROBE_TIMEOUT_S,
+        )
         verdicts[role] = verdict
         limitation = limitation or limited
     # Applied BEFORE run.json is written (not just at the _run_scan call site afterward), so
@@ -490,6 +552,7 @@ async def _cred_watchdog_loop(
     verdicts: dict[str, str],
     reserve: Callable[[str], Awaitable[bool]],
     sink: Callable[[str, str], None] | None,
+    fallbacks: dict[str, tuple[str, str, str, str, str]] | None = None,
 ) -> None:
     """Cred-expiry piece 3 containment: periodic mid-run re-probe for every role not yet known
     dead, reusing piece 2's exact probe mechanism (``specs``/``probe_role_verdicts``) on a timer.
@@ -500,10 +563,14 @@ async def _cred_watchdog_loop(
     timeline can surface it without waiting for the scan to end. ``verdicts`` (and the process-
     global ``_LAST_CRED_VERDICTS``) are updated in place so a late `dead` reaches the engine's
     end-of-scan coverage-worker containment (role-scoped case exclusion) even if this loop is
-    cancelled (sandbox teardown) before the scan function returns.
+    cancelled (sandbox teardown) before the scan function returns. ``fallbacks`` (see
+    ``_retry_dead_verdict_with_fallback``) is piece 2's same alternate-delivery target per role,
+    so a mid-run re-probe can never abort a live credential just because this round happened to
+    test the one declared delivery the target does not accept.
     """
     from recon_engine.preflight_probe import probe_role_verdicts
 
+    fallbacks = fallbacks or {}
     while True:
         await asyncio.sleep(_CRED_WATCHDOG_INTERVAL_S)
         for role, (url, kind, header_env, header_name, prefix) in specs.items():
@@ -536,6 +603,12 @@ async def _cred_watchdog_loop(
             new_verdict, limited = _classify_cred_probe(status, kind, data_ok, empty_data)
             if verdicts.get(role) == "dead" or _role_already_dead(_LAST_CRED_VERDICTS, role):
                 continue  # went dead elsewhere while this probe was in flight
+            new_verdict, limited = await _retry_dead_verdict_with_fallback(
+                session, role, new_verdict, limited, fallbacks.get(role), reserve, _LAST_CRED_VERDICTS,
+                _CRED_PROBE_TIMEOUT_S,
+            )
+            if verdicts.get(role) == "dead" or _role_already_dead(_LAST_CRED_VERDICTS, role):
+                continue  # went dead elsewhere while the fallback probe was in flight
             if new_verdict == verdicts.get(role):
                 # No verdict change (never re-fire the sink/log for one - "one event per
                 # verdict CHANGE" - see _record_cred_health), but a NEW {"data":{}} gap
@@ -869,11 +942,16 @@ async def _run_scan(
         # _preflight_credential_verdicts, which keeps that function's signature unchanged for
         # non-watchdog callers.
         _preflight_specs: dict[str, tuple[str, str, str, str, str]] = {}
+        _preflight_fallbacks: dict[str, tuple[str, str, str, str, str]] = {}
         if cred_watchdog_reserve is not None and cred_verdicts:
             try:
-                from recon_engine.preflight_probe import role_probe_targets
+                from recon_engine.preflight_probe import (
+                    role_probe_target_fallbacks,
+                    role_probe_targets,
+                )
 
                 _preflight_specs = role_probe_targets(scan_config, _gq_path)
+                _preflight_fallbacks = role_probe_target_fallbacks(scan_config, _gq_path)
             except Exception:  # noqa: BLE001 - a broken probe harness must not kill a healthy run
                 logger.exception("cred watchdog: role/target derivation failed")
         if "dead" in cred_verdicts.values():
@@ -893,6 +971,7 @@ async def _run_scan(
         if _watchdog_should_spawn(cred_watchdog_reserve, _CRED_WATCHDOG_INTERVAL_S, _preflight_specs):
             _cred_watchdog_task = asyncio.create_task(_cred_watchdog_loop(
                 sandbox_session, _preflight_specs, cred_verdicts, cred_watchdog_reserve, cred_watchdog_sink,
+                fallbacks=_preflight_fallbacks,
             ))
 
         targets = scan_config.get("targets") or []
