@@ -437,19 +437,30 @@ async def _retry_dead_verdict_with_fallback(
     # credential attached at all (env="") distinguishes the two: if the target is ALSO 2xx with
     # nothing attached, this delivery proves nothing and the primary's concrete dead evidence
     # must stand. This carries no secret, so it spends no probe-cap reservation.
+    #
+    # Only a CLEAN 401 (anon_verdict == "dead") counts as proof this delivery is meaningful - the
+    # target explicitly rejects having no credential at all. Anything else (another 2xx, or an
+    # INCONCLUSIVE result: 403/404/5xx, a transport failure, or a 429 the confirmatory probe
+    # itself can trigger by hitting the same url twice in a row) must never be treated as
+    # evidence the fallback's "ok" is meaningful - the overall mechanism's fail-safe direction is
+    # "unknown is never positive evidence" everywhere else (a denied reservation, a broken
+    # channel, or a transport failure all default to "unknown", never "ok"), and a rate limit or
+    # flaky confirmatory probe must not become a way to launder a genuinely dead credential past
+    # it (round 25 review, reproduced: a 429 on the confirmatory probe let a revoked bearer
+    # token's dead verdict be silently overridden to ok).
     try:
         anon_status, _anon_body, anon_data_ok, anon_empty = await probe_role_verdicts(
             session, fb_url, fb_kind, "", fb_header, fb_prefix, timeout=timeout,
         )
-    except Exception:  # noqa: BLE001 - inconclusive: do not let a flaky confirmatory probe
-        # make a live credential look dead
-        return "ok", limited or fb_limited
+    except Exception:  # noqa: BLE001 - inconclusive: the primary's dead verdict stands
+        logger.exception("credential preflight: confirmatory anon probe failed for role %s", role)
+        return verdict, limited or fb_limited
     anon_verdict, _anon_limited = _classify_cred_probe(anon_status, fb_kind, anon_data_ok, anon_empty)
-    if anon_verdict == "ok":
+    if anon_verdict != "dead":
         logger.warning(
-            "credential preflight: fallback target for role %s returns 2xx with no credential "
-            "attached - the fallback's \"ok\" verdict is not meaningful, keeping the primary's "
-            "dead verdict", role,
+            "credential preflight: fallback target for role %s did not clearly reject an "
+            "anonymous request (verdict %s) - the fallback's \"ok\" verdict is not confirmed, "
+            "keeping the primary's dead verdict", role, anon_verdict,
         )
         return verdict, limited or fb_limited
     return "ok", limited or fb_limited
