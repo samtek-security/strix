@@ -427,9 +427,32 @@ async def _retry_dead_verdict_with_fallback(
         logger.exception("credential preflight: fallback probe failed for role %s", role)
         return verdict, limited
     fb_verdict, fb_limited = _classify_cred_probe(fb_status, fb_kind, fb_data_ok, fb_empty)
-    if fb_verdict == "ok":
+    if fb_verdict != "ok":
+        return verdict, limited or fb_limited
+    # A 2xx under the fallback's delivery is not, by itself, proof the CREDENTIAL made the
+    # difference: the target may simply not check this header/scheme at all and fall through to
+    # public access regardless of what is attached (round 24 review, reproduced: a route 401s a
+    # revoked bearer token but returns 200 whenever Authorization is absent, so an unrelated
+    # X-API-Key fallback also gets 200). A confirmatory probe to the SAME url/kind with NO
+    # credential attached at all (env="") distinguishes the two: if the target is ALSO 2xx with
+    # nothing attached, this delivery proves nothing and the primary's concrete dead evidence
+    # must stand. This carries no secret, so it spends no probe-cap reservation.
+    try:
+        anon_status, _anon_body, anon_data_ok, anon_empty = await probe_role_verdicts(
+            session, fb_url, fb_kind, "", fb_header, fb_prefix, timeout=timeout,
+        )
+    except Exception:  # noqa: BLE001 - inconclusive: do not let a flaky confirmatory probe
+        # make a live credential look dead
         return "ok", limited or fb_limited
-    return verdict, limited or fb_limited
+    anon_verdict, _anon_limited = _classify_cred_probe(anon_status, fb_kind, anon_data_ok, anon_empty)
+    if anon_verdict == "ok":
+        logger.warning(
+            "credential preflight: fallback target for role %s returns 2xx with no credential "
+            "attached - the fallback's \"ok\" verdict is not meaningful, keeping the primary's "
+            "dead verdict", role,
+        )
+        return verdict, limited or fb_limited
+    return "ok", limited or fb_limited
 
 
 async def _preflight_credential_verdicts(
