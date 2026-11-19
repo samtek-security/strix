@@ -420,6 +420,13 @@ async def _preflight_credential_verdicts(
             if not granted:
                 verdicts[role] = "unknown"
                 continue
+            # Re-check: the reservation await can suspend long enough for the local JWT-expiry
+            # ticker (a separate task, writing straight into sticky_dead/_LAST_CRED_VERDICTS)
+            # to confirm this role dead while this coroutine was waiting - never send the
+            # credential after that, matching the watchdog loop's own post-reservation recheck.
+            if sticky_dead is not None and sticky_dead.get(role) == "dead":
+                verdicts[role] = "dead"
+                continue
         try:
             status, body, data_ok, empty_data = await probe_role_verdicts(
                 session, url, kind, header_env, header_name, prefix,
@@ -511,6 +518,13 @@ async def _cred_watchdog_loop(
             if verdicts.get(role) == "dead" or _LAST_CRED_VERDICTS.get(role) == "dead":
                 continue  # went dead elsewhere while this probe was in flight
             if new_verdict == verdicts.get(role):
+                # No verdict change (never re-fire the sink/log for one - "one event per
+                # verdict CHANGE" - see _record_cred_health), but a NEW {"data":{}} gap
+                # observed on an unchanged "unknown" must still reach run.json: skipping
+                # persistence here entirely would silently drop the first (and possibly only)
+                # time this limitation was actually seen for the role.
+                if limited:
+                    _record_cred_verdicts(verdicts, limited)
                 continue
             verdicts[role] = new_verdict
             _LAST_CRED_VERDICTS[role] = new_verdict
