@@ -320,6 +320,21 @@ def _record_cred_verdicts(verdicts: dict[str, str], limitation: bool) -> None:
         logger.exception("failed to record credential preflight verdicts")
 
 
+def _apply_sticky_dead(verdicts: dict[str, str], last_verdicts: dict[str, str]) -> dict[str, str]:
+    """Overlay every role `last_verdicts` already has as ``dead`` onto `verdicts`, in place.
+
+    `dead` is sticky for the life of a run (cred-expiry piece 3's invariant, otherwise only
+    enforced inside the watchdog loop) - a later phase's own fresh preflight probe can
+    legitimately come back ``unknown`` (its reservation refused because an earlier phase
+    already spent this run's probe cap on that role), and without this overlay that would both
+    erase the role's confirmed death from the process-global map AND let this phase's own
+    abort-check miss it, proceeding to run agent turns against an already-dead credential."""
+    for role, prior in last_verdicts.items():
+        if prior == "dead":
+            verdicts[role] = "dead"
+    return verdicts
+
+
 def _classify_cred_probe(status: int | None, kind: str, data_ok: bool, empty_data: bool) -> tuple[str, bool]:
     """One probe result -> (verdict, limitation). Shared by preflight (piece 2) and the
     mid-run watchdog (piece 3) so the two can never classify the same response differently.
@@ -779,6 +794,12 @@ async def _run_scan(
         except Exception:  # noqa: BLE001 - a broken probe harness must not kill a healthy run
             logger.exception("credential preflight failed (non-fatal); proceeding")
             cred_verdicts = {}
+        # Sticky dead, applied here too (not just the watchdog loop): a later phase's FRESH probe
+        # can legitimately come back "unknown" (reservation refused - this run's probe cap was
+        # already spent in an earlier phase), which must never erase a role this SAME run already
+        # confirmed dead, nor let that phase's own abort-check below miss it and proceed to run
+        # agent turns against an already-dead credential.
+        _apply_sticky_dead(cred_verdicts, _LAST_CRED_VERDICTS)
         # Published to the process-global map, and through the live health sink, HERE - before
         # the dead-role check below can raise. The engine's post-scan fold (which also turns this
         # into a cred_health timeline event) only runs after run_recon_scan RETURNS, which a
