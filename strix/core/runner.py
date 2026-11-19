@@ -326,6 +326,25 @@ def _record_cred_verdicts(verdicts: dict[str, str], limitation: bool) -> None:
         logger.exception("failed to record credential preflight verdicts")
 
 
+def _role_already_dead(sticky_dead: dict[str, str] | None, role: str) -> bool:
+    """Whether `role` is already recorded dead in sticky_dead, by exact match OR by any alias
+    sharing its sandbox env var. An exact-match-only check misses a role declared under a
+    different alias than the one sticky_dead happened to record it under (e.g. "User" vs
+    "user", or "qa_user" vs "qa-user" - both pairs collapse to the SAME RECON_CRED_* env var
+    the engine's own credential selection uses) - checked the same way here, so a role
+    confirmed dead under one alias can never be probed again under another."""
+    if not sticky_dead:
+        return False
+    if sticky_dead.get(role) == "dead":
+        return True
+    try:
+        from recon_engine.activities import _cred_env_name
+    except ImportError:  # pragma: no cover - light env without the engine
+        return False
+    env = _cred_env_name(role)
+    return any(_cred_env_name(k) == env and v == "dead" for k, v in sticky_dead.items())
+
+
 def _apply_sticky_dead(verdicts: dict[str, str], last_verdicts: dict[str, str]) -> dict[str, str]:
     """Overlay every role `last_verdicts` already has as ``dead`` onto `verdicts`, in place.
 
@@ -408,7 +427,7 @@ async def _preflight_credential_verdicts(
         # watchdog loop's own pre-check): a role this run already confirmed dead must never
         # consume another attempt of the probe cap, nor have its credential sent again, only to
         # have the overlay below force the same "dead" verdict anyway.
-        if sticky_dead is not None and sticky_dead.get(role) == "dead":
+        if _role_already_dead(sticky_dead, role):
             verdicts[role] = "dead"
             continue
         if reserve is not None:
@@ -424,7 +443,7 @@ async def _preflight_credential_verdicts(
             # ticker (a separate task, writing straight into sticky_dead/_LAST_CRED_VERDICTS)
             # to confirm this role dead while this coroutine was waiting - never send the
             # credential after that, matching the watchdog loop's own post-reservation recheck.
-            if sticky_dead is not None and sticky_dead.get(role) == "dead":
+            if _role_already_dead(sticky_dead, role):
                 verdicts[role] = "dead"
                 continue
         try:
@@ -493,7 +512,7 @@ async def _cred_watchdog_loop(
             # _LAST_CRED_VERDICTS) got there first - checked again right before the write below
             # so a probe that was already in flight when the OTHER source went dead can never
             # resurrect the role to ok/unknown.
-            if not url or verdicts.get(role) == "dead" or _LAST_CRED_VERDICTS.get(role) == "dead":
+            if not url or verdicts.get(role) == "dead" or _role_already_dead(_LAST_CRED_VERDICTS, role):
                 continue  # no declared target, or already terminal - never re-probed
             try:
                 if not await reserve(role):
@@ -505,7 +524,7 @@ async def _cred_watchdog_loop(
             # that went dead elsewhere while this coroutine was suspended. Not required for
             # correctness (the post-probe check below still refuses the write either way) -
             # just avoids an avoidable request to an already-known-dead target.
-            if verdicts.get(role) == "dead" or _LAST_CRED_VERDICTS.get(role) == "dead":
+            if verdicts.get(role) == "dead" or _role_already_dead(_LAST_CRED_VERDICTS, role):
                 continue
             try:
                 status, _body, data_ok, empty_data = await probe_role_verdicts(
@@ -515,7 +534,7 @@ async def _cred_watchdog_loop(
                 logger.exception("cred watchdog: probe failed for role %s", role)
                 continue
             new_verdict, limited = _classify_cred_probe(status, kind, data_ok, empty_data)
-            if verdicts.get(role) == "dead" or _LAST_CRED_VERDICTS.get(role) == "dead":
+            if verdicts.get(role) == "dead" or _role_already_dead(_LAST_CRED_VERDICTS, role):
                 continue  # went dead elsewhere while this probe was in flight
             if new_verdict == verdicts.get(role):
                 # No verdict change (never re-fire the sink/log for one - "one event per
