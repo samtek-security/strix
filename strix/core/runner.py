@@ -351,15 +351,13 @@ async def _preflight_credential_verdicts(
 
     Cred-expiry piece 3: ``reserve`` (when given) charges the durable per-run
     probe-cap reservation BEFORE issuing the probe - a phased run's later
-    phases and retries all charge the same counter as attempt 1, so the
-    counter (and its diagnostics) reflect the true probe volume against the
-    target, and correspondingly shrink what the watchdog's OWN re-probes have
-    left. Reserving before probing means a cancellation mid-probe still
-    leaves the attempt charged. Unlike the watchdog's optional re-probes, a
-    refused reservation (cap already saturated) does NOT skip this probe:
-    piece 2's safety guarantee (catch a dead role before any budget is
-    spent) must never degrade to "unknown, proceed" just because a
-    bookkeeping counter saturated.
+    phases and retries all charge the same counter as attempt 1 of the SAME
+    cap the watchdog's re-probes spend down, so the cap bounds the whole
+    run's probe volume against the target, not just the watchdog's share of
+    it. A refused reservation (cap already saturated) or a broken
+    reservation channel skips the probe for that role (verdict ``unknown``,
+    fail-open to not-probing, never to aborting) - identical treatment to a
+    role with no declared endpoint.
     """
     from recon_engine.preflight_probe import (
         probe_role_verdicts,
@@ -378,8 +376,14 @@ async def _preflight_credential_verdicts(
             verdicts[role] = "unknown"
             continue
         if reserve is not None:
-            with contextlib.suppress(Exception):  # a broken reservation channel must never abort the run
-                await reserve(role)
+            try:
+                granted = await reserve(role)
+            except Exception:  # noqa: BLE001 - a broken reservation channel must never abort the run
+                logger.exception("credential preflight: probe reservation failed for role %s", role)
+                granted = False
+            if not granted:
+                verdicts[role] = "unknown"
+                continue
         try:
             status, body, data_ok, empty_data = await probe_role_verdicts(
                 session, url, kind, header_env, header_name, prefix,
