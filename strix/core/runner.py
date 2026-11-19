@@ -359,6 +359,7 @@ async def _preflight_credential_verdicts(
     scan_config: dict[str, Any],
     graphql_path: str,
     reserve: Callable[[str], Awaitable[bool]] | None = None,
+    sticky_dead: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """One declared-endpoint identity probe per fixed-header role, in-sandbox.
 
@@ -392,7 +393,7 @@ async def _preflight_credential_verdicts(
         specs = role_probe_targets(scan_config, graphql_path)
     except Exception:  # noqa: BLE001
         logger.exception("credential preflight role/target derivation failed")
-        return {}
+        specs = {}
     for role, (url, kind, header_env, header_name, prefix) in specs.items():
         if not url:
             verdicts[role] = "unknown"
@@ -418,6 +419,11 @@ async def _preflight_credential_verdicts(
         verdict, limited = _classify_cred_probe(status, kind, data_ok, empty_data)
         verdicts[role] = verdict
         limitation = limitation or limited
+    # Applied BEFORE run.json is written (not just at the _run_scan call site afterward), so
+    # the persisted record can never show "unknown" for a role the run then aborts on for
+    # being "dead" - run.json and the abort decision must never disagree about the same role.
+    if sticky_dead is not None:
+        _apply_sticky_dead(verdicts, sticky_dead)
     _record_cred_verdicts(verdicts, limitation)
     return verdicts
 
@@ -790,15 +796,14 @@ async def _run_scan(
         try:
             cred_verdicts = await _preflight_credential_verdicts(
                 sandbox_session, scan_config, _gq_path, reserve=cred_watchdog_reserve,
+                sticky_dead=_LAST_CRED_VERDICTS,
             )
         except Exception:  # noqa: BLE001 - a broken probe harness must not kill a healthy run
             logger.exception("credential preflight failed (non-fatal); proceeding")
             cred_verdicts = {}
-        # Sticky dead, applied here too (not just the watchdog loop): a later phase's FRESH probe
-        # can legitimately come back "unknown" (reservation refused - this run's probe cap was
-        # already spent in an earlier phase), which must never erase a role this SAME run already
-        # confirmed dead, nor let that phase's own abort-check below miss it and proceed to run
-        # agent turns against an already-dead credential.
+        # Belt-and-suspenders for the exception-fallback path above (the call itself raised, so
+        # the function's own internal overlay never ran) - the normal path already applies this
+        # overlay before run.json is written; this is a harmless no-op repeat there.
         _apply_sticky_dead(cred_verdicts, _LAST_CRED_VERDICTS)
         # Published to the process-global map, and through the live health sink, HERE - before
         # the dead-role check below can raise. The engine's post-scan fold (which also turns this
