@@ -322,13 +322,20 @@ def _record_cred_verdicts(verdicts: dict[str, str], limitation: bool) -> None:
 
 def _classify_cred_probe(status: int | None, kind: str, data_ok: bool, empty_data: bool) -> tuple[str, bool]:
     """One probe result -> (verdict, limitation). Shared by preflight (piece 2) and the
-    mid-run watchdog (piece 3) so the two can never classify the same response differently."""
+    mid-run watchdog (piece 3) so the two can never classify the same response differently.
+
+    ``limitation`` flags the known gap where a public GraphQL endpoint answers ``{"data":{}}``
+    to anyone, authenticated or not - too weak to count as identity evidence (the verdict here
+    is ``unknown``, never a false ``ok``), but still worth recording so the gap is visible in
+    the run metadata rather than silently absent."""
     if status is None:
         return "unknown", False
     if status == 401:
         return "dead", False
-    if 200 <= status < 300 and (kind != "graphql" or data_ok):
-        return "ok", bool(empty_data)
+    if 200 <= status < 300:
+        if kind != "graphql" or data_ok:
+            return "ok", False
+        return "unknown", bool(empty_data)
     return "unknown", False
 
 
