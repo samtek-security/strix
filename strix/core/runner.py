@@ -764,6 +764,19 @@ async def _run_scan(
         except Exception:  # noqa: BLE001 - a broken probe harness must not kill a healthy run
             logger.exception("credential preflight failed (non-fatal); proceeding")
             cred_verdicts = {}
+        # Published to the process-global map, and through the live health sink, HERE - before
+        # the dead-role check below can raise. The engine's post-scan fold (which also turns this
+        # into a cred_health timeline event) only runs after run_recon_scan RETURNS, which a
+        # preflight-dead abort never reaches. Without this, the single most common failure this
+        # plan answers (dead before any turn) would be the one case whose cred_health event never
+        # appears on the timeline.
+        _LAST_CRED_VERDICTS.update(cred_verdicts)
+        if cred_watchdog_sink is not None:
+            for _role, _verdict in cred_verdicts.items():
+                try:
+                    cred_watchdog_sink(_role, _verdict)
+                except Exception:  # noqa: BLE001 - telemetry must never break the run
+                    logger.exception("cred preflight: sink failed for role %s", _role)
         # Cred-expiry piece 3: role/target derivation for the watchdog spawn below. Recomputed
         # (role_probe_targets is pure and cheap - no I/O) rather than threaded out of
         # _preflight_credential_verdicts, which keeps that function's signature unchanged for
