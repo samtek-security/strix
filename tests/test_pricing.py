@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import litellm
 import pytest
@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from strix.config import loader
 from strix.config.settings import LlmSettings
 from strix.report.pricing import resolve_litellm_model
+from strix.report.state import litellm_cost_callback
 from strix.report.usage import LLMUsageLedger
 
 
@@ -345,3 +346,49 @@ def test_first_party_rule_does_not_override_an_explicit_route() -> None:
     finally:
         litellm.model_cost = original
         resolve_litellm_model.cache_clear()
+
+
+def _callback_price(model: str, cost_map: dict[str, dict[str, float]]) -> list[str]:
+    """Model names the cost callback asks LiteLLM to price, in order."""
+    original = litellm.model_cost
+    _with_cost_map(cost_map)
+    report_state = MagicMock()
+    response = {"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
+    asked: list[str] = []
+
+    def fake_completion_cost(**kwargs: object) -> float:
+        asked.append(str(kwargs["model"]))
+        return 0.5
+
+    try:
+        with (
+            patch("strix.report.state.get_global_report_state", return_value=report_state),
+            patch("litellm.completion_cost", side_effect=fake_completion_cost),
+        ):
+            litellm_cost_callback({"response_cost": None, "model": model}, response)
+    finally:
+        litellm.model_cost = original
+        resolve_litellm_model.cache_clear()
+    return asked
+
+
+_DISAGREEING = {
+    "zai/glm-5": {"input_cost_per_token": 1.0, "output_cost_per_token": 2.0},
+    "gateway-a/glm-5": {"input_cost_per_token": 3.0, "output_cost_per_token": 4.0},
+}
+_UNANIMOUS = {
+    "zai/glm-5": {"input_cost_per_token": 1.0, "output_cost_per_token": 2.0},
+    "gateway-a/glm-5": {"input_cost_per_token": 1.0, "output_cost_per_token": 2.0},
+}
+
+
+def test_callers_leave_unresolved_qualified_route_unpriced_when_candidates_disagree() -> None:
+    assert _callback_price("gateway-b/glm-5", _DISAGREEING) == []
+
+
+def test_callers_price_qualified_route_when_all_candidates_agree() -> None:
+    assert _callback_price("gateway-b/glm-5", _UNANIMOUS) == ["gateway-a/glm-5"]
+
+
+def test_callers_apply_first_party_route_to_a_bare_name() -> None:
+    assert _callback_price("glm-5", _DISAGREEING) == ["zai/glm-5"]

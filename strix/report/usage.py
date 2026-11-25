@@ -310,8 +310,8 @@ def _estimate_litellm_entry_cost(entry: Any, model: str) -> float | None:
     if "/" in model:
         candidates.append(model.rsplit("/", 1)[-1])
 
-    for candidate in candidates:
-        resolved = resolve_litellm_model(candidate)
+    for index, candidate in enumerate(candidates):
+        resolved = resolve_litellm_model(candidate, first_party=index == 0)
         if not resolved:
             continue
         try:

@@ -1209,11 +1209,12 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
     if isinstance(provider, str) and provider and not model.startswith(f"{provider}/"):
         candidates.append(f"{provider}/{model}")
     candidates.append(model)
+    retry_from = len(candidates)
     if "/" in model:
         candidates.append(model.rsplit("/", 1)[-1])
 
-    for candidate in candidates:
-        resolved = resolve_litellm_model(candidate)
+    for index, candidate in enumerate(candidates):
+        resolved = resolve_litellm_model(candidate, first_party=index < retry_from)
         if not resolved:
             continue
         try:

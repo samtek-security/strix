@@ -69,8 +69,13 @@ def _pick_match(
 
 
 @lru_cache(maxsize=512)
-def resolve_litellm_model(model: str) -> str | None:
-    """Return a provider-qualified model name that LiteLLM can price."""
+def resolve_litellm_model(model: str, *, first_party: bool = True) -> str | None:
+    """Return a provider-qualified model name that LiteLLM can price.
+
+    ``first_party=False`` turns off the first-party tie-break. Callers pass it
+    when they retry the bare name of a route the user qualified, so that route
+    is never priced at another provider's rate.
+    """
     try:
         import litellm
 
@@ -101,7 +106,9 @@ def resolve_litellm_model(model: str) -> str | None:
             matches = sorted(key for key in model_cost if key.endswith(f"/{name}"))
             if not matches:
                 continue
-            picked = _pick_match(name, matches, model_cost, bare="/" not in normalized)
+            picked = _pick_match(
+                name, matches, model_cost, bare=first_party and "/" not in normalized
+            )
             if picked is not None:
                 return picked
         return None  # noqa: TRY300
