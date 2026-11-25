@@ -29,10 +29,13 @@ logger = logging.getLogger(__name__)
 # Tools whose call arguments or output reflect the target or an external
 # system verbatim: the exploitation workflow's Level-3 live-request proof, raw
 # HTTP captures from the proxy, and arbitrary MCP results. A call to one of
-# these is never redacted, whatever it contains - a target's own leaked
-# credential is the finding, not noise to scrub, and shape-based matching
-# can't tell "Recon's own token" from "a target's token" when both happen to
-# be a JWT or a Bearer string. Scoped at the whole-call granularity (not
+# these never goes through shape-based redaction, whatever it contains - a
+# target's own leaked credential is the finding, not noise to scrub, and
+# shape-based matching can't tell "Recon's own token" from "a target's token"
+# when both happen to be a JWT or a Bearer string. It still gets Recon's exact
+# registered literals scrubbed (redact_literals_in_structure): that match has
+# no such ambiguity, so there is nothing to weigh against leaving a genuine
+# Recon credential on disk. Scoped at the whole-call granularity (not
 # per-field) since splitting a single call's arguments into redact/don't-
 # redact halves is itself a correctness risk this isn't worth taking for the
 # few surrounding fields (title/description context) it would spare.
@@ -81,43 +84,58 @@ class _PooledConnectionSession(SQLiteSession):
     async def _unredacted_call_ids(self, new_items: list[Any]) -> set[str]:
         """``call_id`` values whose originating call was an unredacted tool.
 
-        Resolved against the whole session, not just ``new_items``: a call
-        and its output can land in separate ``add_items`` batches (a resume
-        replays the call from a prior process), and getting this the wrong
-        way - treating an unredacted tool's output as unknown and redacting
-        it - is the one mistake this exists to prevent.
+        Checked against ``new_items`` first; the whole session history is
+        read only when an output's call isn't there, since a call and its
+        output can land in separate ``add_items`` batches (a resume replays
+        the call from a prior process) and getting this the wrong way -
+        treating an unredacted tool's output as unknown and redacting it -
+        is the one mistake this exists to prevent. Skipping the full-history
+        read whenever the batch already resolves itself (the common case: a
+        normal turn persists a call and its output together) keeps this
+        O(1) in the session's length instead of O(n) per ``add_items`` call.
         """
-        call_ids = {
+        batch_call_ids = {
+            item["call_id"]
+            for item in new_items
+            if isinstance(item, dict)
+            and item.get("type") == "function_call"
+            and isinstance(item.get("call_id"), str)
+        }
+        unredacted_call_ids = {
             item["call_id"]
             for item in new_items
             if _is_unredacted_call(item) and isinstance(item.get("call_id"), str)
         }
-        has_output_item = any(
-            isinstance(item, dict) and item.get("type") == "function_call_output"
+        unresolved = {
+            item["call_id"]
             for item in new_items
-        )
-        if not has_output_item:
-            return call_ids
+            if isinstance(item, dict)
+            and item.get("type") == "function_call_output"
+            and isinstance(item.get("call_id"), str)
+            and item["call_id"] not in batch_call_ids
+        }
+        if not unresolved:
+            return unredacted_call_ids
         # Explicit ``limit=None``: this lookup must see the whole history
         # regardless of any session-settings default limit, or a call made
         # far enough back could be missed and its output wrongly redacted.
         existing: list[Any] = await self.get_items(limit=None)
-        call_ids.update(
+        unredacted_call_ids.update(
             item["call_id"]
             for item in existing
-            if _is_unredacted_call(item) and isinstance(item.get("call_id"), str)
+            if _is_unredacted_call(item) and item.get("call_id") in unresolved
         )
-        return call_ids
+        return unredacted_call_ids
 
     def _redact_item(self, item: Any, unredacted_call_ids: set[str]) -> Any:
         if not isinstance(item, dict):
             return item
         item_type = item.get("type")
         if item_type == "function_call" and item.get("name") in _UNREDACTED_TOOL_NAMES:
-            return item
+            return redaction.redact_literals_in_structure(item)
         if item_type == "function_call_output" and item.get("call_id") in unredacted_call_ids:
-            return item
-        return redaction.redact_structure(item)
+            return redaction.redact_literals_in_structure(item)
+        return redaction.redact_structure_json_aware(item)
 
 
 def _is_unredacted_call(item: Any) -> bool:

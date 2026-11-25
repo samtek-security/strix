@@ -36,6 +36,8 @@ subscription-backend access token) is redacted even when it matches no shape.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
@@ -187,6 +189,94 @@ def redact_structure(value: Any) -> Any:
     string, needs scrubbing before it reaches disk.
     """
     return _redact_value(value, 0)
+
+
+def _redact_value_json_aware(value: Any, depth: int) -> Any:
+    if isinstance(value, str):
+        parsed: Any = None
+        if depth < 8:
+            with contextlib.suppress(json.JSONDecodeError, TypeError):
+                parsed = json.loads(value)
+        if isinstance(parsed, dict | list):
+            return json.dumps(_redact_value_json_aware(parsed, depth + 1))
+        return redact_text(value)
+    if value is None or isinstance(value, bool | int | float) or depth >= 8:
+        return value
+    if isinstance(value, Mapping):
+        out: dict[Any, Any] = {}
+        for key, item in cast("Mapping[Any, Any]", value).items():
+            safe_key = redact_text(key) if isinstance(key, str) else key
+            if _normalize_name(key) in _SENSITIVE_NAMES:
+                out[safe_key] = REDACTED
+            else:
+                out[safe_key] = _redact_value_json_aware(item, depth + 1)
+        return out
+    if isinstance(value, Sequence | set | frozenset):
+        return [_redact_value_json_aware(item, depth + 1) for item in cast("Sequence[Any]", value)]
+    return value
+
+
+def redact_structure_json_aware(value: Any) -> Any:
+    """Like :func:`redact_structure`, but a string leaf that itself parses as
+    JSON is redacted as structured data and re-serialized, not scrubbed as
+    opaque text.
+
+    A persisted session item's ``arguments``/``output`` fields are often a
+    JSON-encoded blob, not already-parsed data. Running the plain-text
+    scrubbers over that blob risks corrupting its syntax: a credential-header
+    match in :data:`_CRED_HEADER_LINE_RE` consumes text "to end of line" by
+    design (a ``Cookie`` value can hold several ``;``-separated secrets), but
+    a single-line JSON blob has no internal line breaks, so that consumes
+    everything after the match - the rest of the object, not just one field.
+    Parsing first and redacting the structure avoids that.
+    """
+    return _redact_value_json_aware(value, 0)
+
+
+def redact_literals_only(text: str) -> str:
+    """Replace only the exact registered literals in ``text`` - nothing
+    shape-based, no credential-header or assignment matching.
+
+    Safe to run even over target-sourced content that must otherwise stay
+    untouched: an exact literal match is Recon's own registered credential by
+    construction, not a shape a target's own secret could coincidentally
+    share, so there is no ambiguity to weigh here the way there is for
+    :func:`redact_text`'s other three layers. A plain substring replace can't
+    corrupt surrounding JSON (unlike the shape-based layer): it never
+    consumes anything beyond the literal itself.
+    """
+    if not text:
+        return text
+    for secret in _literal_secrets:
+        if secret in text:
+            text = text.replace(secret, REDACTED)
+    return text
+
+
+def _redact_literals_in_structure(value: Any, depth: int) -> Any:
+    if isinstance(value, str):
+        return redact_literals_only(value)
+    if value is None or isinstance(value, bool | int | float) or depth >= 8:
+        return value
+    if isinstance(value, Mapping):
+        return {
+            key: _redact_literals_in_structure(item, depth + 1)
+            for key, item in cast("Mapping[Any, Any]", value).items()
+        }
+    if isinstance(value, Sequence | set | frozenset):
+        return [
+            _redact_literals_in_structure(item, depth + 1)
+            for item in cast("Sequence[Any]", value)
+        ]
+    return value
+
+
+def redact_literals_in_structure(value: Any) -> Any:
+    """Recursively replace exact registered literals through ``value``,
+    leaving shapes, header names, and all other content - including
+    target-sourced data - untouched. See :func:`redact_literals_only`.
+    """
+    return _redact_literals_in_structure(value, 0)
 
 
 def _redact_headers(headers: Mapping[str, str]) -> dict[str, str]:
