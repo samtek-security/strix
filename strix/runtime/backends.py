@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Self
 
 
 if TYPE_CHECKING:
@@ -30,9 +30,9 @@ async def _docker_backend(
     bind_mounts: list[dict[str, Any]] | None = None,
     scan_id: str = "",
     heartbeat_path: str = "",
-    gateway_spec_path: str = "",
-    gateway_spec_json: str = "",
-    gateway_target_ports: tuple[int, ...] = (),
+    gateway_spec_path: str = "",  # noqa: ARG001 - shared SandboxBackend call signature
+    gateway_spec_json: str = "",  # noqa: ARG001 - (session_manager passes these to every
+    gateway_target_ports: tuple[int, ...] = (),  # noqa: ARG001 - backend uniformly)
 ) -> tuple[Any, Any]:
     """Bring up a session backed by the local Docker daemon.
 
@@ -60,7 +60,8 @@ async def _docker_backend(
 
     client = StrixDockerSandboxClient(connect_docker())
     client.strix_bind_mounts = bind_mounts or []
-    client.recon_scan_id = scan_id  # stamped onto the container's recon.scan_id label for the reaper
+    # stamped onto the container's recon.scan_id label for the reaper
+    client.recon_scan_id = scan_id
     client.recon_heartbeat_path = heartbeat_path  # recon.heartbeat_path label (liveness signal)
     options = DockerSandboxClientOptions(image=image, exposed_ports=exposed_ports)
     session = await client.create(options=options, manifest=manifest)
@@ -74,7 +75,11 @@ def _gateway_name(scan_id: str) -> str:
     return "recon-egress-" + (scan_id or "default")
 
 
-async def _contained_docker_backend(
+async def _contained_docker_backend(  # noqa: PLR0912, PLR0915 - 2026-11-25: the branch/
+    # statement count is the ordered fail-closed boundary setup (network, CA volume,
+    # gateway, readiness, dual-home, agent) with cleanup at each failure point; splitting
+    # it risks the exact ordering this function exists to enforce, out of scope for a
+    # lint-only pass.
     *,
     image: str,
     manifest: Manifest,
@@ -83,19 +88,21 @@ async def _contained_docker_backend(
     scan_id: str = "",
     heartbeat_path: str = "",
     gateway_spec_path: str = "",
-    gateway_spec_json: str = "",
-    gateway_target_ports: tuple[int, ...] = (),
+    gateway_spec_json: str = "",  # noqa: ARG001 - gateway_spec_path carries the spec
+    gateway_target_ports: tuple[int, ...] = (),  # noqa: ARG001 - here; see _docker_backend
 ) -> tuple[Any, Any]:
     """Own-netns contained backend (P0-2, opt-in via RECON_CONTAINED_EGRESS).
 
     Ordering (fail-closed): create an INTERNAL-only network -> start the egress-gateway container on
     it (same recon.* labels so the reaper owns it) -> WAIT for readiness -> only then create the
-    agent joined to that network with caps dropped and no host route (docker_client.recon_contained).
+    agent joined to that network with caps dropped and no host route
+    (docker_client.recon_contained).
     The agent's proxy env is the gateway's deterministic name (set in session_manager). If the
     gateway never becomes ready this raises before the agent is created - the agent is never brought
     up with a broken/absent boundary.
     """
     import stat as _stat
+
     import docker
     from agents.sandbox.sandboxes.docker import DockerSandboxClientOptions
 
@@ -106,7 +113,7 @@ async def _contained_docker_backend(
     if not _gsp:
         raise ValueError("contained docker backend requires gateway_spec_path")
     try:
-        _stat_result = os.stat(_gsp)
+        _stat_result = Path(_gsp).stat()
     except OSError as exc:
         raise ValueError(f"gateway_spec_path {_gsp!r} is not accessible: {exc}") from exc
     if not _stat.S_ISREG(_stat_result.st_mode):
@@ -138,12 +145,12 @@ async def _contained_docker_backend(
             labels={**boundary_labels, "recon.role": "agent-gateway-network"},
         )
         network_created = True
-    except docker.errors.APIError:
+    except docker.errors.APIError as exc:
         matches = dc.networks.list(names=[net_name])
         if len(matches) != 1:
             raise RuntimeError(
                 f"contained network {net_name!r} could not be created or uniquely resolved"
-            )
+            ) from exc
         internal_net = matches[0]
     internal_net.reload()
     net_attrs = internal_net.attrs
@@ -156,7 +163,7 @@ async def _contained_docker_backend(
         or bool(net_attrs.get("Containers"))
     ):
         if network_created:
-            with _suppress():
+            with _Suppress():
                 internal_net.remove()
         raise RuntimeError(
             f"contained network {net_name!r} failed ownership/driver/isolation/attachment checks; "
@@ -171,11 +178,13 @@ async def _contained_docker_backend(
     except docker.errors.APIError:
         ca_volume = dc.volumes.get(ca_name)
     ca_volume.reload()
-    if any((ca_volume.attrs.get("Labels") or {}).get(k) != v for k, v in expected_ca_labels.items()):
+    if any(
+        (ca_volume.attrs.get("Labels") or {}).get(k) != v for k, v in expected_ca_labels.items()
+    ):
         if ca_created:
-            with _suppress():
+            with _Suppress():
                 ca_volume.remove(force=True)
-        with _suppress():
+        with _Suppress():
             internal_net.remove()
         raise RuntimeError(
             f"gateway CA volume {ca_name!r} failed ownership checks; refusing to start gateway"
@@ -183,11 +192,11 @@ async def _contained_docker_backend(
 
     def _cleanup_boundary(gateway: Any | None = None) -> None:
         if gateway is not None:
-            with _suppress():
+            with _Suppress():
                 gateway.remove(force=True)
-        with _suppress():
+        with _Suppress():
             ca_volume.remove(force=True)
-        with _suppress():
+        with _Suppress():
             internal_net.remove()
 
     # 2. Gateway container: same recon.* labels as the agent so the independent reaper tears both
@@ -213,7 +222,9 @@ async def _contained_docker_backend(
         # outbound NIC is attached, so egress-network peers cannot proxy.
         "RECON_PROXY_INTERNAL_ONLY": "1",
     }
-    capture_enabled = os.environ.get("RECON_GATEWAY_CAPTURE", "").strip().lower() in ("1", "true", "yes")
+    capture_enabled = os.environ.get("RECON_GATEWAY_CAPTURE", "").strip().lower() in (
+        "1", "true", "yes",
+    )
     if capture_enabled:
         # The token helper lives with the Recon wrapper's Kubernetes backend,
         # which shares it; this path only runs inside the Recon engine.
@@ -257,7 +268,9 @@ async def _contained_docker_backend(
     # the agent never starts against a gateway that cannot serve redacted evidence.
     if not _wait_gateway_ready(gw, require_capture_ready=capture_enabled):
         _cleanup_boundary(gw)
-        raise RuntimeError(f"egress gateway {gw_name} not ready; refusing to start the agent (fail-closed)")
+        raise RuntimeError(
+            f"egress gateway {gw_name} not ready; refusing to start the agent (fail-closed)"
+        )
 
     # Dual-home only after the private listener is ready. Attachment is mandatory:
     # without it the run is broken, so remove the gateway and fail before the agent.
@@ -287,14 +300,16 @@ async def _contained_docker_backend(
         await session.start()
         ready = await asyncio.to_thread(_wait_agent_ready, client, session)
         if not ready:
-            raise RuntimeError(
+            raise RuntimeError(  # noqa: TRY301 - part of the same fail-closed try as the
+                # delete/cleanup below it handles; extracting it loses that locality.
                 f"contained agent for {scan_id!r} did not publish its readiness marker"
             )
     except BaseException:
         if session is not None:
             try:
                 await client.delete(session)
-            except Exception:
+            except Exception:  # noqa: BLE001 - a delete failure must still fall through to
+                # the boundary cleanup below, whatever the delete itself raised
                 _cleanup_boundary(gw)
         else:
             _cleanup_boundary(gw)
@@ -303,7 +318,9 @@ async def _contained_docker_backend(
 
 
 
-def _wait_gateway_ready(container: Any, timeout_s: int = 30, require_capture_ready: bool = False) -> bool:
+def _wait_gateway_ready(
+    container: Any, timeout_s: int = 30, require_capture_ready: bool = False,
+) -> bool:
     """Poll until the gateway is running with both valid policy and CA published.
 
     When ``require_capture_ready`` is set (RECON_GATEWAY_CAPTURE enabled), ALSO require the
@@ -315,7 +332,7 @@ def _wait_gateway_ready(container: Any, timeout_s: int = 30, require_capture_rea
     if require_capture_ready:
         ready_cmd += " && test -f /ca/recon-capture-ready"
     while time.monotonic() < deadline:
-        with _suppress():
+        with _Suppress():
             container.reload()
             if container.status == "running":
                 code, _ = container.exec_run(f"sh -c '{ready_cmd}'")
@@ -333,7 +350,7 @@ def _wait_agent_ready(client: Any, session: Any, timeout_s: int = 120) -> bool:
         return False
     try:
         container = client.docker_client.containers.get(container_id)
-    except Exception:
+    except Exception:  # noqa: BLE001 - fail-closed polling: any lookup error means not ready
         return False
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -344,16 +361,17 @@ def _wait_agent_ready(client: Any, session: Any, timeout_s: int = 120) -> bool:
             code, _ = container.exec_run("test -f /tmp/recon-agent-ready")
             if code == 0:
                 return True
-        except Exception:
+        except Exception:  # noqa: BLE001 - fail-closed polling: any error this pass means
+            # not ready; try again next pass
             return False
         time.sleep(1)
     return False
 
 
-class _suppress:
+class _Suppress:
     """contextlib.suppress(Exception) without importing contextlib at module top."""
 
-    def __enter__(self) -> "_suppress":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> bool:
@@ -370,7 +388,9 @@ _BIND_MOUNT_BACKENDS: set[str] = {"docker", "docker-contained"}
 
 def effective_backend_name(name: str) -> str:
     """Resolve ``name`` applying the RECON_CONTAINED_EGRESS upgrade rule."""
-    if name == "docker" and os.environ.get("RECON_CONTAINED_EGRESS", "").strip().lower() in ("1", "true", "yes"):
+    if name == "docker" and os.environ.get("RECON_CONTAINED_EGRESS", "").strip().lower() in (
+        "1", "true", "yes",
+    ):
         return "docker-contained"
     return name
 
