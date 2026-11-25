@@ -456,6 +456,14 @@ def _fit_evidence_to_byte_cap(
     # wrapper to hide everyone's status in a non-JSON preview. The markers
     # themselves cost bytes too, so they go on before the loop measures
     # against cap, not after it decides cap is already met.
+    _drop_entries_to_cap(result, stopped_agents, cap)
+
+
+def _drop_entries_to_cap(
+    result: dict[str, Any], stopped_agents: list[dict[str, Any]], cap: int
+) -> None:
+    """Last resort for ``_fit_evidence_to_byte_cap``: drop whole entries and
+    report which ones, with both finality flags false for them."""
     original_count = len(stopped_agents)
     result["stopped_agents_truncated"] = True
     result["stopped_agents_total"] = original_count
@@ -467,6 +475,13 @@ def _fit_evidence_to_byte_cap(
     }
     while len(stopped_agents) > 1 and _result_byte_size(result) > cap:
         omitted_ids.insert(0, stopped_agents.pop()["agent_id"])
+    # Many omitted agents can push their bare ids past the cap too. Keep the
+    # count exact and cut the id list instead, saying so.
+    omitted_info = result["stopped_agents_omitted"]
+    omitted_info["count"] = len(omitted_ids)
+    while omitted_ids and _result_byte_size(result) > cap:
+        omitted_ids.pop()
+        omitted_info["agent_ids_truncated"] = True
     if len(stopped_agents) == original_count:
         del result["stopped_agents_truncated"]
         del result["stopped_agents_total"]
@@ -995,7 +1010,9 @@ async def stop_agent(
     as final only when both flags are true; otherwise file what came back
     and mark it possibly incomplete. When ``stopped_agents_truncated`` is
     set, the agents that did not fit are listed by id under
-    ``stopped_agents_omitted`` with both flags false for all of them.
+    ``stopped_agents_omitted`` with both flags false for all of them; if
+    even the id list does not fit, ``agent_ids_truncated`` is true and
+    ``count`` still gives the number omitted.
 
     Use sparingly. Prefer ``send_message_to_agent`` (asking the agent
     to wrap up) for soft-stop scenarios. Reach for ``stop_agent`` when

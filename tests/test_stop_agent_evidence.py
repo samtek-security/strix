@@ -789,6 +789,40 @@ def test_omitted_agents_are_listed_by_id_with_both_flags_false(
     assert omitted["evidence_complete"] is False
 
 
+def test_omitted_id_list_is_bounded_when_it_would_overflow_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stopped_agents = [
+        {
+            "agent_id": f"agent{i:03d}",
+            "name": "x",
+            "evidence_settled": True,
+            "evidence_writes_final": True,
+            "evidence_complete": True,
+            "evidence": [],
+        }
+        for i in range(200)
+    ]
+    result = {"success": True, "reason": "", "note": "n", "stopped_agents": stopped_agents}
+
+    class _Context:
+        tool_output_max_bytes = 1024
+
+    class _Settings:
+        context = _Context()
+
+    monkeypatch.setattr(agents_graph_tools, "load_settings", _Settings)
+
+    agents_graph_tools._fit_evidence_to_byte_cap(result, stopped_agents, {})
+
+    cap = max(1024 - agents_graph_tools._RESULT_BYTE_CAP_MARGIN, 512)
+    omitted = result["stopped_agents_omitted"]
+    assert agents_graph_tools._result_byte_size(result) <= cap
+    assert omitted["count"] == 200 - len(stopped_agents)
+    assert omitted["agent_ids_truncated"] is True
+    assert len(omitted["agent_ids"]) < omitted["count"]
+
+
 def test_stop_agent_docstring_explains_the_interactive_case() -> None:
     doc = stop_agent.description
     assert "evidence_writes_final" in doc
