@@ -103,7 +103,19 @@ async def test_join_stopped_with_no_cycle_in_flight_returns_settled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_join_stopped_waits_for_the_stream_to_detach() -> None:
+async def test_join_stopped_is_not_satisfied_by_detach_stream_alone() -> None:
+    """detach_stream fires before a retry's own write (salvage, compaction);
+    only mark_turn_settled means the turn is truly done writing."""
+    coordinator = await _graph()
+    stream = object()
+    await coordinator.attach_stream("child", stream)
+    await coordinator.detach_stream("child", stream)
+
+    assert await coordinator.join_stopped("child", timeout=0.05) is False
+
+
+@pytest.mark.asyncio
+async def test_join_stopped_waits_for_mark_turn_settled() -> None:
     coordinator = await _graph()
     stream = object()
     await coordinator.attach_stream("child", stream)
@@ -111,6 +123,7 @@ async def test_join_stopped_waits_for_the_stream_to_detach() -> None:
     async def _finish_turn() -> None:
         await asyncio.sleep(0.01)
         await coordinator.detach_stream("child", stream)
+        await coordinator.mark_turn_settled("child")
 
     task = asyncio.create_task(_finish_turn())
     assert await coordinator.join_stopped("child", timeout=1.0) is True
@@ -161,11 +174,12 @@ async def test_session_items_reads_back_what_was_captured() -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_items_swallows_a_broken_session_store() -> None:
+async def test_session_items_returns_none_on_a_broken_session_store() -> None:
+    """None, not [], so a caller can tell "unreadable" apart from "empty"."""
     coordinator = await _graph()
     await coordinator.attach_runtime("child", session=ExplodingSession([]))
 
-    assert await coordinator.session_items("child") == []
+    assert await coordinator.session_items("child") is None
 
 
 # --- stop_agent --------------------------------------------------------------------
@@ -208,6 +222,7 @@ async def test_stop_agent_returns_the_target_evidence_directly() -> None:
             "evidence": [
                 {
                     "type": "function_call",
+                    "call_id": "call-1",
                     "name": "http_request",
                     "arguments": '{"url": "/ftp/package.json%2500.bak"}',
                 },
@@ -266,6 +281,24 @@ async def test_stop_agent_flags_evidence_as_unsettled_on_a_slow_turn(
     assert entry["evidence_settled"] is False
     # Still returns whatever had already landed in the session, rather than nothing.
     assert entry["evidence"] == [{"role": "assistant", "content": "lead captured before the stall"}]
+
+
+@pytest.mark.asyncio
+async def test_stop_agent_flags_an_unreadable_session_with_evidence_error() -> None:
+    coordinator = await _graph()
+    await coordinator.attach_runtime("child", session=ExplodingSession([]))
+
+    result = await _call(
+        stop_agent,
+        coordinator,
+        "root",
+        {"target_agent_id": "child", "cascade": False},
+    )
+
+    entry = result["stopped_agents"][0]
+    assert entry["evidence"] == []
+    assert "evidence_error" in entry
+    assert "evidence" in result["note"]
 
 
 @pytest.mark.asyncio

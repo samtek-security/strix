@@ -873,11 +873,13 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
                 await coordinator.park_for_budget(agent_id)
             else:
                 await coordinator.pause_for_budget(agent_id)
+            await coordinator.mark_turn_settled(agent_id)
             raise
         except SubagentBudgetReservedError as exc:
             logger.info("sub-agent %s stopped at the budget reserve: %s", agent_id, exc)
             await coordinator.set_status(agent_id, "stopped")
             await _notify_root_on_budget_reserve(coordinator)
+            await coordinator.mark_turn_settled(agent_id)
             raise
         except BudgetExceededError as exc:
             logger.info(
@@ -885,6 +887,7 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
             )
             await coordinator.set_status(agent_id, "stopped")
             await coordinator.trigger_budget_stop()
+            await coordinator.mark_turn_settled(agent_id)
             raise
         except Exception as exc:
             if image_strips < 3 and session is not None and _is_image_rejection(exc):
@@ -946,6 +949,7 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
                     agent_id, "failed", error=request_log.failure_text(exc)
                 )
                 await notify_parent_on_terminal(coordinator, agent_id, "failed")
+                await coordinator.mark_turn_settled(agent_id)
                 return None
             if isinstance(exc, MaxTurnsExceeded):
                 status: Status = "stopped"
@@ -967,10 +971,12 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
             # the dead child can no longer send.
             await coordinator.set_status(agent_id, status, error=error_text)
             await notify_parent_on_terminal(coordinator, agent_id, status)
+            await coordinator.mark_turn_settled(agent_id)
             if not interactive:
                 raise
             return None
         else:
+            await coordinator.mark_turn_settled(agent_id)
             return cast("RunResultBase | None", stream)
 
 

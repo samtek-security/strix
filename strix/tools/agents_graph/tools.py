@@ -280,10 +280,12 @@ def _session_items_payload(items: list[Any]) -> list[dict[str, Any]]:
         if item_type == "function_call":
             # A tool call's own request — e.g. the HTTP request a proxy/terminal
             # tool sent. role/content are absent on this item type; name/arguments
-            # carry what happened instead.
+            # carry what happened instead. call_id is the only link to its
+            # output, which matters once a turn has more than one call in flight.
             payload.append(
                 {
                     "type": item_type,
+                    "call_id": item.get("call_id"),
                     "name": item.get("name"),
                     "arguments": item.get("arguments"),
                 }
@@ -800,9 +802,11 @@ async def stop_agent(
     evidence to file or drop the lead yourself; do not re-derive the same
     work from scratch. ``evidence_settled: false`` on an entry means its
     turn was still finishing when this call gave up waiting, so its
-    evidence may be incomplete — treat it as partial, not missing.
-    Stopping a peer or an ancestor is still allowed, but their evidence is
-    withheld since their session is not yours to read.
+    evidence may be incomplete — treat it as partial, not missing. An
+    ``evidence_error`` key means the session itself could not be read;
+    treat that as "unknown", not "nothing found". Stopping a peer or an
+    ancestor is still allowed, but their evidence is withheld since their
+    session is not yours to read.
 
     Use sparingly. Prefer ``send_message_to_agent`` (asking the agent
     to wrap up) for soft-stop scenarios. Reach for ``stop_agent`` when
@@ -895,6 +899,20 @@ async def stop_agent(
             continue
         settled = await coordinator.join_stopped(aid, join_timeout)
         items = await coordinator.session_items(aid)
+        if items is None:
+            evidence.append(
+                {
+                    "agent_id": aid,
+                    "name": names.get(aid, aid),
+                    "evidence_settled": settled,
+                    "evidence": [],
+                    "evidence_error": (
+                        "failed to read this agent's session; evidence may exist but "
+                        "could not be retrieved — do not treat this as 'nothing found'"
+                    ),
+                }
+            )
+            continue
         evidence.append(
             {
                 "agent_id": aid,

@@ -60,10 +60,11 @@ class AgentRuntime:
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     mailbox: list[dict[str, Any]] = field(default_factory=list)
     user_wake_required: bool = False
-    # Cleared by attach_stream when a cycle starts, set by detach_stream once it
-    # ends and the SDK has written that turn to the session. An interactive
-    # agent's background task keeps running (it parks in wait_for_message)
-    # after a stop, so the task finishing is not a usable "turn is over"
+    # Cleared by attach_stream when a cycle starts, set by mark_turn_settled
+    # once it truly ends and every write for that turn (including a crash's
+    # salvage write) has landed. An interactive agent's background task keeps
+    # running (it parks in wait_for_message) after a stop, so the task
+    # finishing is not a usable "turn is over"
     # signal — this event is.
     turn_settled: asyncio.Event = field(default_factory=_settled_event)
 
@@ -602,12 +603,18 @@ class AgentCoordinator:
             return False
         return True
 
-    async def session_items(self, agent_id: str) -> list[Any]:
+    async def session_items(self, agent_id: str) -> list[Any] | None:
         """Read back a stopped agent's own session items.
 
         Used to recover evidence a validator already captured (tool calls,
         proxy output, confirmed PoCs) before ``stop_agent`` ended it, instead
         of discarding it and making the caller re-derive the same work.
+
+        Returns ``None`` if the read itself failed (a closed/unavailable
+        session store) — distinct from ``[]``, which means the agent simply
+        has no session or an empty one. A caller that treated a failed read
+        the same as "no evidence" could report a lead dropped when the
+        evidence was actually there and just unreadable right now.
         """
         async with self._lock:
             runtime = self.runtimes.get(agent_id)
@@ -618,7 +625,7 @@ class AgentCoordinator:
             return list(await session.get_items())
         except Exception:
             logger.exception("failed to read session items for %s", agent_id)
-            return []
+            return None
 
     async def attach_stream(
         self,
@@ -639,7 +646,19 @@ class AgentCoordinator:
             runtime = self.runtimes.setdefault(agent_id, AgentRuntime())
             if runtime.stream is stream:
                 runtime.stream = None
-            runtime.turn_settled.set()
+
+    async def mark_turn_settled(self, agent_id: str) -> None:
+        """Signal that a cycle is done writing to the agent's session.
+
+        Called from the cycle's own true exit points (success, a terminal
+        failure after any salvage write, or a budget exception with nothing
+        left to write) — never from ``detach_stream``, which fires before a
+        retry's own session write (image-strip, compaction, salvage) and
+        would otherwise mark the turn settled while it is still mutating
+        the session.
+        """
+        async with self._lock:
+            self.runtimes.setdefault(agent_id, AgentRuntime()).turn_settled.set()
 
     async def is_ancestor(self, ancestor_id: str, agent_id: str) -> bool:
         """Whether ``ancestor_id`` is ``agent_id``'s parent, grandparent, etc."""
