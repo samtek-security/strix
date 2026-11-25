@@ -34,8 +34,8 @@ Two extensions on top of the above:
   reported authenticated. On ANY successful preflight (fresh login or resume) the result carries
   back the current ``storage_state`` text (``result["storage_state"]``) so the caller can persist
   it for the next run.
-- **OIDC/SSO handoff** (OFF by default; ``RECON_AUTH_OIDC_HANDOFF=1`` enables it, and enabling
-  it is gated on per-flow issuer/client_id validation, issue #122 item 3): a login that
+- **OIDC/SSO handoff** (OFF by default; ``RECON_AUTH_OIDC_HANDOFF=1`` enables it outside production only,
+  and production is gated on per-flow issuer/client_id validation, issue #122 item 3): a login that
   redirects to a different origin matching a known identity-provider pattern can't be completed by ``recon-browser``'s deterministic form-fill (the
   target's OWN login page is often just a redirect, not a form). Such a role is flagged
   (``result["needs_agent_oidc"]``) rather than just reported failed, with the provider URL the
@@ -201,11 +201,18 @@ def _origin(url: str) -> str:
 
 
 def _oidc_handoff_enabled() -> bool:
-    """The agent-driven OIDC hand-off is OFF unless ``RECON_AUTH_OIDC_HANDOFF=1`` is set. A host
-    allowlist cannot tell an operator's OAuth client from an attacker-registered one on the same
-    provider, so enabling this is gated on per-flow issuer/client_id/redirect validation (issue
-    #122 item 3). Off, a redirect to an identity provider is an ordinary login failure."""
-    return os.environ.get("RECON_AUTH_OIDC_HANDOFF", "0").strip() == "1"
+    """The agent-driven OIDC hand-off is OFF unless ``RECON_AUTH_OIDC_HANDOFF=1`` is set, and it
+    is refused outright when ``RECON_ENV_CLASS`` is prod or production, whatever the flag says.
+    A host allowlist cannot tell an operator's OAuth client from an attacker-registered one on
+    the same provider, so production stays closed until per-flow issuer/client_id/redirect
+    validation exists (issue #122 item 3). Off, a redirect to an identity provider is an
+    ordinary login failure."""
+    if os.environ.get("RECON_AUTH_OIDC_HANDOFF", "0").strip() != "1":
+        return False
+    if os.environ.get("RECON_ENV_CLASS", "").strip().lower() in ("prod", "production"):
+        logger.warning("RECON_AUTH_OIDC_HANDOFF=1 ignored: refused in a production environment")
+        return False
+    return True
 
 
 def _is_approved_oidc_host(hostname: str, flow: dict) -> bool:
