@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -81,13 +82,61 @@ def _gateway_name(scan_id: str) -> str:
     return "recon-egress-" + (scan_id or "default")
 
 
+_REPORTER_HOST_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?")
+_REPORTER_IPV6_RE = re.compile(r"[0-9A-Fa-f:.]+")
+_REPORTER_PATH_RE = re.compile(r"(?:/[A-Za-z0-9._~-]+)*/?")
+
+
+def _canonical_reporter_url(raw: str) -> str:
+    """Return the reporter base URL rebuilt from scheme, host, port and path only.
+
+    A strict allowlist, not a denylist: the URL is parsed, rebuilt from those four parts, and
+    refused unless the raw string equals the rebuilt one. Anything the parser tolerates but the
+    rebuild drops (query, fragment, credentials, whitespace, odd ports, mixed case) fails the
+    comparison, so the gateway receives exactly the string that was validated.
+    """
+    try:
+        parts = urlsplit(raw)
+        host = parts.hostname
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_URL {raw!r} is not a valid URL: {exc}"
+        ) from exc
+    bad = (
+        parts.scheme not in ("http", "https")
+        or not host
+        or (port is not None and not 1 <= port <= 65535)
+        or not _REPORTER_PATH_RE.fullmatch(parts.path)
+    )
+    if not bad:
+        ipv6 = ":" in host
+        host_ok = _REPORTER_IPV6_RE if ipv6 else _REPORTER_HOST_RE
+        bad = not host_ok.fullmatch(host)
+    if bad:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_URL {raw!r} must be http(s)://host[:port][/path] "
+            "using letters, digits, '.', '-' and '/'"
+        )
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None:
+        netloc += f":{port}"
+    rebuilt = f"{parts.scheme}://{netloc}{parts.path}"
+    if raw != rebuilt:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_URL {raw!r} is not in canonical form; write it as "
+            f"{rebuilt!r}"
+        )
+    return rebuilt
+
+
 def _reporter_settings() -> tuple[str, Path]:
     """Validate the control-plane escalation reporter the contained gateway must carry.
 
     Without both settings an RoE trip would block the target but never stop the engagement, so
     the engagement refuses to start. There is no opt-out.
     """
-    url = os.environ.get("RECON_TARGET_HEALTH_REPORTER_URL", "").strip()
+    url = os.environ.get("RECON_TARGET_HEALTH_REPORTER_URL", "")
     token_path = os.environ.get("RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE", "").strip()
     missing = [
         name
@@ -95,35 +144,14 @@ def _reporter_settings() -> tuple[str, Path]:
             ("RECON_TARGET_HEALTH_REPORTER_URL", url),
             ("RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE", token_path),
         )
-        if not value
+        if not value.strip()
     ]
     if missing:
         raise ValueError(
             "contained docker backend requires the control-plane escalation reporter; "
             f"missing {', '.join(missing)}"
         )
-    try:
-        parsed = urlsplit(url)
-        parsed.port  # noqa: B018  (raises ValueError on a non-numeric or out-of-range port)
-    except ValueError as exc:
-        raise ValueError(
-            f"RECON_TARGET_HEALTH_REPORTER_URL {url!r} is not a valid URL: {exc}"
-        ) from exc
-    if (
-        "?" in url
-        or "#" in url
-        or parsed.username is not None
-        or parsed.password is not None
-        or any(ch.isspace() or not ch.isprintable() for ch in url)
-    ):
-        raise ValueError(
-            f"RECON_TARGET_HEALTH_REPORTER_URL {url!r} must be a base URL "
-            "with no query, fragment, credentials, whitespace or control characters"
-        )
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise ValueError(
-            f"RECON_TARGET_HEALTH_REPORTER_URL {url!r} must be an http(s) URL with a host"
-        )
+    url = _canonical_reporter_url(url)
     token_file = Path(token_path)
     try:
         token_stat = token_file.stat()
