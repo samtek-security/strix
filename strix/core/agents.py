@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """SDK-native state for Strix's addressable agent graph."""
 
 from __future__ import annotations

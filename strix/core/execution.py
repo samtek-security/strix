@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Execution loop for addressable SDK-backed Strix agents."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Tool-call interception: allow/deny/ask rules evaluated at the tool boundary.
 
 Generic and vendor-neutral, like the rest of ``strix.core``: a caller that never
