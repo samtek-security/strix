@@ -952,6 +952,68 @@ async def test_crashing_noninteractive_child_settles_and_wakes_its_parent(
 
     assert coordinator.statuses["child"] == "crashed"
     assert coordinator.pending_counts.get("root", 0) > 0
+    # A crash is still a true exit: nothing more will be written for this turn.
+    assert coordinator.runtimes["child"].turn_settled.is_set() is True
+
+
+class _CleanStream:
+    """A turn that streams no events and completes with nothing to report."""
+
+    def __init__(self) -> None:
+        self.run_loop_exception: BaseException | None = None
+        self.new_items: list[Any] = []
+
+    async def stream_events(self) -> Any:
+        for event in _NO_STREAM_EVENTS:
+            yield event
+
+    def cancel(self, mode: str = "after_turn") -> None:  # noqa: ARG002
+        return
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_unsettles_at_entry_and_settles_only_on_true_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop landing between cycles must not see a stale "settled" signal
+    from the previous cycle while this one's pre-stream work is still
+    running — and a clean cycle must settle once it truly finishes."""
+    stream = _CleanStream()
+    monkeypatch.setattr(
+        "strix.core.execution.Runner.run_streamed", lambda *_args, **_kwargs: stream
+    )
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    await coordinator.mark_turn_settled("root")  # as if a prior cycle already settled
+
+    real_attach_stream = coordinator.attach_stream
+    settled_once_the_new_cycle_starts_work = []
+
+    async def _spy_attach_stream(agent_id: str, s: Any) -> None:
+        settled_once_the_new_cycle_starts_work.append(
+            coordinator.runtimes[agent_id].turn_settled.is_set()
+        )
+        await real_attach_stream(agent_id, s)
+
+    monkeypatch.setattr(coordinator, "attach_stream", _spy_attach_stream)
+
+    result = await execution._run_cycle(
+        MagicMock(),
+        coordinator,
+        "root",
+        input_data="task",
+        run_config=MagicMock(),
+        context={},
+        max_turns=5,
+        session=None,
+        interactive=True,
+        event_sink=None,
+        hooks=None,
+    )
+
+    assert result is stream
+    assert settled_once_the_new_cycle_starts_work == [False]
+    assert coordinator.runtimes["root"].turn_settled.is_set() is True
 
 
 @pytest.mark.asyncio

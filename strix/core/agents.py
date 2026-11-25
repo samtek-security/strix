@@ -647,6 +647,20 @@ class AgentCoordinator:
             if runtime.stream is stream:
                 runtime.stream = None
 
+    async def mark_turn_unsettled(self, agent_id: str) -> None:
+        """Signal that a new cycle has begun and may write to the session.
+
+        Called at the very top of ``_run_cycle``'s loop body, before the
+        pre-stream work (image-budget enforcement, compaction) that can
+        itself mutate the session. Without this, a stop landing between two
+        cycles would see the previous cycle's settled ``turn_settled`` and
+        report evidence as final while that pre-stream work was still
+        running — ``attach_stream`` clears the same event, but only once the
+        stream actually starts, which is too late to cover that window.
+        """
+        async with self._lock:
+            self.runtimes.setdefault(agent_id, AgentRuntime()).turn_settled.clear()
+
     async def mark_turn_settled(self, agent_id: str) -> None:
         """Signal that a cycle is done writing to the agent's session.
 

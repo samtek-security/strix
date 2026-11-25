@@ -778,6 +778,11 @@ _STOP_AGENT_TIMEOUT_S = 30
 # Headroom under the tool's own timeout, split across every agent the cascade
 # stops, so joining them one by one can never itself trip that outer timeout.
 _STOP_AGENT_EVIDENCE_BUDGET_S = 20.0
+# A long-lived validator's full session, or a cascade of several, can run
+# well past what fits in the parent model's own input limit. Keep the most
+# recent items per agent - that's where a just-confirmed lead lives - and say
+# so plainly rather than silently dropping the rest.
+_EVIDENCE_MAX_ITEMS_PER_AGENT = 60
 
 
 @function_tool(timeout=_STOP_AGENT_TIMEOUT_S)
@@ -804,8 +809,11 @@ async def stop_agent(
     turn was still finishing when this call gave up waiting, so its
     evidence may be incomplete — treat it as partial, not missing. An
     ``evidence_error`` key means the session itself could not be read;
-    treat that as "unknown", not "nothing found". Stopping a peer or an
-    ancestor is still allowed, but their evidence is withheld since their
+    treat that as "unknown", not "nothing found". ``evidence_truncated: true``
+    means only the most recent items are included here
+    (``evidence_total_items`` has the real count) — a lead confirmed earlier
+    in a long session may not appear. Stopping a peer or an ancestor is
+    still allowed, but their evidence is withheld since their
     session is not yours to read.
 
     Use sparingly. Prefer ``send_message_to_agent`` (asking the agent
@@ -913,14 +921,19 @@ async def stop_agent(
                 }
             )
             continue
-        evidence.append(
-            {
-                "agent_id": aid,
-                "name": names.get(aid, aid),
-                "evidence_settled": settled,
-                "evidence": _session_items_payload(items),
-            }
-        )
+        total_items = len(items)
+        truncated = total_items > _EVIDENCE_MAX_ITEMS_PER_AGENT
+        bounded_items = items[-_EVIDENCE_MAX_ITEMS_PER_AGENT:] if truncated else items
+        entry: dict[str, Any] = {
+            "agent_id": aid,
+            "name": names.get(aid, aid),
+            "evidence_settled": settled,
+            "evidence": _session_items_payload(bounded_items),
+        }
+        if truncated:
+            entry["evidence_truncated"] = True
+            entry["evidence_total_items"] = total_items
+        evidence.append(entry)
 
     logger.info(
         "stop_agent: target=%s cascade=%s reason=%r",

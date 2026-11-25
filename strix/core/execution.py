@@ -811,6 +811,10 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
     while True:
         stream: Any = None
         pre_run_items: list[Any] = []
+        # Before any pre-stream work (which can itself write to the session via
+        # compaction) touches this cycle, so a stop landing right here is never
+        # read back as "settled" from the previous cycle's signal.
+        await coordinator.mark_turn_unsettled(agent_id)
         try:
             await coordinator.mark_running(agent_id)
             if session is not None:

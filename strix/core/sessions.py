@@ -40,6 +40,11 @@ logger = logging.getLogger(__name__)
 # since splitting a single call's arguments into redact/don't-redact halves
 # is itself a correctness risk this isn't worth taking for the few
 # surrounding fields (title/description context) it would spare.
+#
+# stop_agent belongs here too: its output can carry a stopped agent's own
+# evidence verbatim (strix.tools.agents_graph.tools._session_items_payload),
+# which can itself be the output of one of these tools - shape-redacting the
+# stopper's copy would scrub the exact credential the stop was meant to save.
 _UNREDACTED_TOOL_NAMES = frozenset(
     {
         "view_request",
@@ -53,6 +58,7 @@ _UNREDACTED_TOOL_NAMES = frozenset(
         "write_stdin",
         "web_search",
         "web_get_contents",
+        "stop_agent",
     }
 )
 
