@@ -27,6 +27,7 @@ from pathlib import Path
 
 from strix.core.paths import runtime_state_dir
 
+
 logger = logging.getLogger(__name__)
 
 DELIVERABLES_DIR_NAME = "deliverables"
@@ -89,10 +90,11 @@ def write_deliverables(run_dir: Path, scan_id: str) -> Path | None:
         )
         present = sum(1 for i in items if i.get("present"))
         logger.info("deliverables assembled: %d/%d present in %s", present, len(items), out_dir)
-        return out_dir
-    except Exception:  # noqa: BLE001 - end-of-run best-effort, never fatal
+    except Exception:
         logger.exception("deliverables assembly failed")
         return None
+    else:
+        return out_dir
 
 
 def read_manifest(run_dir: Path) -> dict | None:
