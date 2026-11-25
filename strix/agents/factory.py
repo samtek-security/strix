@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Build SandboxAgents for root + child Strix runs."""
 
 from __future__ import annotations
