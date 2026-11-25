@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Any, cast
 
 import httpx
+import litellm
 import pytest
 from agents import RunConfig, Runner
+from litellm.llms.vertex_ai.common_utils import VertexAIError
 from openai import (
     APIConnectionError,
     APIError,
@@ -32,6 +34,18 @@ def _status_error(status: int) -> APIStatusError:
     return APIStatusError(
         f"status {status}",
         response=httpx.Response(status_code=status, request=_request()),
+        body=None,
+    )
+
+
+def _gateway_denied_error(reason: str) -> APIStatusError:
+    """A model call the egress gateway denied, carrying its X-Recon-Egress reason
+    the way policy_addon.py's _blocked_response sets it on the real HTTP reply."""
+    return APIStatusError(
+        f"recon egress gateway: api.example.test {reason}",
+        response=httpx.Response(
+            status_code=408, request=_request(), headers={"X-Recon-Egress": reason}
+        ),
         body=None,
     )
 
@@ -87,6 +101,50 @@ def test_client_errors_are_transient() -> None:
     for status in (401, 402, 403, 404):
         assert execution._is_transient_model_error(_status_error(status)) is False
     assert execution._is_transient_model_error(ValueError("nope")) is False
+
+
+def test_gateway_elapsed_and_deadline_denials_are_not_transient() -> None:
+    assert execution._is_transient_model_error(_gateway_denied_error("denied:elapsed")) is False
+    assert execution._is_transient_model_error(_gateway_denied_error("denied:deadline")) is False
+
+
+def test_plain_408_without_gateway_header_is_still_transient() -> None:
+    # The gateway denial reason, not the bare 408 status, is what makes this
+    # non-retryable - an ordinary provider timeout must keep retrying.
+    assert execution._is_transient_model_error(_status_error(408)) is True
+
+
+def test_other_gateway_denial_reasons_are_not_mistaken_for_elapsed_budget() -> None:
+    assert execution._is_elapsed_budget_denial(_gateway_denied_error("denied:scope")) is False
+    assert execution._is_elapsed_budget_denial(_gateway_denied_error("denied:rate_limit")) is False
+
+
+def test_vertex_mapped_gateway_denial_is_not_transient() -> None:
+    """Recon's deployed engine calls the model through vertex_ai/..., not the plain
+    OpenAI SDK adapter the other tests here exercise. LiteLLM maps a Vertex HTTP error
+    through its own VertexAIError -> exception_type() pipeline, which does not keep
+    ``response``/``headers`` on the final litellm.Timeout it raises for a bare 408 -
+    it reattaches the gateway's header as ``litellm_response_headers`` instead (the
+    outer exception_type() handler's own recovery of whatever the original exception
+    carried). Exercise that real mapping, not just an APIStatusError double, so a
+    future LiteLLM upgrade that changes this is caught here."""
+
+    def _map() -> None:
+        original = VertexAIError(
+            status_code=408,
+            message="recon egress gateway: api.example.test denied:elapsed",
+            headers=httpx.Headers({"X-Recon-Egress": "denied:elapsed"}),
+        )
+        raise litellm.utils.exception_type(
+            model="gemini-2.5-pro", original_exception=original, custom_llm_provider="vertex_ai"
+        )
+
+    try:
+        _map()
+    except Exception as mapped:  # noqa: BLE001 - this is exactly what strix's retry loop catches
+        assert type(mapped).__name__ == "Timeout"
+        assert execution._is_elapsed_budget_denial(mapped) is True
+        assert execution._is_transient_model_error(mapped) is False
 
 
 class _FakeStream:
@@ -171,6 +229,53 @@ async def test_run_cycle_does_not_retry_permanent_error(
     streams = [_FakeStream(exc=ValueError("nope")), _FakeStream()]
     with pytest.raises(ValueError, match="nope"):
         await _run_once(monkeypatch, streams)
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_does_not_retry_gateway_elapsed_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A second, clean stream is available; if the classifier still treated this
+    # 408 as transient, _run_cycle would retry into it and return normally
+    # instead of raising - exactly the wasted-retry bug this closes.
+    streams = [_FakeStream(exc=_gateway_denied_error("denied:elapsed")), _FakeStream()]
+    with pytest.raises(APIStatusError):
+        await _run_once(monkeypatch, streams)
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_tags_gateway_elapsed_denial_in_coordinator_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run_engine reads this tag off the coordinator's persisted agent errors
+    (see recon_engine.activities._elapsed_budget_denial_reason) to tell a
+    cut-short run from a clean one when the failing agent is a sub-agent, whose
+    failure never raises anywhere this call's return value could carry it."""
+    _patch_fast_backoff(monkeypatch)
+    denial = _gateway_denied_error("denied:elapsed")
+    stream = _FakeStream(exc=denial)
+    monkeypatch.setattr(Runner, "run_streamed", lambda *_a, **_k: stream)
+
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+
+    with pytest.raises(APIStatusError):
+        await execution._run_cycle(
+            object(),
+            coordinator,
+            "root",
+            input_data="task",
+            run_config=cast("RunConfig", object()),
+            context={},
+            max_turns=5,
+            session=None,
+            interactive=False,
+            event_sink=None,
+            hooks=None,
+        )
+
+    assert coordinator.statuses["root"] == "failed"
+    assert coordinator.errors["root"].startswith(execution.GATEWAY_ELAPSED_BUDGET_ERROR_PREFIX)
 
 
 @pytest.mark.parametrize(
