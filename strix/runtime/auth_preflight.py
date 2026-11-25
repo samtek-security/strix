@@ -191,13 +191,19 @@ async def _write_state_file(session: Any, path: str, raw_json: str) -> bool:
 
 
 def _origin(url: str) -> str:
+    """scheme://host[:port] built from the parsed hostname and port - never from the raw netloc,
+    which carries ``user:password@`` userinfo that must not reach a result or an agent prompt."""
     try:
         parts = urlsplit(url or "")
-        if not parts.scheme or not parts.netloc:
+        host = (parts.hostname or "").lower()
+        if not parts.scheme or not host:
             return ""
-        return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+        if ":" in host:
+            host = f"[{host}]"
+        port = parts.port
     except ValueError:
         return ""
+    return f"{parts.scheme.lower()}://{host}" + (f":{port}" if port else "")
 
 
 def _oidc_handoff_enabled() -> bool:
@@ -261,6 +267,15 @@ def _in_signed_scope(hostname: str, flow: dict) -> bool:
         elif hostname == entry:
             return True
     return False
+
+
+def _is_https_approved_provider(url: str, flow: dict) -> bool:
+    try:
+        parts = urlsplit(url or "")
+    except ValueError:
+        return False
+    return parts.scheme.lower() == "https" and _is_approved_oidc_host(
+        (parts.hostname or "").lower(), flow)
 
 
 def _looks_like_oidc_redirect(login_url: str, current_url: str, flow: dict) -> bool:
@@ -636,13 +651,22 @@ async def preflight_role(
         # redirect we'd see partway through a form-fill. Checked only AFTER both resume paths
         # above had their chance (a valid persisted session spares the interactive SSO entirely),
         # and before the form-fill, which has no target-side form to find on a provider page.
-        # Open it in the named session first: the agent continues in that session, which would
-        # otherwise still be blank (the hand-off only carries the provider's origin).
-        await _run(session, "recon-browser", "--session-name", session_name, "open", login_url)
-        result["needs_agent_oidc"] = True
-        result["oidc_provider_url"] = _origin(login_url)
-        result["reason"] = _oidc_handoff_reason(_origin(login_url), session_name)
-        return result
+        # Open it in the named session first (the agent continues in that session, which would
+        # otherwise be blank) and hand off only if the open worked AND the browser is still on an
+        # approved HTTPS provider afterward: a failed open, or an existing provider session that
+        # bounces straight back to a callback, is an ordinary login attempt, not a hand-off.
+        opened, _ = await _run(
+            session, "recon-browser", "--session-name", session_name, "open", login_url)
+        at_idp = False
+        if opened:
+            got_url, final_url = await _run(
+                session, "recon-browser", "--session-name", session_name, "get", "url")
+            at_idp = got_url and _is_https_approved_provider(final_url, flow)
+        if at_idp:
+            result["needs_agent_oidc"] = True
+            result["oidc_provider_url"] = _origin(final_url)
+            result["reason"] = _oidc_handoff_reason(_origin(final_url), session_name)
+            return result
 
     async def _oidc_or(fallback_reason: str) -> dict | None:
         """Check for an OIDC hand-off right now, before anything navigates the browser further
@@ -745,10 +769,27 @@ async def run_auth_preflight(
     # Ensure the durable state dir exists in the container.
     await _run(session, "mkdir", "-p", _STATE_DIR)
     results = []
+    seen_slugs: dict[str, str] = {}
     for flow in auth_flows:
         if not isinstance(flow, dict):
             continue
         role = flow.get("role") or "user"
+        slug = _slug(role)
+        if slug in seen_slugs:
+            # Two role names that differ only by separators slug to the SAME session name and
+            # state file, so they would overwrite each other and both be tested through the last
+            # one's session. The session name is shared with the credential env var and the agent
+            # prompts, so it cannot be renamed here: refuse the later role instead.
+            logger.error("auth preflight: role %r collides with %r on session name recon-%s",
+                         role, seen_slugs[slug], slug)
+            results.append({
+                "role": role, "session_name": f"recon-{slug}", "state_path": "",
+                "authenticated": False, "checks": {},
+                "reason": f"role name collides with role '{seen_slugs[slug]}' on session "
+                          f"recon-{slug}; rename one of them",
+            })
+            continue
+        seen_slugs[slug] = role
         try:
             ext = (external_states or {}).get(role)
             results.append(
