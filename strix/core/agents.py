@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from strix.core.sessions import session_write_lock
+from strix.llm import redaction
 
 
 if TYPE_CHECKING:
@@ -635,18 +636,36 @@ class AgentCoordinator:
         return order
 
     async def snapshot(self) -> dict[str, Any]:
+        """The on-disk resume snapshot.
+
+        ``names``, ``metadata`` and ``mailboxes`` are agent-controlled free
+        text (a spawned agent's name and task, inter-agent messages that the
+        agent tools explicitly invite for sharing a discovered credential) -
+        scrubbed on the way out with :func:`redaction.redact_structure` so a
+        credential-shaped value never reaches ``agents.json``. The in-memory
+        state this is copied from is left untouched, so a live agent keeps
+        acting on the real value; only a process that resumes from disk after
+        this point sees the scrubbed copy, same as the already-redacted
+        ``errors`` field.
+        """
         async with self._lock:
             return {
                 "statuses": dict(self.statuses),
                 "parent_of": dict(self.parent_of),
-                "names": dict(self.names),
-                "metadata": {aid: dict(md) for aid, md in self.metadata.items()},
+                "names": {aid: redaction.redact_text(name) for aid, name in self.names.items()},
+                "metadata": {
+                    aid: cast("dict[str, Any]", redaction.redact_structure(dict(md)))
+                    for aid, md in self.metadata.items()
+                },
                 "pending_counts": dict(self.pending_counts),
                 "recovery_counts": dict(self.recovery_counts),
                 "idle_resume_counts": dict(self.idle_resume_counts),
                 "wait_kinds": dict(self.wait_kinds),
                 "mailboxes": {
-                    aid: [dict(m) for m in runtime.mailbox]
+                    aid: [
+                        cast("dict[str, Any]", redaction.redact_structure(dict(m)))
+                        for m in runtime.mailbox
+                    ]
                     for aid, runtime in self.runtimes.items()
                     if runtime.mailbox
                 },

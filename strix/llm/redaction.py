@@ -20,6 +20,13 @@ closes all three:
 * **The agent's failure reason.** ``failure_text`` feeds ``set_status`` and is
   snapshotted to disk and surfaced to the control plane; it is scrubbed at the
   source with :func:`redact_text`.
+* **The agent coordinator's resume snapshot.** ``AgentCoordinator.snapshot()``
+  writes agent-controlled free text (a spawned agent's name and task, and
+  inter-agent mailbox messages, which the agent tools explicitly invite for
+  sharing a discovered credential) to ``agents.json`` on every status change.
+  :func:`redact_structure` scrubs that copy before it is serialized, leaving
+  the coordinator's own in-memory state untouched so a live agent still acts
+  on the real value.
 
 Scrubbing keeps the operator's triage handles (error type, status code,
 provider request id) and follows the "class names only" rule the rest of Recon
@@ -168,6 +175,18 @@ def _redact_value(value: Any, depth: int) -> Any:
     if isinstance(value, Sequence | set | frozenset):
         return [_redact_value(item, depth + 1) for item in cast("Sequence[Any]", value)]
     return value
+
+
+def redact_structure(value: Any) -> Any:
+    """Scrub secrets from every string inside a JSON-like dict/list/str value.
+
+    Shape-based only, like :func:`redact_text`: a credential-shaped or
+    credential-named value is replaced, ordinary prose (a target hostname, a
+    plain discovered password with no recognizable shape) survives. Used for
+    persisted agent state where a whole free-form structure, not one message
+    string, needs scrubbing before it reaches disk.
+    """
+    return _redact_value(value, 0)
 
 
 def _redact_headers(headers: Mapping[str, str]) -> dict[str, str]:
