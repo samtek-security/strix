@@ -3,7 +3,8 @@
 A stop is documented as resumable, but a non-interactive root never resumes a
 stopped validator to ask what it found — so the evidence has to come back on
 the stop itself, or it is gone. See strix.core.agents.AgentCoordinator's
-join_stopped/session_items and strix.tools.agents_graph.tools.stop_agent.
+join_stopped/session_items/is_ancestor and
+strix.tools.agents_graph.tools.stop_agent.
 """
 
 from __future__ import annotations
@@ -41,6 +42,13 @@ class ExplodingSession(FakeSession):
         raise RuntimeError("session store unavailable")
 
 
+class FakeStream:
+    """Stands in for RunResultStreaming where only .cancel() is exercised."""
+
+    def cancel(self, mode: str = "after_turn") -> None:
+        del mode
+
+
 async def _graph() -> AgentCoordinator:
     coordinator = AgentCoordinator()
     await coordinator.register("root", "strix", parent_id=None)
@@ -63,46 +71,72 @@ async def _call(
     return cast("dict[str, Any]", json.loads(raw))
 
 
+# --- AgentCoordinator.is_ancestor -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_is_ancestor_true_for_parent_and_grandparent() -> None:
+    coordinator = await _graph()
+    await coordinator.register("grandchild", "Validator-2", parent_id="child")
+
+    assert await coordinator.is_ancestor("root", "child") is True
+    assert await coordinator.is_ancestor("root", "grandchild") is True
+    assert await coordinator.is_ancestor("child", "grandchild") is True
+
+
+@pytest.mark.asyncio
+async def test_is_ancestor_false_for_peers_and_descendants() -> None:
+    coordinator = await _graph()
+
+    assert await coordinator.is_ancestor("child", "root") is False
+    assert await coordinator.is_ancestor("child", "child") is False
+    assert await coordinator.is_ancestor("unknown", "child") is False
+
+
 # --- AgentCoordinator.join_stopped -----------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_join_stopped_with_no_task_returns_settled() -> None:
+async def test_join_stopped_with_no_cycle_in_flight_returns_settled() -> None:
     coordinator = await _graph()
     assert await coordinator.join_stopped("child", timeout=1.0) is True
 
 
 @pytest.mark.asyncio
-async def test_join_stopped_waits_for_a_task_that_finishes_in_time() -> None:
+async def test_join_stopped_waits_for_the_stream_to_detach() -> None:
     coordinator = await _graph()
-    released = asyncio.Event()
+    stream = object()
+    await coordinator.attach_stream("child", stream)
 
-    async def _turn() -> None:
-        await released.wait()
+    async def _finish_turn() -> None:
+        await asyncio.sleep(0.01)
+        await coordinator.detach_stream("child", stream)
 
-    task = asyncio.create_task(_turn())
-    await coordinator.attach_runtime("child", task=task)
-    released.set()
-
+    task = asyncio.create_task(_finish_turn())
     assert await coordinator.join_stopped("child", timeout=1.0) is True
-    assert task.done()
+    await task
 
 
 @pytest.mark.asyncio
-async def test_join_stopped_times_out_without_cancelling_the_task() -> None:
+async def test_join_stopped_times_out_while_a_turn_is_still_running() -> None:
     coordinator = await _graph()
-    released = asyncio.Event()
-
-    async def _turn() -> None:
-        await released.wait()
-
-    task = asyncio.create_task(_turn())
-    await coordinator.attach_runtime("child", task=task)
+    await coordinator.attach_stream("child", object())
 
     assert await coordinator.join_stopped("child", timeout=0.05) is False
-    assert not task.done()
 
-    released.set()
+
+@pytest.mark.asyncio
+async def test_join_stopped_does_not_wait_on_an_interactive_agents_idle_task() -> None:
+    """An interactive agent's background task parks in wait_for_message after a
+    stop rather than exiting, so it must never be the thing we wait on."""
+    coordinator = await _graph()
+    never_resolves = asyncio.Event()
+    task = asyncio.create_task(never_resolves.wait())
+    await coordinator.attach_runtime("child", task=task, resumable=True)
+
+    assert await coordinator.join_stopped("child", timeout=0.2) is True
+
+    never_resolves.set()
     await task
 
 
@@ -142,7 +176,17 @@ async def test_stop_agent_returns_the_target_evidence_directly() -> None:
     coordinator = await _graph()
     session = FakeSession(
         [
-            {"role": "assistant", "content": "GET /ftp/package.json%2500.bak -> 200"},
+            {
+                "type": "function_call",
+                "call_id": "call-1",
+                "name": "http_request",
+                "arguments": '{"url": "/ftp/package.json%2500.bak"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": "HTTP/1.1 200 OK",
+            },
             {"role": "assistant", "content": "filter bypass confirmed, CWE-22"},
         ]
     )
@@ -162,7 +206,12 @@ async def test_stop_agent_returns_the_target_evidence_directly() -> None:
             "name": "Validator",
             "evidence_settled": True,
             "evidence": [
-                {"role": "assistant", "content": "GET /ftp/package.json%2500.bak -> 200"},
+                {
+                    "type": "function_call",
+                    "name": "http_request",
+                    "arguments": '{"url": "/ftp/package.json%2500.bak"}',
+                },
+                {"type": "function_call_output", "call_id": "call-1", "output": "HTTP/1.1 200 OK"},
                 {"role": "assistant", "content": "filter bypass confirmed, CWE-22"},
             ],
         }
@@ -204,13 +253,7 @@ async def test_stop_agent_flags_evidence_as_unsettled_on_a_slow_turn(
     coordinator = await _graph()
     session = FakeSession([{"role": "assistant", "content": "lead captured before the stall"}])
     await coordinator.attach_runtime("child", session=session)
-    released = asyncio.Event()
-
-    async def _turn() -> None:
-        await released.wait()
-
-    task = asyncio.create_task(_turn())
-    await coordinator.attach_runtime("child", task=task)
+    await coordinator.attach_stream("child", FakeStream())  # a turn is still in flight
 
     result = await _call(
         stop_agent,
@@ -224,5 +267,26 @@ async def test_stop_agent_flags_evidence_as_unsettled_on_a_slow_turn(
     # Still returns whatever had already landed in the session, rather than nothing.
     assert entry["evidence"] == [{"role": "assistant", "content": "lead captured before the stall"}]
 
-    released.set()
-    await task
+
+@pytest.mark.asyncio
+async def test_stop_agent_withholds_evidence_from_a_non_ancestor() -> None:
+    coordinator = await _graph()
+    await coordinator.register("sibling", "Validator-2", parent_id="root")
+    await coordinator.attach_runtime("sibling", resumable=False)
+    await coordinator.attach_runtime(
+        "child",
+        session=FakeSession([{"role": "assistant", "content": "a scan credential lives here"}]),
+    )
+
+    result = await _call(
+        stop_agent,
+        coordinator,
+        "sibling",
+        {"target_agent_id": "child", "cascade": False},
+    )
+
+    assert result["success"] is True
+    entry = result["stopped_agents"][0]
+    assert entry == {"agent_id": "child", "name": "Validator", "evidence_settled": None}
+    assert "evidence" not in entry
+    assert "withheld" in result["note"]

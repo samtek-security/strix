@@ -273,12 +273,33 @@ async def send_message_to_agent(
 def _session_items_payload(items: list[Any]) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
     for item in items:
-        if isinstance(item, dict):
-            role = item.get("role")
-            content = item.get("content")
-            payload.append({"role": role, "content": content})
-        else:
+        if not isinstance(item, dict):
             payload.append({"content": str(item)})
+            continue
+        item_type = item.get("type")
+        if item_type == "function_call":
+            # A tool call's own request — e.g. the HTTP request a proxy/terminal
+            # tool sent. role/content are absent on this item type; name/arguments
+            # carry what happened instead.
+            payload.append(
+                {
+                    "type": item_type,
+                    "name": item.get("name"),
+                    "arguments": item.get("arguments"),
+                }
+            )
+        elif item_type == "function_call_output":
+            # The matching result — e.g. the response body that proved an
+            # exploit. This is usually where confirmed evidence actually lives.
+            payload.append(
+                {
+                    "type": item_type,
+                    "call_id": item.get("call_id"),
+                    "output": item.get("output"),
+                }
+            )
+        else:
+            payload.append({"role": item.get("role"), "content": item.get("content")})
     return payload
 
 
@@ -772,13 +793,16 @@ async def stop_agent(
     interactive outer loop parks as ``stopped``; later user/peer
     messages can wake it again.
 
-    The result carries each stopped agent's session items directly, under
-    ``evidence`` — whatever it had already captured (confirmed requests,
-    responses, PoC output) before you stopped it. Use that evidence to file
-    or drop the lead yourself; do not re-derive the same work from scratch.
-    ``evidence_settled: false`` on an entry means its turn was still
-    finishing when this call gave up waiting, so its evidence may be
-    incomplete — treat it as partial, not missing.
+    When you are the target's parent (or an ancestor further up), the
+    result also carries each stopped agent's session items directly,
+    under ``evidence`` — whatever it had already captured (confirmed
+    requests, responses, PoC output) before you stopped it. Use that
+    evidence to file or drop the lead yourself; do not re-derive the same
+    work from scratch. ``evidence_settled: false`` on an entry means its
+    turn was still finishing when this call gave up waiting, so its
+    evidence may be incomplete — treat it as partial, not missing.
+    Stopping a peer or an ancestor is still allowed, but their evidence is
+    withheld since their session is not yours to read.
 
     Use sparingly. Prefer ``send_message_to_agent`` (asking the agent
     to wrap up) for soft-stop scenarios. Reach for ``stop_agent`` when
@@ -854,9 +878,21 @@ async def stop_agent(
     # handle on it. A stop is resumable in principle, but a non-interactive
     # root never resumes a stopped validator to ask for what it found — so if
     # we don't hand the evidence back here, it is gone.
+    #
+    # Only the target's own ancestors get the evidence: a session can carry
+    # scan credentials or unrelated target data, and nothing stops a leaf
+    # from naming a peer or the root as target_agent_id. cascade only ever
+    # stops target_agent_id and its descendants, so one ancestry check on the
+    # target covers every agent in ``stopped``.
+    may_read_evidence = me is not None and await coordinator.is_ancestor(me, target_agent_id)
     join_timeout = _STOP_AGENT_EVIDENCE_BUDGET_S / max(len(stopped), 1)
-    evidence = []
+    evidence: list[dict[str, Any]] = []
     for aid in stopped:
+        if not may_read_evidence:
+            evidence.append(
+                {"agent_id": aid, "name": names.get(aid, aid), "evidence_settled": None}
+            )
+            continue
         settled = await coordinator.join_stopped(aid, join_timeout)
         items = await coordinator.session_items(aid)
         evidence.append(
@@ -874,17 +910,26 @@ async def stop_agent(
         cascade,
         reason,
     )
+    note = "Cancellation is graceful — current turn completes first. "
+    note += (
+        (
+            "Each stopped agent's already-captured evidence is in "
+            "'evidence' below; use it directly instead of re-deriving it."
+        )
+        if may_read_evidence
+        else (
+            "You are not this agent's parent (or an ancestor further up), so "
+            "its session evidence is withheld here — ask its parent, or use "
+            "list_reports for what it already filed."
+        )
+    )
     return json.dumps(
         {
             "success": True,
             "target_agent_id": target_agent_id,
             "cascade": cascade,
             "reason": reason,
-            "note": (
-                "Cancellation is graceful — current turn completes first. "
-                "Each stopped agent's already-captured evidence is in "
-                "'evidence' below; use it directly instead of re-deriving it."
-            ),
+            "note": note,
             "stopped_agents": evidence,
         },
         ensure_ascii=False,

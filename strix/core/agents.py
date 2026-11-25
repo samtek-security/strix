@@ -39,6 +39,14 @@ ACTIVE_STATUSES: frozenset[str] = frozenset({"running", "waiting", "budget_pause
 WaitKind = Literal["user", "agents", "stalled"]
 
 
+def _settled_event() -> asyncio.Event:
+    """An Event that starts set: an agent with no cycle in flight yet has
+    nothing unsettled to wait for."""
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
 @dataclass(slots=True)
 class AgentRuntime:
     session: Session | None = None
@@ -52,6 +60,12 @@ class AgentRuntime:
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     mailbox: list[dict[str, Any]] = field(default_factory=list)
     user_wake_required: bool = False
+    # Cleared by attach_stream when a cycle starts, set by detach_stream once it
+    # ends and the SDK has written that turn to the session. An interactive
+    # agent's background task keeps running (it parks in wait_for_message)
+    # after a stop, so the task finishing is not a usable "turn is over"
+    # signal — this event is.
+    turn_settled: asyncio.Event = field(default_factory=_settled_event)
 
 
 class AgentCoordinator:
@@ -569,26 +583,23 @@ class AgentCoordinator:
         """Wait for a gracefully-stopped agent's current turn to actually finish.
 
         ``request_stop`` only cancels the stream with ``mode="after_turn"``;
-        the turn, and the session write that comes with it, finish later in
-        the agent's own background task. A caller that wants to read the
-        session straight after stopping (``stop_agent``'s evidence capture)
-        needs to know that write has happened, not just that the cancel was
-        requested. Returns ``False`` on timeout — the task is still running,
-        so the session may not yet reflect its last turn.
+        the turn, and the session write that comes with it, finish later,
+        signalled by ``turn_settled``. Do not wait on the agent's whole
+        background task instead: an interactive agent's task keeps running
+        after a stop (it parks in an indefinite wait-for-message loop), so
+        it would never finish even once the session is already stable.
+        Returns ``False`` on timeout — the turn may still be in flight, so
+        the session may not yet reflect it.
         """
         async with self._lock:
             runtime = self.runtimes.get(agent_id)
-            task = runtime.task if runtime else None
-        if task is None or task.done():
+            event = runtime.turn_settled if runtime else None
+        if event is None or event.is_set():
             return True
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+            await asyncio.wait_for(event.wait(), timeout=timeout)
         except TimeoutError:
             return False
-        except Exception:
-            # The task's own failure path already settles status/error; here
-            # we only care that the turn is over so the session stops moving.
-            logger.exception("stopped agent %s's task ended with an exception", agent_id)
         return True
 
     async def session_items(self, agent_id: str) -> list[Any]:
@@ -615,7 +626,9 @@ class AgentCoordinator:
         stream: Any,
     ) -> None:
         async with self._lock:
-            self.runtimes.setdefault(agent_id, AgentRuntime()).stream = stream
+            runtime = self.runtimes.setdefault(agent_id, AgentRuntime())
+            runtime.stream = stream
+            runtime.turn_settled.clear()
 
     async def detach_stream(
         self,
@@ -626,6 +639,20 @@ class AgentCoordinator:
             runtime = self.runtimes.setdefault(agent_id, AgentRuntime())
             if runtime.stream is stream:
                 runtime.stream = None
+            runtime.turn_settled.set()
+
+    async def is_ancestor(self, ancestor_id: str, agent_id: str) -> bool:
+        """Whether ``ancestor_id`` is ``agent_id``'s parent, grandparent, etc."""
+        async with self._lock:
+            parent_of = dict(self.parent_of)
+        seen: set[str] = set()
+        current = parent_of.get(agent_id)
+        while current is not None and current not in seen:
+            if current == ancestor_id:
+                return True
+            seen.add(current)
+            current = parent_of.get(current)
+        return False
 
     async def active_agents_except(self, agent_id: str) -> list[dict[str, Any]]:
         async with self._lock:
