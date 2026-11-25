@@ -9,6 +9,7 @@ import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 
@@ -68,7 +69,7 @@ async def _docker_backend(
     return client, session
 
 
-_REPORTER_TOKEN_MOUNT = "/etc/recon/target-health-token"
+_REPORTER_TOKEN_MOUNT = "/etc/recon/target-health-token"  # noqa: S105  (a path, not a secret)
 _REPORTER_TOKEN_MIN_BYTES = 32
 
 
@@ -76,6 +77,44 @@ def _gateway_name(scan_id: str) -> str:
     """Deterministic gateway container name so the agent's proxy env can point at it by name on the
     internal network BEFORE it is up (docker resolves the name once both join the network)."""
     return "recon-egress-" + (scan_id or "default")
+
+
+def _reporter_settings() -> tuple[str, Path]:
+    """Validate the control-plane escalation reporter the contained gateway must carry.
+
+    Without both settings an RoE trip would block the target but never stop the engagement, so
+    the engagement refuses to start. There is no opt-out.
+    """
+    url = os.environ.get("RECON_TARGET_HEALTH_REPORTER_URL", "").strip()
+    token_path = os.environ.get("RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE", "").strip()
+    missing = [
+        name
+        for name, value in (
+            ("RECON_TARGET_HEALTH_REPORTER_URL", url),
+            ("RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE", token_path),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError(
+            "contained docker backend requires the control-plane escalation reporter; "
+            f"missing {', '.join(missing)}"
+        )
+    token_file = Path(token_path)
+    try:
+        token = token_file.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} is not a readable file: {exc}"
+        ) from exc
+    # The control plane rejects gateway credentials under 32 bytes, so a shorter token would
+    # only fail after a trip, when the emergency stop can no longer be delivered.
+    if len(token.encode()) < _REPORTER_TOKEN_MIN_BYTES:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} holds fewer than "
+            f"{_REPORTER_TOKEN_MIN_BYTES} bytes"
+        )
+    return url, token_file.resolve()
 
 
 async def _contained_docker_backend(
@@ -120,38 +159,8 @@ async def _contained_docker_backend(
     if _stat.S_IMODE(_stat_result.st_mode) & 0o077:
         raise ValueError(f"gateway_spec_path {_gsp!r} must not be accessible by group or other")
 
-    # The gateway escalates target-health and RoE-violation trips to the control plane. Without
-    # both settings a trip would block the target but never stop the engagement, so refuse to
-    # start (fail-closed, no opt-out). Checked before any Docker resource exists.
-    reporter_url = os.environ.get("RECON_TARGET_HEALTH_REPORTER_URL", "").strip()
-    reporter_token_host = os.environ.get("RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE", "").strip()
-    missing = [
-        name
-        for name, value in (
-            ("RECON_TARGET_HEALTH_REPORTER_URL", reporter_url),
-            ("RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE", reporter_token_host),
-        )
-        if not value
-    ]
-    if missing:
-        raise ValueError(
-            "contained docker backend requires the control-plane escalation reporter; "
-            f"missing {', '.join(missing)}"
-        )
-    try:
-        with open(reporter_token_host, encoding="utf-8") as fh:
-            reporter_token = fh.read().strip()
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ValueError(
-            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {reporter_token_host!r} is not a readable file: {exc}"
-        ) from exc
-    # The control plane rejects gateway credentials under 32 bytes, so a shorter token would
-    # only fail after a trip, when the emergency stop can no longer be delivered.
-    if len(reporter_token.encode()) < _REPORTER_TOKEN_MIN_BYTES:
-        raise ValueError(
-            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {reporter_token_host!r} holds fewer than "
-            f"{_REPORTER_TOKEN_MIN_BYTES} bytes"
-        )
+    # Checked before any Docker resource exists (fail-closed).
+    reporter_url, reporter_token_host = _reporter_settings()
 
     dc = docker.from_env()
     net_name = "recon-net-" + (scan_id or "default")
@@ -240,7 +249,7 @@ async def _contained_docker_backend(
     volumes = {
         _gsp: {"bind": "/etc/recon/engagement.json", "mode": "ro"},
         ca_name: {"bind": "/ca", "mode": "rw"},
-        os.path.abspath(reporter_token_host): {"bind": _REPORTER_TOKEN_MOUNT, "mode": "ro"},
+        str(reporter_token_host): {"bind": _REPORTER_TOKEN_MOUNT, "mode": "ro"},
     }
     # Gateway capture (Plan Phase 4): when enabled, give the gateway a SESSION-DERIVED capability
     # token + scan id so it runs the redacted capture store + retrieval API and publishes the
