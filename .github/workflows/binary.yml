@@ -5,7 +5,10 @@ on:
     paths:
       - pyproject.toml
       - uv.lock
-      - strix.spec
+      # Fork patch: this fork's PyInstaller spec is recon.spec (renamed from
+      # upstream's strix.spec). Tracked in the recon repo's
+      # docs/strix-fork-patches.md so a future sync doesn't drop it.
+      - recon.spec
       - scripts/**
       - strix/interface/tui/**
       - .github/actions/**
@@ -16,7 +19,7 @@ on:
     paths:
       - pyproject.toml
       - uv.lock
-      - strix.spec
+      - recon.spec
       - scripts/**
       - strix/interface/tui/**
       - .github/actions/**
@@ -44,7 +47,7 @@ jobs:
           cache-dependency-path: strix/interface/tui/go.sum
       - uses: ./.github/actions/setup-python-env
       - run: make tui-build
-      - run: uv run --frozen pyinstaller strix.spec --noconfirm
+      - run: uv run --frozen pyinstaller recon.spec --noconfirm
       - run: dist/strix --version
       - name: Binary bundles the TUI sidecar and the provider dependencies
         run: |
