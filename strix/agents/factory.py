@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from strix.agents.prompt import render_system_prompt
 from strix.config import load_settings
 from strix.config.tool_call_arguments import describe_malformed_arguments
+from strix.core import interception
 from strix.tools.agents_graph.tools import (
     agent_finish,
     create_agent,
@@ -305,6 +306,119 @@ def _function_tool_with_error_result(tool: FunctionTool) -> FunctionTool:
     return tool
 
 
+def _interception_decision(ctx: Any, tool_name: str, input_text: str) -> interception.InterceptionDecision | None:
+    context = getattr(ctx, "context", None)
+    rules = interception.rules_from_context(context if isinstance(context, dict) else None)
+    return interception.evaluate(rules, tool_name, input_text)
+
+
+def _interception_denied_message(decision: interception.InterceptionDecision) -> str:
+    message = f"Denied by interception rule {decision.rule.id!r}."
+    return f"{message} {decision.rule.description}".strip() if decision.rule.description else message
+
+
+def _with_function_tool_interception(tool: FunctionTool) -> FunctionTool:
+    """Gate a ``FunctionTool`` on the run's configured allow/deny/ask rules.
+
+    A rule evaluates against the tool's name and its JSON-encoded arguments,
+    read fresh from ``ctx.context`` on every call (never baked into the closure):
+    tool objects are shared singletons across every concurrent scan in this
+    process, while rules are per-scan. A run with no rules configured (``strix``'s
+    plain CLI path, and every scan before this existed) matches nothing and
+    behaves exactly as before.
+
+    "Deny" never reaches the SDK's approval machinery: ``needs_approval`` answers
+    ``False`` for it, so the SDK runs the tool normally, and ``on_invoke_tool``
+    answers with the denial instead of running it — one model-visible tool
+    result, not a pause/resume round trip. "Ask" answers ``needs_approval`` with
+    ``True``, which is the real SDK pause; nothing here resumes it — that is
+    ``strix.core.execution``'s job once the run returns the interruption.
+
+    A tool that already declares its own unconditional or callable
+    ``needs_approval`` (none do today) keeps deciding its own pause; this only
+    adds "ask" on top of it. Pre-empting an intrinsic need with our own "deny"
+    is not attempted, since the SDK would already be mid-pause by the time our
+    code runs.
+    """
+    if getattr(tool, "_strix_intercepted", False):
+        return tool
+    invoke_tool = tool.on_invoke_tool
+    own_needs_approval = tool.needs_approval
+
+    async def invoke(ctx: Any, raw_input: str) -> Any:
+        if own_needs_approval is False:
+            decision = _interception_decision(ctx, tool.name, raw_input)
+            if decision is not None and decision.action == "deny":
+                return _interception_denied_message(decision)
+        return await invoke_tool(ctx, raw_input)
+
+    async def rule_needs_approval(ctx: Any, args: dict[str, Any], call_id: str) -> bool:  # noqa: ARG001
+        decision = _interception_decision(ctx, tool.name, json.dumps(args, ensure_ascii=False, sort_keys=True))
+        return decision is not None and decision.action == "ask"
+
+    if own_needs_approval is False:
+        combined_needs_approval = rule_needs_approval
+    elif own_needs_approval is True:
+        combined_needs_approval = True
+    else:
+
+        async def combined_needs_approval(ctx: Any, args: dict[str, Any], call_id: str) -> bool:
+            result = own_needs_approval(ctx, args, call_id)
+            if inspect.isawaitable(result):
+                result = await result
+            if result:
+                return True
+            return await rule_needs_approval(ctx, args, call_id)
+
+    tool.on_invoke_tool = invoke
+    tool.needs_approval = combined_needs_approval
+    tool._strix_intercepted = True  # type: ignore[attr-defined]
+    return tool
+
+
+def _with_custom_tool_interception(tool: CustomTool) -> CustomTool:
+    """``CustomTool`` counterpart of :func:`_with_function_tool_interception`.
+
+    Used only for the native Responses tool path; the chat-completions path
+    converts every ``CustomTool`` to a ``FunctionTool`` first (see
+    ``_custom_tool_as_function_tool``), which gets the function-tool version.
+    """
+    if getattr(tool, "_strix_intercepted", False):
+        return tool
+    invoke_tool = tool.on_invoke_tool
+    own_needs_approval = tool.needs_approval
+
+    async def invoke(ctx: Any, raw_input: str) -> Any:
+        if own_needs_approval is False:
+            decision = _interception_decision(ctx, tool.name, raw_input)
+            if decision is not None and decision.action == "deny":
+                return _interception_denied_message(decision)
+        return await invoke_tool(ctx, raw_input)
+
+    async def rule_needs_approval(ctx: Any, raw_input: str, call_id: str) -> bool:  # noqa: ARG001
+        decision = _interception_decision(ctx, tool.name, raw_input)
+        return decision is not None and decision.action == "ask"
+
+    if own_needs_approval is False:
+        combined_needs_approval = rule_needs_approval
+    elif own_needs_approval is True:
+        combined_needs_approval = True
+    else:
+
+        async def combined_needs_approval(ctx: Any, raw_input: str, call_id: str) -> bool:
+            result = own_needs_approval(ctx, raw_input, call_id)
+            if inspect.isawaitable(result):
+                result = await result
+            if result:
+                return True
+            return await rule_needs_approval(ctx, raw_input, call_id)
+
+    tool.on_invoke_tool = invoke
+    tool.needs_approval = combined_needs_approval
+    tool._strix_intercepted = True  # type: ignore[attr-defined]
+    return tool
+
+
 def _custom_tool_as_function_tool(tool: CustomTool) -> FunctionTool:
     async def invoke(ctx: Any, raw_input: str) -> Any:
         custom_input = _extract_custom_input(tool, raw_input)
@@ -330,16 +444,18 @@ def _custom_tool_as_function_tool(tool: CustomTool) -> FunctionTool:
     else:
         function_needs_approval = needs_approval
 
-    return FunctionTool(
-        name=tool.name,
-        description=(
-            f"{tool.description}\n\n"
-            f"Pass the complete `{tool.name}` payload in `{_custom_tool_input_field(tool)}`."
-        ),
-        params_json_schema=_raw_input_schema(tool),
-        on_invoke_tool=invoke,
-        strict_json_schema=False,
-        needs_approval=function_needs_approval,
+    return _with_function_tool_interception(
+        FunctionTool(
+            name=tool.name,
+            description=(
+                f"{tool.description}\n\n"
+                f"Pass the complete `{tool.name}` payload in `{_custom_tool_input_field(tool)}`."
+            ),
+            params_json_schema=_raw_input_schema(tool),
+            on_invoke_tool=invoke,
+            strict_json_schema=False,
+            needs_approval=function_needs_approval,
+        )
     )
 
 
@@ -351,7 +467,7 @@ def _bound_custom_tool(tool: CustomTool) -> CustomTool:
         return await _bound_result(await invoke_tool(ctx, raw_input))
 
     tool.on_invoke_tool = invoke
-    return tool
+    return _with_custom_tool_interception(tool)
 
 
 def _configure_filesystem_tools(
@@ -365,8 +481,10 @@ def _configure_filesystem_tools(
                 setattr(
                     toolset,
                     name,
-                    _function_tool_with_error_result(
-                        _with_strictness(_with_coerced_arguments(tool), strict_schemas)
+                    _with_function_tool_interception(
+                        _function_tool_with_error_result(
+                            _with_strictness(_with_coerced_arguments(tool), strict_schemas)
+                        )
                     ),
                 )
         elif isinstance(tool, CustomTool):
@@ -375,8 +493,10 @@ def _configure_filesystem_tools(
             setattr(
                 toolset,
                 name,
-                _with_bounded_result(
-                    _with_strictness(_with_coerced_arguments(tool), strict_schemas)
+                _with_function_tool_interception(
+                    _with_bounded_result(
+                        _with_strictness(_with_coerced_arguments(tool), strict_schemas)
+                    )
                 ),
             )
 
@@ -548,7 +668,7 @@ def _configure_shell_tools(
             wrapped = _wrap_write_stdin(wrapped)
         if chat_completions:
             wrapped = _function_tool_with_error_result(wrapped)
-        setattr(toolset, name, wrapped)
+        setattr(toolset, name, _with_function_tool_interception(wrapped))
 
 
 def _make_shell_configurator(*, chat_completions: bool, strict_schemas: bool) -> Any:
@@ -788,7 +908,9 @@ def build_strix_agent(
         tools = [*base_tools, *agent_tools, agent_finish]
     _ensure_unique_tool_names(tools)
     tools = [
-        _with_bounded_result(_with_strictness(_with_coerced_arguments(tool), strict_tool_schemas))
+        _with_function_tool_interception(
+            _with_bounded_result(_with_strictness(_with_coerced_arguments(tool), strict_tool_schemas))
+        )
         if isinstance(tool, FunctionTool)
         else tool
         for tool in tools
