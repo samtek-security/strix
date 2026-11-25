@@ -12,7 +12,7 @@ from strix.core.agents import AgentCoordinator
 from strix.llm import redaction
 
 
-SECRET = "sk-ant-api03-LEAK0123456789abcdef"
+SECRET = "sk-ant-api03-LEAK0123456789abcdef"  # noqa: S105 - fixture token
 
 
 async def test_snapshot_redacts_a_secret_shaped_task() -> None:
