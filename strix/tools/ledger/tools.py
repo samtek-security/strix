@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import tempfile
 import threading
 import uuid
@@ -131,8 +132,6 @@ def _ensure_engine_on_path() -> None:
     The Strix venv normally has it on sys.path already; this is a safety net for
     hosts where the tool module is imported from an unusual CWD.
     """
-    import sys
-
     here = Path(__file__).resolve()
     # engine/ is the ancestor above third_party/strix/reconcore/tools/ledger/.
     engine_dir = here.parents[5]
@@ -141,8 +140,7 @@ def _ensure_engine_on_path() -> None:
 
 
 def _ctx_dict(ctx: RunContextWrapper) -> dict[str, Any]:
-    inner = ctx.context if isinstance(ctx.context, dict) else {}
-    return inner
+    return ctx.context if isinstance(ctx.context, dict) else {}
 
 
 def _broker_config(inner: dict[str, Any]) -> dict[str, str]:
@@ -154,7 +152,9 @@ def _broker_config(inner: dict[str, Any]) -> dict[str, str]:
     still allowing an env-only fallback for local/dev runs.
     """
     return {
-        "engagement_id": str(inner.get("engagement_id") or os.environ.get("RECON_ENGAGEMENT_ID", "")),
+        "engagement_id": str(
+            inner.get("engagement_id") or os.environ.get("RECON_ENGAGEMENT_ID", ""),
+        ),
         "token": str(inner.get("broker_token") or os.environ.get("RECON_BROKER_TOKEN", "")),
         "base_url": str(inner.get("broker_url") or os.environ.get("RECON_BROKER_URL", "")),
         "owner": str(inner.get("agent_id") or "agent"),
@@ -218,7 +218,9 @@ def _exc_classes() -> tuple[type[Exception], ...]:
                 ExecutionStale,
                 ExecutionBounds,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - 2026-11-25: deliberately broad; any failure
+            # resolving the broker's exception classes (missing module, mismatched
+            # version, etc.) must fall back to generic Exception matching, not crash.
             _EXC_CACHE = ()
     return _EXC_CACHE
 
@@ -377,7 +379,10 @@ async def reserve_execution_cases(
 
 # ── Tool 3: record_execution_verdict ──────────────────────────────────────────
 @function_tool(timeout=30)
-async def record_execution_verdict(
+async def record_execution_verdict(  # noqa: PLR0917 - 2026-11-25: positional
+    # params mirror the agent tool-call schema the LLM invokes; bundling them
+    # into a struct would change that external contract, out of scope for a
+    # lint-only pass.
     ctx: RunContextWrapper,
     case_id: str,
     lease_id: str,
@@ -463,7 +468,10 @@ async def record_execution_verdict(
 
 # ── Tool 4: reconcile_execution_leases ────────────────────────────────────────
 @function_tool(timeout=30)
-async def reconcile_execution_leases(
+async def reconcile_execution_leases(  # noqa: PLR0912 - 2026-11-25: the branch
+    # count is the active/expired/drift classification matrix; splitting it up
+    # risks the broker-state logic it exists to keep legible, out of scope for
+    # a lint-only pass.
     ctx: RunContextWrapper,
     revision_id: str,
     revision_num: int,
