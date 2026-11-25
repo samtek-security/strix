@@ -195,6 +195,8 @@ def test_refuses_empty_or_short_token_file(
         "/api",
         "http://control-plane:abc",
         "http://control-plane:70000",
+        "http://control-plane:4001/?x=1",
+        "http://control-plane:4001/#frag",
     ],
 )
 def test_refuses_a_reporter_url_without_http_scheme_and_host(
@@ -245,5 +247,26 @@ def test_refuses_a_token_path_that_is_not_a_regular_file(
     monkeypatch.setenv(TOKEN_VAR, str(fifo))
 
     with pytest.raises(ValueError, match="not a regular file"):
+        _start(spec_file)
+    assert fake_docker.run_calls == []
+
+
+@pytest.mark.parametrize(
+    "content", ["a" * 20 + "\n" + "b" * 20, "a" * 20 + " " + "b" * 20, "é" * 20]
+)
+def test_refuses_a_token_that_is_not_a_single_header_safe_line(
+    fake_docker: _FakeDocker,
+    spec_file: str,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+) -> None:
+    path = tmp_path / "multiline-token"
+    path.write_text(content)
+    path.chmod(0o600)
+    monkeypatch.setenv(URL_VAR, URL)
+    monkeypatch.setenv(TOKEN_VAR, str(path))
+
+    with pytest.raises(ValueError, match="printable ASCII"):
         _start(spec_file)
     assert fake_docker.run_calls == []

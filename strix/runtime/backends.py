@@ -109,6 +109,11 @@ def _reporter_settings() -> tuple[str, Path]:
         raise ValueError(
             f"RECON_TARGET_HEALTH_REPORTER_URL {url!r} is not a valid URL: {exc}"
         ) from exc
+    if parsed.query or parsed.fragment:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_URL {url!r} must be a base URL "
+            "with no query or fragment"
+        )
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise ValueError(
             f"RECON_TARGET_HEALTH_REPORTER_URL {url!r} must be an http(s) URL with a host"
@@ -138,6 +143,11 @@ def _reporter_settings() -> tuple[str, Path]:
         ) from exc
     # The control plane rejects gateway credentials under 32 bytes, so a shorter token would
     # only fail after a trip, when the emergency stop can no longer be delivered.
+    if not (token.isascii() and token.isprintable() and " " not in token):
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} must hold one line of "
+            "printable ASCII with no spaces (it is sent as an Authorization header)"
+        )
     if len(token.encode()) < _REPORTER_TOKEN_MIN_BYTES:
         raise ValueError(
             f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} holds fewer than "
