@@ -386,6 +386,32 @@ async def test_literal_hidden_by_a_duplicate_json_key_is_still_redacted(
     assert secret not in stored[1]["output"]
 
 
+async def test_literal_past_the_depth_cutoff_is_still_redacted_when_a_shallow_one_is_found(
+    tmp_path: Path,
+) -> None:
+    """A shallow match sets ``changed=True``, which must not short-circuit
+    the fidelity branch and skip checking whether a second, deeper secret
+    (past the recursion cutoff, where the structural walk stops
+    descending) also needs redacting."""
+    shallow = "recon-own-broker-token-shallow-aaaa"
+    deep = "recon-own-broker-token-deep-bbbbbbbbbb"
+    redaction.register_secret(shallow)
+    redaction.register_secret(deep)
+    nested: Any = deep
+    for _ in range(70):
+        nested = {"nested": nested}
+    session = _session(tmp_path)
+    await session.add_items(
+        [
+            _call("exec_command", "c27", cmd="env"),
+            _output("c27", json.dumps({"shallow": shallow, "deep": nested})),
+        ]
+    )
+    stored = await session.get_items()
+    assert shallow not in stored[1]["output"]
+    assert deep not in stored[1]["output"]
+
+
 async def test_full_history_read_skipped_when_batch_resolves_itself(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

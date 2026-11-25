@@ -333,18 +333,29 @@ def _redact_literal_json_string(text: str, depth: int) -> tuple[str, bool]:
     # duplicate keys and renormalize number/non-ASCII formatting even when
     # there was nothing to redact, corrupting target evidence that must
     # survive byte-for-byte.
+    #
+    # Deliberately not "try a raw substring replace first, fall back to
+    # parsing": a secret used as a JSON object key (round 4's finding) can
+    # only be deduplicated against a same-placeholder collision inside the
+    # structural walk, which knows it is rewriting a key, not a value. A
+    # direct substring replace on raw text has no such notion and would
+    # recreate the exact collision the dedup helper exists to prevent.
     parsed = _safe_json_loads(text) if depth < _LITERAL_REDACTION_MAX_DEPTH else None
     if isinstance(parsed, dict | list):
         redacted, changed = _redact_literals_in_structure(parsed, depth + 1)
-        if changed:
-            return json.dumps(redacted), True
-        # The structural walk found nothing - but json.loads collapses a
-        # duplicate JSON object member to its last occurrence, so an
-        # earlier, shadowed member's secret was never visited and "nothing
-        # changed" cannot be trusted on its own. Verify the raw text
-        # directly before keeping it as-is.
-        scrubbed = _scrub_literals(text)
-        return (scrubbed, True) if scrubbed != text else (text, False)
+        if not changed:
+            # The structural walk found nothing - but json.loads collapses
+            # a duplicate JSON object member to its last occurrence, so an
+            # earlier, shadowed member's secret was never visited either.
+            # Verify the raw text directly before trusting "nothing to
+            # redact."
+            scrubbed = _scrub_literals(text)
+            return (scrubbed, True) if scrubbed != text else (text, False)
+        # Something was found and reconstructed - but the depth cutoff can
+        # still leave an unvisited subtree carrying its own secret, which
+        # this reconstruction never saw. One final scrub over it catches
+        # that before the result is trusted as complete.
+        return _scrub_literals(json.dumps(redacted)), True
     if isinstance(parsed, str):
         redacted_str = redact_literals_only(parsed)
         return (json.dumps(redacted_str), True) if redacted_str != parsed else (text, False)
