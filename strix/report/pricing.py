@@ -83,6 +83,9 @@ def resolve_litellm_model(model: str, *, first_party: bool = True) -> str | None
         for prefix in ("litellm/", "any-llm/", "openai/"):
             if normalized.startswith(prefix):
                 normalized = normalized.removeprefix(prefix)
+                # A wrapper prefix can front a custom endpoint, so the name
+                # does not identify a first-party route.
+                first_party = False
                 break
         if not normalized:
             return None

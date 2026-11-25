@@ -290,7 +290,7 @@ def test_resolver_prefers_first_party_route_when_resellers_disagree() -> None:
     )
     try:
         assert resolve_litellm_model("grok-4.5") == "xai/grok-4.5"
-        assert resolve_litellm_model("openai/grok-4.5") == "xai/grok-4.5"
+        assert resolve_litellm_model("openai/grok-4.5") is None
     finally:
         litellm.model_cost = original
         resolve_litellm_model.cache_clear()
@@ -422,3 +422,35 @@ def test_callers_leave_a_catalog_bare_model_unpriced_for_an_unlisted_provider() 
 
 def test_callers_still_price_a_catalog_bare_model_without_a_provider() -> None:
     assert _callback_price("deepseek-v4-flash", _CATALOG_BARE) == ["deepseek/deepseek-v4-flash"]
+
+
+def test_callers_price_a_catalog_bare_model_under_its_listed_provider() -> None:
+    assert _callback_price("deepseek-v4-flash", _CATALOG_BARE, provider="deepseek") == [
+        "deepseek/deepseek-v4-flash"
+    ]
+
+
+def _usage_cost(model: str, cost_map: dict[str, dict[str, float]]) -> list[str]:
+    original = litellm.model_cost
+    _with_cost_map(cost_map)
+    asked: list[str] = []
+
+    def fake_completion_cost(**kwargs: object) -> float:
+        asked.append(str(kwargs["model"]))
+        return 0.5
+
+    try:
+        with patch("litellm.completion_cost", side_effect=fake_completion_cost):
+            LLMUsageLedger().record(agent_id="a", usage=_usage(1000, 200), model=model)
+    finally:
+        litellm.model_cost = original
+        resolve_litellm_model.cache_clear()
+    return asked
+
+
+def test_ledger_leaves_a_wrapped_name_unpriced_when_candidates_disagree() -> None:
+    assert _usage_cost("openai/glm-5", _DISAGREEING) == []
+
+
+def test_ledger_prices_a_first_party_route_on_its_default_base() -> None:
+    assert _usage_cost("glm-5", _DISAGREEING) == ["zai/glm-5"]

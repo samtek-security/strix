@@ -266,15 +266,18 @@ def _estimate_litellm_cost(usage: Usage, model: str | None) -> float | None:
     litellm_model = _litellm_model_name(model)
     if not litellm_model:
         return None
+    # The wrapper prefix is stripped above; a wrapped name may front a custom
+    # endpoint, so it gets no first-party tie-break.
+    first_party = model is not None and model.strip() == litellm_model
 
     entries = list(usage.request_usage_entries)
     if not entries:
-        return _estimate_litellm_entry_cost(usage, litellm_model)
+        return _estimate_litellm_entry_cost(usage, litellm_model, first_party=first_party)
 
     total = 0.0
     estimated_any = False
     for entry in entries:
-        cost = _estimate_litellm_entry_cost(entry, litellm_model)
+        cost = _estimate_litellm_entry_cost(entry, litellm_model, first_party=first_party)
         if cost is None:
             continue
         total += cost
@@ -283,7 +286,9 @@ def _estimate_litellm_cost(usage: Usage, model: str | None) -> float | None:
     return total if estimated_any else None
 
 
-def _estimate_litellm_entry_cost(entry: Any, model: str) -> float | None:
+def _estimate_litellm_entry_cost(
+    entry: Any, model: str, *, first_party: bool = True
+) -> float | None:
     prompt_tokens = _int_or_zero(getattr(entry, "input_tokens", 0))
     completion_tokens = _int_or_zero(getattr(entry, "output_tokens", 0))
     total_tokens = _int_or_zero(getattr(entry, "total_tokens", 0))
@@ -311,7 +316,7 @@ def _estimate_litellm_entry_cost(entry: Any, model: str) -> float | None:
         candidates.append(model.rsplit("/", 1)[-1])
 
     for index, candidate in enumerate(candidates):
-        resolved = resolve_litellm_model(candidate, first_party=index == 0)
+        resolved = resolve_litellm_model(candidate, first_party=first_party and index == 0)
         if not resolved:
             continue
         try:

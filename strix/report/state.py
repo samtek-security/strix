@@ -1222,9 +1222,9 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
             candidate, first_party=first_party_allowed and index < retry_from
         )
         if not resolved:
-            if provider_route_only and index == 0:
-                # The supplied provider is not in the catalog. The bare entry
-                # belongs to another provider, so leave the call unpriced.
+            if provider_route_only and index == 0 and not _bare_entry_belongs_to(model, provider):
+                # The supplied provider is not in the catalog and the bare
+                # entry belongs to another provider, so leave the call unpriced.
                 return None
             continue
         try:
@@ -1237,6 +1237,13 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
         if isinstance(value, int | float) and value > 0:
             return float(value)
     return None
+
+
+def _bare_entry_belongs_to(model: str, provider: Any) -> bool:
+    import litellm
+
+    entry = getattr(litellm, "model_cost", {}).get(model)
+    return isinstance(entry, dict) and entry.get("litellm_provider") == provider
 
 
 def _usage_payload(completion_response: Any) -> dict[str, Any] | None:
