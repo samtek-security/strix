@@ -269,7 +269,7 @@ def _status_fields(client: _IMAPClient, cfg: MailboxConfig) -> tuple[int, int]:
             nx = re.search(rb"UIDNEXT\s+(\d+)", raw)
             vv = re.search(rb"UIDVALIDITY\s+(\d+)", raw)
             return (int(nx.group(1)) if nx else 0, int(vv.group(1)) if vv else 0)
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort read, logged below
         logger.debug("could not read STATUS (UIDNEXT UIDVALIDITY)", exc_info=True)
     return (0, 0)
 
@@ -313,7 +313,7 @@ def _fetch_size(client: _IMAPClient, uid: bytes) -> int:
                 m = re.search(rb"RFC822\.SIZE\s+(\d+)", bytes(blob))
                 if m:
                     return int(m.group(1))
-    except Exception:
+    except Exception:  # noqa: BLE001 - best-effort read, logged below
         logger.debug("could not read RFC822.SIZE", exc_info=True)
     return -1
 

@@ -379,10 +379,7 @@ async def reserve_execution_cases(
 
 # ── Tool 3: record_execution_verdict ──────────────────────────────────────────
 @function_tool(timeout=30)
-async def record_execution_verdict(  # noqa: PLR0917 - 2026-11-25: positional
-    # params mirror the agent tool-call schema the LLM invokes; bundling them
-    # into a struct would change that external contract, out of scope for a
-    # lint-only pass.
+async def record_execution_verdict(
     ctx: RunContextWrapper,
     case_id: str,
     lease_id: str,
