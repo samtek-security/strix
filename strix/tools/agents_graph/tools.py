@@ -402,6 +402,33 @@ def _fit_evidence_to_byte_cap(
         overage = _result_byte_size(result) - cap
         if overage <= 0:
             return
+    # Still over: a long name on one entry, or many entries' names added
+    # together in a large cascade. agent_id is left alone — it is the one
+    # field a caller needs to act on the result (view_agent_graph,
+    # send_message_to_agent, another stop_agent) — but name is informational.
+    for name_limit in (60, 20):
+        for entry in stopped_agents:
+            name = entry.get("name")
+            if isinstance(name, str) and len(name) > name_limit:
+                entry["name"] = name[: name_limit - 1] + "…"
+        if _result_byte_size(result) <= cap:
+            return
+    # Still over: enough agents in one cascade that even their bare
+    # agent_id/name/evidence_settled skeleton exceeds an aggressively small
+    # configured cap. Nothing left to compact without losing which agent an
+    # entry is about, so drop whole entries from the end - reporting that
+    # plainly - rather than returning an oversized response for the generic
+    # wrapper to hide everyone's status in a non-JSON preview. The markers
+    # themselves cost bytes too, so they go on before the loop measures
+    # against cap, not after it decides cap is already met.
+    original_count = len(stopped_agents)
+    result["stopped_agents_truncated"] = True
+    result["stopped_agents_total"] = original_count
+    while len(stopped_agents) > 1 and _result_byte_size(result) > cap:
+        stopped_agents.pop()
+    if len(stopped_agents) == original_count:
+        del result["stopped_agents_truncated"]
+        del result["stopped_agents_total"]
 
 
 _WAIT_DEFAULT_TIMEOUT_S = 300

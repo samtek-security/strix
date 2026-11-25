@@ -300,7 +300,7 @@ async def run_agent_loop(
         request_log.reset_call_context(token)
 
 
-async def _run_agent_loop(
+async def _run_agent_loop(  # noqa: PLR0912
     *,
     agent: Any,
     initial_input: Any,
@@ -321,10 +321,16 @@ async def _run_agent_loop(
         interrupt_on_message=interactive,
         resumable=interactive,
     )
-    # Unsettled from the moment the runtime exists: the identity/task seed
-    # below writes to the session before _run_cycle's own loop (and its own
-    # mark_turn_unsettled) ever runs, and turn_settled defaults to settled.
-    await coordinator.mark_turn_unsettled(agent_id)
+    # A start_parked interactive resume skips the seed below and
+    # _run_until_lifecycle entirely, going straight to wait_for_message with
+    # nothing left to write - turn_settled's default (settled) is already
+    # correct for it, and clearing it here would leave it stuck unsettled
+    # with nothing that will ever set it again. Every other path does write
+    # (the seed, if nothing else), so it needs the same unsettled-until-
+    # proven-otherwise treatment as a cycle: default is "nothing in flight
+    # yet," not "necessarily settled."
+    if not (start_parked and interactive):
+        await coordinator.mark_turn_unsettled(agent_id)
     result: RunResultBase | None = None
 
     first_cycle_input = await _seed_and_prepare_first_input(

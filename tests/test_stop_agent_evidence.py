@@ -452,12 +452,74 @@ def test_fit_evidence_to_byte_cap_trims_the_largest_entry_first(
         result, stopped_agents, {"a": len(small), "b": len(large)}
     )
 
-    assert agents_graph_tools._result_byte_size(result) <= 1024
+    cap = 1024 - agents_graph_tools._RESULT_BYTE_CAP_MARGIN
+    assert agents_graph_tools._result_byte_size(result) <= cap
     # The small entry is untouched; the large one took the cut.
     assert stopped_agents[0]["evidence"] == small
     assert len(stopped_agents[1]["evidence"]) < len(large)
     assert stopped_agents[1]["evidence_truncated"] is True
     assert stopped_agents[1]["evidence_total_items"] == len(large)
+
+
+def test_fit_evidence_to_byte_cap_compacts_note_and_reason_once_evidence_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stopped_agents = [
+        {"agent_id": "a", "name": "Validator", "evidence_settled": True, "evidence": []}
+    ]
+    result = {
+        "success": True,
+        "reason": "y" * 2000,
+        "note": "n" * 2000,
+        "stopped_agents": stopped_agents,
+    }
+
+    class _Context:
+        tool_output_max_bytes = 1024
+
+    class _Settings:
+        context = _Context()
+
+    monkeypatch.setattr(agents_graph_tools, "load_settings", _Settings)
+
+    agents_graph_tools._fit_evidence_to_byte_cap(result, stopped_agents, {})
+
+    cap = max(1024 - agents_graph_tools._RESULT_BYTE_CAP_MARGIN, 512)
+    assert agents_graph_tools._result_byte_size(result) <= cap
+    assert len(result["note"]) < 2000
+    assert len(result["reason"]) < 2000
+
+
+def test_fit_evidence_to_byte_cap_drops_entries_as_a_last_resort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enough agents that even their bare id/name/evidence_settled skeleton
+    exceeds an aggressively small configured cap - compacting note/reason
+    and truncating names isn't enough, so whole entries get dropped, marked
+    plainly, rather than handing back an oversized response."""
+    stopped_agents = [
+        {"agent_id": str(i), "name": "x" * 200, "evidence_settled": True, "evidence": []}
+        for i in range(10)
+    ]
+    result = {"success": True, "reason": "", "note": "n", "stopped_agents": stopped_agents}
+
+    class _Context:
+        tool_output_max_bytes = 1024
+
+    class _Settings:
+        context = _Context()
+
+    monkeypatch.setattr(agents_graph_tools, "load_settings", _Settings)
+
+    agents_graph_tools._fit_evidence_to_byte_cap(result, stopped_agents, {})
+
+    cap = max(1024 - agents_graph_tools._RESULT_BYTE_CAP_MARGIN, 512)
+    assert agents_graph_tools._result_byte_size(result) <= cap
+    assert len(stopped_agents) < 10
+    assert result["stopped_agents_truncated"] is True
+    assert result["stopped_agents_total"] == 10
+    # agent_id is left alone even under this last-resort trim.
+    assert all(len(e["agent_id"]) <= 2 for e in stopped_agents)
 
 
 @pytest.mark.asyncio

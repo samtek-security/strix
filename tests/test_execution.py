@@ -1097,6 +1097,41 @@ async def test_run_agent_loop_unsettles_before_the_identity_seed(
     session.close()
 
 
+@pytest.mark.asyncio
+async def test_run_agent_loop_leaves_turn_settled_alone_for_a_parked_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """start_parked + interactive skips the seed and _run_until_lifecycle
+    entirely, going straight to parking for a message - nothing will write
+    before then, so turn_settled's default (settled) must survive, not get
+    stuck cleared with nothing left to ever set it again."""
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+
+    async def _cancel_immediately(*_args: Any, **_kwargs: Any) -> bool:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(coordinator, "wait_for_message", _cancel_immediately)
+
+    result = await execution._run_agent_loop(
+        agent=MagicMock(),
+        initial_input="task",
+        run_config=MagicMock(),
+        context={},
+        max_turns=5,
+        coordinator=coordinator,
+        agent_id="root",
+        interactive=True,
+        session=None,
+        start_parked=True,
+        event_sink=None,
+        hooks=None,
+    )
+
+    assert result is None
+    assert coordinator.runtimes["root"].turn_settled.is_set() is True
+
+
 def _scripted_cycle(
     coordinator: AgentCoordinator,
     agent_id: str,
