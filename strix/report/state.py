@@ -1209,12 +1209,17 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
     if isinstance(provider, str) and provider and not model.startswith(f"{provider}/"):
         candidates.append(f"{provider}/{model}")
     candidates.append(model)
+    # A supplied provider already chose the route, so no candidate may be
+    # steered to another provider's first-party price.
+    first_party_allowed = not (isinstance(provider, str) and provider)
     retry_from = len(candidates)
     if "/" in model:
         candidates.append(model.rsplit("/", 1)[-1])
 
     for index, candidate in enumerate(candidates):
-        resolved = resolve_litellm_model(candidate, first_party=index < retry_from)
+        resolved = resolve_litellm_model(
+            candidate, first_party=first_party_allowed and index < retry_from
+        )
         if not resolved:
             continue
         try:

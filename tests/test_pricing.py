@@ -348,7 +348,9 @@ def test_first_party_rule_does_not_override_an_explicit_route() -> None:
         resolve_litellm_model.cache_clear()
 
 
-def _callback_price(model: str, cost_map: dict[str, dict[str, float]]) -> list[str]:
+def _callback_price(
+    model: str, cost_map: dict[str, dict[str, float]], provider: str | None = None
+) -> list[str]:
     """Model names the cost callback asks LiteLLM to price, in order."""
     original = litellm.model_cost
     _with_cost_map(cost_map)
@@ -365,7 +367,10 @@ def _callback_price(model: str, cost_map: dict[str, dict[str, float]]) -> list[s
             patch("strix.report.state.get_global_report_state", return_value=report_state),
             patch("litellm.completion_cost", side_effect=fake_completion_cost),
         ):
-            litellm_cost_callback({"response_cost": None, "model": model}, response)
+            kwargs: dict[str, object] = {"response_cost": None, "model": model}
+            if provider:
+                kwargs["litellm_params"] = {"custom_llm_provider": provider}
+            litellm_cost_callback(kwargs, response)
     finally:
         litellm.model_cost = original
         resolve_litellm_model.cache_clear()
@@ -392,3 +397,11 @@ def test_callers_price_qualified_route_when_all_candidates_agree() -> None:
 
 def test_callers_apply_first_party_route_to_a_bare_name() -> None:
     assert _callback_price("glm-5", _DISAGREEING) == ["zai/glm-5"]
+
+
+def test_callers_price_a_bare_model_under_its_custom_provider() -> None:
+    assert _callback_price("glm-5", _DISAGREEING, provider="gateway-a") == ["gateway-a/glm-5"]
+
+
+def test_callers_do_not_fall_back_to_first_party_for_an_unlisted_provider() -> None:
+    assert _callback_price("glm-5", _DISAGREEING, provider="gateway-b") == []
