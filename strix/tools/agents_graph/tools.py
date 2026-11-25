@@ -12,11 +12,13 @@ from typing import Any, Literal, get_args
 
 from agents import RunContextWrapper, function_tool
 
+from strix.config import load_settings
 from strix.core.agents import ACTIVE_STATUSES, Status, coordinator_from_context
 from strix.core.execution import notify_parent_on_terminal
 from strix.core.hooks import LLM_TURN_KEY
 from strix.report.state import get_global_report_state
 from strix.skills import validate_requested_skills
+from strix.tools.output_store import bound_text
 
 
 logger = logging.getLogger(__name__)
@@ -270,16 +272,196 @@ async def send_message_to_agent(
     )
 
 
+_CALL_ITEM_TYPES = ("function_call", "custom_tool_call")
+_OUTPUT_ITEM_TYPES = ("function_call_output", "custom_tool_call_output")
+
+
 def _session_items_payload(items: list[Any]) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
     for item in items:
-        if isinstance(item, dict):
-            role = item.get("role")
-            content = item.get("content")
-            payload.append({"role": role, "content": content})
-        else:
+        if not isinstance(item, dict):
             payload.append({"content": str(item)})
+            continue
+        item_type = item.get("type")
+        if item_type in _CALL_ITEM_TYPES:
+            # A tool call's own request — e.g. the HTTP request a proxy/terminal
+            # tool sent, or a Responses-mode apply_patch call. role/content are
+            # absent on this item type; name/arguments (or input, for a custom
+            # tool call) carry what happened instead. call_id is the only link
+            # to its output, which matters once a turn has more than one call
+            # in flight.
+            call_entry = {
+                "type": item_type,
+                "call_id": item.get("call_id"),
+                "name": item.get("name"),
+            }
+            if item_type == "function_call":
+                call_entry["arguments"] = item.get("arguments")
+            else:
+                call_entry["input"] = item.get("input")
+            payload.append(call_entry)
+        elif item_type in _OUTPUT_ITEM_TYPES:
+            # The matching result — e.g. the response body that proved an
+            # exploit. This is usually where confirmed evidence actually lives.
+            payload.append(
+                {
+                    "type": item_type,
+                    "call_id": item.get("call_id"),
+                    "output": item.get("output"),
+                }
+            )
+        else:
+            payload.append({"role": item.get("role"), "content": item.get("content")})
     return payload
+
+
+def _drop_orphaned_outputs(items: list[Any]) -> list[Any]:
+    """Drop every function_call_output/custom_tool_call_output whose
+    matching call isn't in this list (truncation cut it, or it's not
+    adjacent — parallel calls can persist as call A, call B, output A,
+    output B, so a cut can orphan one without being at either end). An
+    orphaned output has no tool name or arguments, just a dangling call_id
+    and a result nobody can trace back to what produced it."""
+    call_ids = {
+        item.get("call_id")
+        for item in items
+        if isinstance(item, dict) and item.get("type") in _CALL_ITEM_TYPES
+    }
+    return [
+        item
+        for item in items
+        if not (
+            isinstance(item, dict)
+            and item.get("type") in _OUTPUT_ITEM_TYPES
+            and item.get("call_id") not in call_ids
+        )
+    ]
+
+
+_PAIR_EXTENSION_LIMIT = 3  # multiplier on max_items while still pairing calls to outputs
+
+
+def _bound_evidence(items: list[Any], *, max_items: int) -> tuple[list[dict[str, Any]], bool]:
+    """Bound one agent's evidence by item count, keeping call/output pairs
+    together. Byte-bounding the complete response happens separately, once
+    every agent's evidence is assembled — see ``_fit_evidence_to_byte_cap``.
+    Returns the bounded payload and whether anything was cut.
+
+    A parallel-tool-call turn can persist as a whole block of calls followed
+    by a whole block of outputs, not call-output pairs one after another. A
+    plain tail slice of such a turn can land entirely inside the output
+    block, with every one of its calls just outside the cut - leaving
+    nothing but orphaned outputs, which a naive drop then empties out
+    completely even though the turn's evidence is real and substantial.
+    Walking backward and extending past ``max_items`` while a call is still
+    owed (bounded by ``_PAIR_EXTENSION_LIMIT`` so one pathologically wide
+    turn can't swallow unbounded history) keeps that evidence instead.
+    """
+    total = len(items)
+    if total <= max_items:
+        return _session_items_payload(list(items)), False
+
+    hard_ceiling = max_items * _PAIR_EXTENSION_LIMIT
+    needed_call_ids: set[Any] = set()
+    kept_reversed: list[Any] = []
+    for item in reversed(items):
+        if len(kept_reversed) >= hard_ceiling:
+            break
+        if len(kept_reversed) >= max_items and not needed_call_ids:
+            break
+        kept_reversed.append(item)
+        if isinstance(item, dict):
+            item_type = item.get("type")
+            if item_type in _OUTPUT_ITEM_TYPES:
+                needed_call_ids.add(item.get("call_id"))
+            elif item_type in _CALL_ITEM_TYPES:
+                needed_call_ids.discard(item.get("call_id"))
+
+    bounded = list(reversed(kept_reversed))
+    bounded = _drop_orphaned_outputs(bounded)
+    truncated = len(bounded) < total
+    return _session_items_payload(bounded), truncated
+
+
+def _result_byte_size(result: dict[str, Any]) -> int:
+    return len(json.dumps(result, ensure_ascii=False, default=str).encode("utf-8"))
+
+
+_RESULT_BYTE_CAP_MARGIN = 256
+
+
+def _fit_evidence_to_byte_cap(
+    result: dict[str, Any],
+    stopped_agents: list[dict[str, Any]],
+    total_items_by_agent: dict[str, int],
+) -> None:
+    """Shrink stopped_agents' evidence in place until the whole stop_agent
+    result fits the tool-output byte cap every tool's result is bound to.
+
+    Each agent's evidence is already item-count-bounded, but that bounds
+    item count, not bytes — one agent's evidence, or several added
+    together, can still be the one thing that pushes the complete response
+    over the cap the generic per-tool-result wrapper enforces. Missing this
+    means that wrapper replaces the whole response with a non-JSON
+    head/tail preview, which would hide evidence in the middle rather than
+    say plainly how much was cut. Trims from whichever entry currently
+    holds the most evidence, so one huge session doesn't starve the rest.
+    """
+    cap = max(load_settings().context.tool_output_max_bytes - _RESULT_BYTE_CAP_MARGIN, 512)
+    while _result_byte_size(result) > cap:
+        candidates = [e for e in stopped_agents if e.get("evidence")]
+        if not candidates:
+            break
+        target = max(candidates, key=lambda e: len(json.dumps(e["evidence"], default=str)))
+        target["evidence"] = _drop_orphaned_outputs(target["evidence"][1:])
+        target["evidence_truncated"] = True
+        target["evidence_total_items"] = total_items_by_agent.get(
+            target["agent_id"], len(target["evidence"])
+        )
+    overage = _result_byte_size(result) - cap
+    if overage <= 0:
+        return
+    # Every agent's evidence is already gone and the response is still over
+    # the cap: a long reason/note, or enough agents' own id/name fields, is
+    # what's left. Compact the free-text fields we control instead of
+    # handing back an oversized response for the generic wrapper to turn
+    # into a non-JSON preview anyway.
+    for key in ("note", "reason"):
+        text = result.get(key)
+        if not isinstance(text, str) or not text:
+            continue
+        budget = max(len(text.encode("utf-8")) - overage - 64, 32)
+        result[key] = bound_text(text, max_lines=20, max_bytes=budget)
+        overage = _result_byte_size(result) - cap
+        if overage <= 0:
+            return
+    # Still over: a long name on one entry, or many entries' names added
+    # together in a large cascade. agent_id is left alone — it is the one
+    # field a caller needs to act on the result (view_agent_graph,
+    # send_message_to_agent, another stop_agent) — but name is informational.
+    for name_limit in (60, 20):
+        for entry in stopped_agents:
+            name = entry.get("name")
+            if isinstance(name, str) and len(name) > name_limit:
+                entry["name"] = name[: name_limit - 1] + "…"
+        if _result_byte_size(result) <= cap:
+            return
+    # Still over: enough agents in one cascade that even their bare
+    # agent_id/name/evidence_settled skeleton exceeds an aggressively small
+    # configured cap. Nothing left to compact without losing which agent an
+    # entry is about, so drop whole entries from the end - reporting that
+    # plainly - rather than returning an oversized response for the generic
+    # wrapper to hide everyone's status in a non-JSON preview. The markers
+    # themselves cost bytes too, so they go on before the loop measures
+    # against cap, not after it decides cap is already met.
+    original_count = len(stopped_agents)
+    result["stopped_agents_truncated"] = True
+    result["stopped_agents_total"] = original_count
+    while len(stopped_agents) > 1 and _result_byte_size(result) > cap:
+        stopped_agents.pop()
+    if len(stopped_agents) == original_count:
+        del result["stopped_agents_truncated"]
+        del result["stopped_agents_total"]
 
 
 _WAIT_DEFAULT_TIMEOUT_S = 300
@@ -751,7 +933,18 @@ async def agent_finish(
     )
 
 
-@function_tool(timeout=30)
+_STOP_AGENT_TIMEOUT_S = 30
+# Headroom under the tool's own timeout, split across every agent the cascade
+# stops, so joining them one by one can never itself trip that outer timeout.
+_STOP_AGENT_EVIDENCE_BUDGET_S = 20.0
+# A long-lived validator's full session, or a cascade of several, can run
+# well past what fits in the parent model's own input limit. Keep the most
+# recent items per agent - that's where a just-confirmed lead lives - and say
+# so plainly rather than silently dropping the rest.
+_EVIDENCE_MAX_ITEMS_PER_AGENT = 60
+
+
+@function_tool(timeout=_STOP_AGENT_TIMEOUT_S)
 async def stop_agent(
     ctx: RunContextWrapper,
     target_agent_id: str,
@@ -765,6 +958,30 @@ async def stop_agent(
     session — before the run loop honors the cancel. The agent's
     interactive outer loop parks as ``stopped``; later user/peer
     messages can wake it again.
+
+    When you are the target's parent (or an ancestor further up), the
+    result also carries each stopped agent's session items directly,
+    under ``evidence`` — whatever it had already captured (confirmed
+    requests, responses, PoC output) before you stopped it. Use that
+    evidence to file or drop the lead yourself; do not re-derive the same
+    work from scratch. ``evidence_settled: false`` on an entry means its
+    turn was still finishing when this call gave up waiting, so its
+    evidence may be incomplete — treat it as partial, not missing. An
+    ``evidence_error`` key means the session itself could not be read;
+    treat that as "unknown", not "nothing found". ``evidence_truncated: true``
+    means only the most recent items are included here
+    (``evidence_total_items`` has the real count) — a lead confirmed earlier
+    in a long session may not appear. Stopping a peer or an ancestor is
+    still allowed, but their evidence is withheld since their
+    session is not yours to read.
+
+    ``evidence_settled`` is a reliable signal for a non-interactive target:
+    once set, nothing more will be written to its session. An interactive
+    target can still be woken and start a brand new turn after it reports
+    ``stopped`` — that is by design (``send_message_to_agent``'s docstring
+    covers it) — so treat its evidence as a snapshot at stop time, not a
+    final answer, and prefer ``cascade``-stopping non-interactive validators
+    for this.
 
     Use sparingly. Prefer ``send_message_to_agent`` (asking the agent
     to wrap up) for soft-stop scenarios. Reach for ``stop_agent`` when
@@ -797,7 +1014,7 @@ async def stop_agent(
             ensure_ascii=False,
             default=str,
         )
-    _, statuses, _, _ = await coordinator.graph_snapshot()
+    _, statuses, names, _ = await coordinator.graph_snapshot()
     if target_agent_id not in statuses:
         return json.dumps(
             {"success": False, "error": f"Unknown agent_id: {target_agent_id}"},
@@ -836,20 +1053,85 @@ async def stop_agent(
     for aid in orphaned:
         await notify_parent_on_terminal(coordinator, aid, "stopped")
 
+    # Capture each stopped agent's own evidence now, while we have the only
+    # handle on it. A stop is resumable in principle, but a non-interactive
+    # root never resumes a stopped validator to ask for what it found — so if
+    # we don't hand the evidence back here, it is gone.
+    #
+    # Only the target's own ancestors get the evidence: a session can carry
+    # scan credentials or unrelated target data, and nothing stops a leaf
+    # from naming a peer or the root as target_agent_id. cascade only ever
+    # stops target_agent_id and its descendants, so one ancestry check on the
+    # target covers every agent in ``stopped``.
+    may_read_evidence = me is not None and await coordinator.is_ancestor(me, target_agent_id)
+    join_timeout = _STOP_AGENT_EVIDENCE_BUDGET_S / max(len(stopped), 1)
+    evidence: list[dict[str, Any]] = []
+    total_items_by_agent: dict[str, int] = {}
+    for aid in stopped:
+        if not may_read_evidence:
+            evidence.append(
+                {"agent_id": aid, "name": names.get(aid, aid), "evidence_settled": None}
+            )
+            continue
+        settled = await coordinator.join_stopped(aid, join_timeout)
+        items = await coordinator.session_items(aid)
+        if items is None:
+            evidence.append(
+                {
+                    "agent_id": aid,
+                    "name": names.get(aid, aid),
+                    "evidence_settled": settled,
+                    "evidence": [],
+                    "evidence_error": (
+                        "failed to read this agent's session; evidence may exist but "
+                        "could not be retrieved — do not treat this as 'nothing found'"
+                    ),
+                }
+            )
+            continue
+        total_items_by_agent[aid] = len(items)
+        bounded_payload, truncated = _bound_evidence(items, max_items=_EVIDENCE_MAX_ITEMS_PER_AGENT)
+        entry: dict[str, Any] = {
+            "agent_id": aid,
+            "name": names.get(aid, aid),
+            "evidence_settled": settled,
+            "evidence": bounded_payload,
+        }
+        if truncated:
+            entry["evidence_truncated"] = True
+            entry["evidence_total_items"] = total_items_by_agent[aid]
+        evidence.append(entry)
+
     logger.info(
         "stop_agent: target=%s cascade=%s reason=%r",
         target_agent_id,
         cascade,
         reason,
     )
+    note = "Cancellation is graceful — current turn completes first. "
+    note += (
+        (
+            "Each stopped agent's already-captured evidence is in "
+            "'evidence' below; use it directly instead of re-deriving it."
+        )
+        if may_read_evidence
+        else (
+            "You are not this agent's parent (or an ancestor further up), so "
+            "its session evidence is withheld here — ask its parent, or use "
+            "list_reports for what it already filed."
+        )
+    )
+    result = {
+        "success": True,
+        "target_agent_id": target_agent_id,
+        "cascade": cascade,
+        "reason": reason,
+        "note": note,
+        "stopped_agents": evidence,
+    }
+    _fit_evidence_to_byte_cap(result, evidence, total_items_by_agent)
     return json.dumps(
-        {
-            "success": True,
-            "target_agent_id": target_agent_id,
-            "cascade": cascade,
-            "reason": reason,
-            "note": "Cancellation is graceful — current turn completes first.",
-        },
+        result,
         ensure_ascii=False,
         default=str,
     )

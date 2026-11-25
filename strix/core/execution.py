@@ -300,7 +300,7 @@ async def run_agent_loop(
         request_log.reset_call_context(token)
 
 
-async def _run_agent_loop(
+async def _run_agent_loop(  # noqa: PLR0912
     *,
     agent: Any,
     initial_input: Any,
@@ -321,6 +321,16 @@ async def _run_agent_loop(
         interrupt_on_message=interactive,
         resumable=interactive,
     )
+    # A start_parked interactive resume skips the seed below and
+    # _run_until_lifecycle entirely, going straight to wait_for_message with
+    # nothing left to write - turn_settled's default (settled) is already
+    # correct for it, and clearing it here would leave it stuck unsettled
+    # with nothing that will ever set it again. Every other path does write
+    # (the seed, if nothing else), so it needs the same unsettled-until-
+    # proven-otherwise treatment as a cycle: default is "nothing in flight
+    # yet," not "necessarily settled."
+    if not (start_parked and interactive):
+        await coordinator.mark_turn_unsettled(agent_id)
     result: RunResultBase | None = None
 
     first_cycle_input = await _seed_and_prepare_first_input(
@@ -331,9 +341,11 @@ async def _run_agent_loop(
     reserve_stopped = coordinator.reserve_stopped
     if budget_stopped:
         await coordinator.set_status(agent_id, "stopped")
+        await coordinator.mark_turn_settled(agent_id)
         raise BudgetExceededError("scan budget reached")
     if reserve_stopped and context.get("parent_id") is not None:
         await coordinator.set_status(agent_id, "stopped")
+        await coordinator.mark_turn_settled(agent_id)
         raise SubagentBudgetReservedError("scan reached the sub-agent budget reserve")
 
     if reserve_stopped and start_parked and interactive and context.get("parent_id") is None:
@@ -568,7 +580,7 @@ async def respawn_subagents(
 _INTERACTIVE_TOOL_RECOVERY_LIMIT = 3
 
 
-async def _run_until_lifecycle(
+async def _run_until_lifecycle(  # noqa: PLR0912
     agent: Any,
     coordinator: AgentCoordinator,
     agent_id: str,
@@ -601,10 +613,15 @@ async def _run_until_lifecycle(
     while True:
         if coordinator.budget_stopped:
             await coordinator.set_status(agent_id, "stopped")
+            # Terminal from here - nothing more will be written for this
+            # agent, so a concurrent stop_agent should not wait out the full
+            # evidence timeout only to find this exact thing true anyway.
+            await coordinator.mark_turn_settled(agent_id)
             raise BudgetExceededError("scan budget reached")
 
         if coordinator.reserve_stopped and context.get("parent_id") is not None:
             await coordinator.set_status(agent_id, "stopped")
+            await coordinator.mark_turn_settled(agent_id)
             raise SubagentBudgetReservedError("scan reached the sub-agent budget reserve")
 
         try:
@@ -642,11 +659,20 @@ async def _run_until_lifecycle(
             # point is already in its session. Once resumed, the same call goes
             # out with nothing added to the conversation.
             await coordinator.wait_for_budget_resume(agent_id, parked_epoch=exc.resume_epoch)
-            if (
-                not coordinator.budget_stopped
-                and await _agent_status(coordinator, agent_id) != "running"
-            ):
-                # Stopped while parked (operator stop or a parent's stop_agent).
+            # bool(...) defeats a mypy false positive: it narrows this property
+            # to False from the loop's earlier check and doesn't widen it back
+            # even though trigger_budget_stop() could have set it True during
+            # the await above.
+            budget_stopped = bool(coordinator.budget_stopped)
+            if budget_stopped:
+                # The top of this loop raises BudgetExceededError on the next
+                # pass regardless of this agent's own status, so there is no
+                # new cycle to guard here - just the mailbox write below.
+                await coordinator.mark_turn_unsettled(agent_id)
+            elif not await coordinator.try_claim_next_cycle(agent_id):
+                # Stopped while parked (operator stop or a parent's
+                # stop_agent) - checked and unsettled atomically, so a stop
+                # landing right at this boundary can't be missed.
                 await coordinator.reset_recovery(agent_id)
                 return result
             await coordinator.consume_pending(agent_id)
@@ -677,6 +703,16 @@ async def _run_until_lifecycle(
         if recoveries >= recovery_limit:
             return await _exhausted_recovery(coordinator, agent_id, result, interactive=interactive)
 
+        # The previous _run_cycle call already settled (mark_turn_settled
+        # fired on its way out), and the status check above only confirms
+        # "running" as of that moment - record_recovery/_log_recovery each
+        # cross an await, any of which a stop can land in. try_claim_next_cycle
+        # re-checks status and clears turn_settled in the same lock
+        # acquisition, so nothing can land in between the two: the nudge
+        # write below (and the whole next turn it triggers) is covered.
+        if not await coordinator.try_claim_next_cycle(agent_id):
+            await coordinator.reset_recovery(agent_id)
+            return result
         input_data = await _append_tool_required_message(
             session=session,
             context=context,
@@ -811,6 +847,10 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
     while True:
         stream: Any = None
         pre_run_items: list[Any] = []
+        # Before any pre-stream work (which can itself write to the session via
+        # compaction) touches this cycle, so a stop landing right here is never
+        # read back as "settled" from the previous cycle's signal.
+        await coordinator.mark_turn_unsettled(agent_id)
         try:
             await coordinator.mark_running(agent_id)
             if session is not None:
@@ -873,11 +913,13 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
                 await coordinator.park_for_budget(agent_id)
             else:
                 await coordinator.pause_for_budget(agent_id)
+            await coordinator.mark_turn_settled(agent_id)
             raise
         except SubagentBudgetReservedError as exc:
             logger.info("sub-agent %s stopped at the budget reserve: %s", agent_id, exc)
             await coordinator.set_status(agent_id, "stopped")
             await _notify_root_on_budget_reserve(coordinator)
+            await coordinator.mark_turn_settled(agent_id)
             raise
         except BudgetExceededError as exc:
             logger.info(
@@ -885,6 +927,7 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
             )
             await coordinator.set_status(agent_id, "stopped")
             await coordinator.trigger_budget_stop()
+            await coordinator.mark_turn_settled(agent_id)
             raise
         except Exception as exc:
             if image_strips < 3 and session is not None and _is_image_rejection(exc):
@@ -946,6 +989,7 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
                     agent_id, "failed", error=request_log.failure_text(exc)
                 )
                 await notify_parent_on_terminal(coordinator, agent_id, "failed")
+                await coordinator.mark_turn_settled(agent_id)
                 return None
             if isinstance(exc, MaxTurnsExceeded):
                 status: Status = "stopped"
@@ -967,10 +1011,12 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
             # the dead child can no longer send.
             await coordinator.set_status(agent_id, status, error=error_text)
             await notify_parent_on_terminal(coordinator, agent_id, status)
+            await coordinator.mark_turn_settled(agent_id)
             if not interactive:
                 raise
             return None
         else:
+            await coordinator.mark_turn_settled(agent_id)
             return cast("RunResultBase | None", stream)
 
 

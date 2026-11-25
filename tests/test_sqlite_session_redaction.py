@@ -77,6 +77,41 @@ async def test_unredacted_tool_call_and_output_pass_through_verbatim(tmp_path: P
     assert "Bearer" in stored[1]["output"]
 
 
+async def test_stop_agent_evidence_passes_through_verbatim(tmp_path: Path) -> None:
+    """stop_agent's own output can carry a stopped validator's evidence
+    verbatim (a copy of exactly what view_request/exec_command captured).
+    Shape-redacting that copy would scrub the credential the stop was
+    meant to preserve."""
+    session = _session(tmp_path)
+    await session.add_items(
+        [
+            _call("stop_agent", "c0", target_agent_id="child"),
+            _output(
+                "c0",
+                json.dumps(
+                    {
+                        "success": True,
+                        "stopped_agents": [
+                            {
+                                "agent_id": "child",
+                                "evidence": [
+                                    {
+                                        "type": "function_call_output",
+                                        "call_id": "inner-1",
+                                        "output": f"Authorization: Bearer {_SECRET}",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ),
+            ),
+        ]
+    )
+    stored = await session.get_items()
+    assert _SECRET in stored[1]["output"]
+
+
 async def test_non_denylisted_tool_output_is_redacted(tmp_path: Path) -> None:
     session = _session(tmp_path)
     await session.add_items(
@@ -426,9 +461,7 @@ async def test_full_history_read_skipped_when_batch_resolves_itself(
         calls.append((a, kw))
         return await original(self, *a, **kw)
 
-    monkeypatch.setattr(
-        sessions_module._PooledConnectionSession, "get_items", _tracking_get_items
-    )
+    monkeypatch.setattr(sessions_module._PooledConnectionSession, "get_items", _tracking_get_items)
 
     await session.add_items(
         [
