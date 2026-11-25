@@ -12,6 +12,7 @@ from typing import Any, Literal, get_args
 
 from agents import RunContextWrapper, function_tool
 
+from strix.config import load_settings
 from strix.core.agents import ACTIVE_STATUSES, Status, coordinator_from_context
 from strix.core.execution import notify_parent_on_terminal
 from strix.core.hooks import LLM_TURN_KEY
@@ -270,6 +271,10 @@ async def send_message_to_agent(
     )
 
 
+_CALL_ITEM_TYPES = ("function_call", "custom_tool_call")
+_OUTPUT_ITEM_TYPES = ("function_call_output", "custom_tool_call_output")
+
+
 def _session_items_payload(items: list[Any]) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
     for item in items:
@@ -277,20 +282,24 @@ def _session_items_payload(items: list[Any]) -> list[dict[str, Any]]:
             payload.append({"content": str(item)})
             continue
         item_type = item.get("type")
-        if item_type == "function_call":
+        if item_type in _CALL_ITEM_TYPES:
             # A tool call's own request — e.g. the HTTP request a proxy/terminal
-            # tool sent. role/content are absent on this item type; name/arguments
-            # carry what happened instead. call_id is the only link to its
-            # output, which matters once a turn has more than one call in flight.
-            payload.append(
-                {
-                    "type": item_type,
-                    "call_id": item.get("call_id"),
-                    "name": item.get("name"),
-                    "arguments": item.get("arguments"),
-                }
-            )
-        elif item_type == "function_call_output":
+            # tool sent, or a Responses-mode apply_patch call. role/content are
+            # absent on this item type; name/arguments (or input, for a custom
+            # tool call) carry what happened instead. call_id is the only link
+            # to its output, which matters once a turn has more than one call
+            # in flight.
+            call_entry = {
+                "type": item_type,
+                "call_id": item.get("call_id"),
+                "name": item.get("name"),
+            }
+            if item_type == "function_call":
+                call_entry["arguments"] = item.get("arguments")
+            else:
+                call_entry["input"] = item.get("input")
+            payload.append(call_entry)
+        elif item_type in _OUTPUT_ITEM_TYPES:
             # The matching result — e.g. the response body that proved an
             # exploit. This is usually where confirmed evidence actually lives.
             payload.append(
@@ -303,6 +312,65 @@ def _session_items_payload(items: list[Any]) -> list[dict[str, Any]]:
         else:
             payload.append({"role": item.get("role"), "content": item.get("content")})
     return payload
+
+
+def _drop_leading_orphaned_outputs(items: list[Any]) -> list[Any]:
+    """Drop a leading function_call_output/custom_tool_call_output whose
+    matching call got cut off by truncation. An orphaned output has no tool
+    name or arguments, just a dangling call_id and a result nobody can trace
+    back to what produced it."""
+    call_ids = {
+        item.get("call_id")
+        for item in items
+        if isinstance(item, dict) and item.get("type") in _CALL_ITEM_TYPES
+    }
+    start = 0
+    while start < len(items):
+        item = items[start]
+        if (
+            isinstance(item, dict)
+            and item.get("type") in _OUTPUT_ITEM_TYPES
+            and item.get("call_id") not in call_ids
+        ):
+            start += 1
+            continue
+        break
+    return items[start:]
+
+
+_EVIDENCE_SCAFFOLD_RESERVE_BYTES = 2048
+
+
+def _evidence_byte_budget(agent_count: int) -> int:
+    """Per-agent byte budget for one stop_agent call's evidence, comfortably
+    under the generic per-tool-result cap every tool's output already gets.
+    Staying under it ourselves means a large evidence blob gets our own
+    clean, still-valid-JSON truncation instead of that generic wrapper's
+    non-JSON head/tail preview, which would hide evidence in the middle."""
+    max_bytes = load_settings().context.tool_output_max_bytes
+    usable = max(max_bytes - _EVIDENCE_SCAFFOLD_RESERVE_BYTES, 1024)
+    return max(usable // max(agent_count, 1), 512)
+
+
+def _bound_evidence(
+    items: list[Any], *, max_items: int, max_bytes: int
+) -> tuple[list[dict[str, Any]], bool]:
+    """Bound one agent's evidence by item count and by serialized bytes,
+    keeping call/output pairs together. Returns the bounded payload and
+    whether anything was cut."""
+    total = len(items)
+    bounded = items[-max_items:] if total > max_items else list(items)
+    bounded = _drop_leading_orphaned_outputs(bounded)
+    truncated = len(bounded) < total
+    payload = _session_items_payload(bounded)
+    while bounded:
+        size = len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
+        if size <= max_bytes:
+            break
+        bounded = _drop_leading_orphaned_outputs(bounded[1:])
+        truncated = True
+        payload = _session_items_payload(bounded)
+    return payload, truncated
 
 
 _WAIT_DEFAULT_TIMEOUT_S = 300
@@ -816,6 +884,14 @@ async def stop_agent(
     still allowed, but their evidence is withheld since their
     session is not yours to read.
 
+    ``evidence_settled`` is a reliable signal for a non-interactive target:
+    once set, nothing more will be written to its session. An interactive
+    target can still be woken and start a brand new turn after it reports
+    ``stopped`` — that is by design (``send_message_to_agent``'s docstring
+    covers it) — so treat its evidence as a snapshot at stop time, not a
+    final answer, and prefer ``cascade``-stopping non-interactive validators
+    for this.
+
     Use sparingly. Prefer ``send_message_to_agent`` (asking the agent
     to wrap up) for soft-stop scenarios. Reach for ``stop_agent`` when
     a child has gone off-track and won't self-correct.
@@ -898,6 +974,7 @@ async def stop_agent(
     # target covers every agent in ``stopped``.
     may_read_evidence = me is not None and await coordinator.is_ancestor(me, target_agent_id)
     join_timeout = _STOP_AGENT_EVIDENCE_BUDGET_S / max(len(stopped), 1)
+    evidence_byte_budget = _evidence_byte_budget(len(stopped))
     evidence: list[dict[str, Any]] = []
     for aid in stopped:
         if not may_read_evidence:
@@ -922,13 +999,14 @@ async def stop_agent(
             )
             continue
         total_items = len(items)
-        truncated = total_items > _EVIDENCE_MAX_ITEMS_PER_AGENT
-        bounded_items = items[-_EVIDENCE_MAX_ITEMS_PER_AGENT:] if truncated else items
+        bounded_payload, truncated = _bound_evidence(
+            items, max_items=_EVIDENCE_MAX_ITEMS_PER_AGENT, max_bytes=evidence_byte_budget
+        )
         entry: dict[str, Any] = {
             "agent_id": aid,
             "name": names.get(aid, aid),
             "evidence_settled": settled,
-            "evidence": _session_items_payload(bounded_items),
+            "evidence": bounded_payload,
         }
         if truncated:
             entry["evidence_truncated"] = True

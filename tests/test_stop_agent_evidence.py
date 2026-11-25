@@ -323,3 +323,106 @@ async def test_stop_agent_withholds_evidence_from_a_non_ancestor() -> None:
     assert entry == {"agent_id": "child", "name": "Validator", "evidence_settled": None}
     assert "evidence" not in entry
     assert "withheld" in result["note"]
+
+
+# --- bounding: item count, byte size, and call/output pairing --------------------
+
+
+def test_bound_evidence_preserves_custom_tool_call_evidence() -> None:
+    items = [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call-1",
+            "name": "apply_patch",
+            "input": "*** Update File: exploit.py\n+confirmed",
+        },
+        {"type": "custom_tool_call_output", "call_id": "call-1", "output": "patch applied"},
+    ]
+
+    payload, truncated = agents_graph_tools._bound_evidence(items, max_items=60, max_bytes=10_000)
+
+    assert truncated is False
+    assert payload == [
+        {
+            "type": "custom_tool_call",
+            "call_id": "call-1",
+            "name": "apply_patch",
+            "input": "*** Update File: exploit.py\n+confirmed",
+        },
+        {"type": "custom_tool_call_output", "call_id": "call-1", "output": "patch applied"},
+    ]
+
+
+def test_bound_evidence_drops_a_leading_orphaned_output() -> None:
+    items = [
+        {"role": "assistant", "content": "setting up"},
+        {"type": "function_call", "call_id": "cut-off", "name": "http_request", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "cut-off", "output": "200 OK"},
+        {"role": "assistant", "content": "kept"},
+    ]
+
+    # max_items=2 would naively keep [the output, the trailing message] and
+    # orphan the output from its call.
+    payload, truncated = agents_graph_tools._bound_evidence(items, max_items=2, max_bytes=10_000)
+
+    assert truncated is True
+    assert payload == [{"role": "assistant", "content": "kept"}]
+
+
+def test_bound_evidence_respects_a_byte_budget_even_under_the_item_cap() -> None:
+    items: list[Any] = []
+    for i in range(5):
+        items.append(
+            {"type": "function_call", "call_id": f"c{i}", "name": "http_request", "arguments": "{}"}
+        )
+        items.append({"type": "function_call_output", "call_id": f"c{i}", "output": "x" * 500})
+
+    payload, truncated = agents_graph_tools._bound_evidence(items, max_items=60, max_bytes=800)
+
+    assert truncated is True
+    serialized = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+    assert len(serialized) <= 800
+    # What survives is still a complete call/output pair, not a dangling half.
+    assert payload[0]["type"] == "function_call"
+    assert payload[0]["call_id"] == payload[1]["call_id"]
+
+
+@pytest.mark.asyncio
+async def test_stop_agent_preserves_custom_tool_call_evidence() -> None:
+    coordinator = await _graph()
+    await coordinator.attach_runtime(
+        "child",
+        session=FakeSession(
+            [
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "patch-1",
+                    "name": "apply_patch",
+                    "input": "*** Update File: exploit.py\n+leaked_key = 'sk-ant-...'",
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "patch-1",
+                    "output": "applied",
+                },
+            ]
+        ),
+    )
+
+    result = await _call(
+        stop_agent,
+        coordinator,
+        "root",
+        {"target_agent_id": "child", "cascade": False},
+    )
+
+    entry = result["stopped_agents"][0]
+    assert entry["evidence"] == [
+        {
+            "type": "custom_tool_call",
+            "call_id": "patch-1",
+            "name": "apply_patch",
+            "input": "*** Update File: exploit.py\n+leaked_key = 'sk-ant-...'",
+        },
+        {"type": "custom_tool_call_output", "call_id": "patch-1", "output": "applied"},
+    ]
