@@ -606,6 +606,16 @@ class AgentCoordinator:
             return False
         return True
 
+    async def is_resumable(self, agent_id: str) -> bool:
+        """Whether a stopped agent can still be woken into a new turn.
+
+        An agent with no runtime recorded is treated as resumable: nothing
+        proves it cannot write again.
+        """
+        async with self._lock:
+            runtime = self.runtimes.get(agent_id)
+            return runtime is None or runtime.resumable
+
     async def session_items(self, agent_id: str) -> list[Any] | None:
         """Read back a stopped agent's own session items.
 
