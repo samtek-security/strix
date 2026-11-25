@@ -674,6 +674,18 @@ async def preflight_role(
             result["oidc_provider_url"] = _origin(final_url)
             result["reason"] = _oidc_handoff_reason(_origin(final_url), session_name)
             return result
+        if opened:
+            # Opening the provider landed somewhere else (typically the target's callback because
+            # an existing SSO session redirected straight back). That may already be a valid
+            # session, and no login form remains to fill - run the same 3-part check on the
+            # landing before falling back to a form login that would find nothing to submit.
+            ver = await _verify(session, flow, session_name, state_path, target_url)
+            if ver.get("authenticated"):
+                result["checks"] = ver["checks"]
+                result["authenticated"] = True
+                result["storage_state"] = ver.get("state_text", "")
+                result["reason"] = "verified via an existing provider session (no re-login)"
+                return result
 
     async def _oidc_or(fallback_reason: str) -> dict | None:
         """Check for an OIDC hand-off right now, before anything navigates the browser further
@@ -776,27 +788,30 @@ async def run_auth_preflight(
     # Ensure the durable state dir exists in the container.
     await _run(session, "mkdir", "-p", _STATE_DIR)
     results = []
-    seen_slugs: dict[str, str] = {}
+    # Roles whose names slug to the same session name also share a brokered credential env var
+    # and a browser session, so logging the first in would already leave it racing the others'
+    # credential. Find every colliding role UP FRONT and refuse ALL of them before any login.
+    members: dict[str, list[str]] = {}
+    for flow in auth_flows:
+        if isinstance(flow, dict):
+            name = flow.get("role") or "user"
+            members.setdefault(_slug(name), []).append(name)
     for flow in auth_flows:
         if not isinstance(flow, dict):
             continue
         role = flow.get("role") or "user"
         slug = _slug(role)
-        if slug in seen_slugs:
-            # Two role names that differ only by separators slug to the SAME session name and
-            # state file, so they would overwrite each other and both be tested through the last
-            # one's session. The session name is shared with the credential env var and the agent
-            # prompts, so it cannot be renamed here: refuse the later role instead.
-            logger.error("auth preflight: role %r collides with %r on session name recon-%s",
-                         role, seen_slugs[slug], slug)
+        if len(members[slug]) > 1:
+            others = ", ".join(f"'{r}'" for r in members[slug] if r != role) or "another role"
+            logger.error("auth preflight: role %r collides with %s on session name recon-%s",
+                         role, others, slug)
             results.append({
                 "role": role, "session_name": f"recon-{slug}", "state_path": "",
                 "authenticated": False, "checks": {}, "session_collision": True,
-                "reason": f"role name collides with role '{seen_slugs[slug]}' on session "
-                          f"recon-{slug}; rename one of them",
+                "reason": f"role name collides with {others} on session recon-{slug}; "
+                          f"rename one of them",
             })
             continue
-        seen_slugs[slug] = role
         try:
             ext = (external_states or {}).get(role)
             results.append(
