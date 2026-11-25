@@ -93,7 +93,10 @@ def test_context_helpers_default_safely() -> None:
     assert interception.rules_from_context({}) is None
     assert interception.gateway_from_context({}) is None
     assert interception.ask_timeout_from_context(None) == interception.DEFAULT_ASK_TIMEOUT_SECONDS
-    assert interception.ask_timeout_from_context({"ask_timeout_seconds": 0}) == (
+    assert interception.ask_timeout_from_context({"ask_timeout_seconds": None}) == (
         interception.DEFAULT_ASK_TIMEOUT_SECONDS
     )
+    # Zero or negative is a real value: no budget left, not "use the default".
+    assert interception.ask_timeout_from_context({"ask_timeout_seconds": 0}) == 0.0
+    assert interception.ask_timeout_from_context({"ask_timeout_seconds": -30}) == 0.0
     assert interception.ask_timeout_from_context({"ask_timeout_seconds": 45}) == 45.0

@@ -320,7 +320,13 @@ async def _wait_for_human_decision(
     progress pump: a legitimate multi-minute human wait must look like progress
     to whatever keepalive/stall watchdog the host (Recon's Temporal activity)
     has wrapped around this run, not like a hang.
+
+    A ``timeout`` of zero or less means the engagement has no budget left for a
+    human to answer: deny at once, without opening an approval nobody can act on.
     """
+    if timeout <= 0:
+        logger.warning("interception ask for %s denied at once: no time left to wait", tool_name)
+        return "denied"
     try:
         approval_id = await gateway.request(
             dedup_key=_dedup_key(tool_name, input_text),

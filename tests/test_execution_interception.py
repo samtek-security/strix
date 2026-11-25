@@ -192,3 +192,25 @@ async def test_wait_for_human_decision_times_out_and_pings_report() -> None:
     assert outcome == "denied"
     assert gateway.polls >= 1
     assert any("exec_command" in p for p in pings)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("budget", [0, 0.0, -5])
+async def test_no_budget_left_denies_at_once_without_opening_an_approval(budget: float) -> None:
+    gateway = _ScriptedGateway(["approved"])  # would approve, if it were ever asked
+    context = {
+        INTERCEPTION_RULES_KEY: [_ask_rule()],
+        APPROVAL_GATEWAY_KEY: gateway,
+        ASK_TIMEOUT_SECONDS_KEY: budget,
+    }
+    item = _item()
+    stream = _FakeInterruptedStream(interruptions=[item])
+
+    state = await asyncio.wait_for(
+        _resolve_interruptions(stream, context=context, report=None), timeout=2
+    )
+
+    assert state.approved == []
+    assert [rejected for rejected, _ in state.rejected] == [item]
+    assert gateway.requests == []
+    assert gateway.polls == 0

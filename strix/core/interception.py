@@ -134,9 +134,12 @@ def gateway_from_context(context: dict[str, object] | None) -> ApprovalGateway |
 
 
 def ask_timeout_from_context(context: dict[str, object] | None) -> float:
+    """Seconds an "ask" may wait. Absent or non-numeric means the default; a
+    number is taken as given, floored at 0, because 0 is meaningful: the caller
+    has no budget left, so the ask must deny at once instead of waiting."""
     if not context:
         return DEFAULT_ASK_TIMEOUT_SECONDS
     value = context.get(ASK_TIMEOUT_SECONDS_KEY)
-    return float(value) if isinstance(value, (int, float)) and value > 0 else (
-        DEFAULT_ASK_TIMEOUT_SECONDS
-    )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return DEFAULT_ASK_TIMEOUT_SECONDS
+    return max(0.0, float(value))
