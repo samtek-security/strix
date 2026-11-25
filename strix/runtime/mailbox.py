@@ -28,15 +28,20 @@ is dependency-injected (``client_factory``) so this is unit-testable with no net
 
 from __future__ import annotations
 
+import contextlib
 import email
 import logging
 import os
 import re
 import time
 from dataclasses import dataclass, field
-from email.message import Message
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlparse
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from email.message import Message
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +130,8 @@ class Baseline:
         return self.uid > 0 and self.validity > 0
 
 
-_MAX_MSG_BYTES = 512 * 1024  # skip a message whose RFC822.SIZE exceeds this (bandwidth/memory guard)
+# skip a message whose RFC822.SIZE exceeds this (bandwidth/memory guard)
+_MAX_MSG_BYTES = 512 * 1024
 _MAX_MESSAGES_PER_PASS = 25  # newest N per poll pass, so a mailbox flood can't stall one pass
 _SEARCH_WINDOW = 500  # only SEARCH the newest ~N UIDs, so a flood can't return an unbounded list
 
@@ -140,7 +146,8 @@ def _imap_quote(s: str) -> str:
 class _Query:
     since_epoch: float
     baseline_uid: int = 0  # only messages with UID >= this (delivered after login) are considered
-    baseline_validity: int = 0  # the UIDVALIDITY the baseline was taken under (0 = unchecked, tests)
+    # the UIDVALIDITY the baseline was taken under (0 = unchecked, tests)
+    baseline_validity: int = 0
     from_filter: str = ""
     subject_filter: str = ""
     otp_pattern: str = _DEFAULT_OTP_PATTERN  # built-in only; NOT operator-overridable (ReDoS)
@@ -150,12 +157,13 @@ class _Query:
     require_link_origin: bool = False  # when True, a link with NO allowlisted origin is rejected
     timeout_s: float = 60.0
     interval_s: float = 3.0
-    now: Callable[[], float] = field(default=time.monotonic)  # monotonic: immune to wall-clock jumps
+    now: Callable[[], float] = field(default=time.monotonic)  # monotonic: immune to clock jumps
     sleep: Callable[[float], None] = field(default=time.sleep)
 
 
 def _default_client_factory(cfg: MailboxConfig) -> _IMAPClient:
-    import imaplib  # local import: only needed on the real path, not in tests
+    # local import: only needed on the real path, not in tests
+    import imaplib  # noqa: PLC0415 - 2026-11-25: deliberate, see comment above
 
     if cfg.ssl:
         return imaplib.IMAP4_SSL(cfg.host, cfg.port, timeout=_IMAP_SOCKET_TIMEOUT)
@@ -246,7 +254,9 @@ def _extract(msg: Message, q: _Query) -> EmailFactor:
     m = re.search(q.otp_pattern, text)
     if m:
         otp = m.group(1) if m.groups() else m.group(0)
-    return EmailFactor(otp=otp, link=link, subject=msg.get("Subject") or "", found=bool(otp or link))
+    return EmailFactor(
+        otp=otp, link=link, subject=msg.get("Subject") or "", found=bool(otp or link),
+    )
 
 
 def _status_fields(client: _IMAPClient, cfg: MailboxConfig) -> tuple[int, int]:
@@ -259,12 +269,16 @@ def _status_fields(client: _IMAPClient, cfg: MailboxConfig) -> tuple[int, int]:
             nx = re.search(rb"UIDNEXT\s+(\d+)", raw)
             vv = re.search(rb"UIDVALIDITY\s+(\d+)", raw)
             return (int(nx.group(1)) if nx else 0, int(vv.group(1)) if vv else 0)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.debug("could not read STATUS (UIDNEXT UIDVALIDITY)", exc_info=True)
     return (0, 0)
 
 
-def uid_baseline(cfg: MailboxConfig, *, client_factory: Callable[[MailboxConfig], _IMAPClient] = _default_client_factory) -> Baseline:
+def uid_baseline(
+    cfg: MailboxConfig,
+    *,
+    client_factory: Callable[[MailboxConfig], _IMAPClient] = _default_client_factory,
+) -> Baseline:
     """Snapshot the mailbox (UIDNEXT, UIDVALIDITY) BEFORE login, so polling only accepts messages
     delivered after AND only if the UID epoch is unchanged. Returns a zero Baseline on failure;
     the caller treats a non-``ok`` baseline (either field 0) as 'no anchor' and fails closed."""
@@ -277,15 +291,13 @@ def uid_baseline(cfg: MailboxConfig, *, client_factory: Callable[[MailboxConfig]
         client.select(cfg.folder, readonly=True)
         uid, validity = _status_fields(client, cfg)
         return Baseline(uid=uid, validity=validity)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("email-MFA: could not snapshot mailbox UID baseline")
         return Baseline()
     finally:
         if client is not None:
-            try:
+            with contextlib.suppress(Exception):
                 client.logout()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 def _fetch_size(client: _IMAPClient, uid: bytes) -> int:
@@ -295,11 +307,13 @@ def _fetch_size(client: _IMAPClient, uid: bytes) -> int:
         typ, raw = client.uid("FETCH", uid, "(RFC822.SIZE)")
         if typ == "OK" and raw:
             for p in raw:
-                blob = p if isinstance(p, (bytes, bytearray)) else (p[0] if isinstance(p, tuple) else b"")
+                blob = p if isinstance(p, (bytes, bytearray)) else (
+                    p[0] if isinstance(p, tuple) else b""
+                )
                 m = re.search(rb"RFC822\.SIZE\s+(\d+)", bytes(blob))
                 if m:
                     return int(m.group(1))
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.debug("could not read RFC822.SIZE", exc_info=True)
     return -1
 
@@ -323,7 +337,9 @@ def _poll_once(client: _IMAPClient, cfg: MailboxConfig, q: _Query, deadline: flo
     if q.baseline_validity and cur_validity != q.baseline_validity:
         # Epoch check fails CLOSED on a change OR an unreadable value (0): a mismatched/missing
         # UIDVALIDITY means the UID space may have been reset, so its UIDs can't be trusted.
-        logger.warning("email-MFA: mailbox UIDVALIDITY changed/unreadable since baseline; failing closed")
+        logger.warning(
+            "email-MFA: mailbox UIDVALIDITY changed/unreadable since baseline; failing closed",
+        )
         return EmailFactor()
     # Bound the SEARCH to a trailing window and (when set) FROM/SUBJECT server-side, so a mailbox
     # flood can't return a huge UID list or crowd the real code out of the newest slice.
@@ -376,7 +392,10 @@ def poll_for_factor(
     # A COMPLETE baseline is required in production: UID for freshness + UIDVALIDITY for the epoch.
     # (A query built with baseline_validity=0 disables the epoch check — standalone/tests only.)
     if query.baseline_uid <= 0:
-        logger.warning("email-MFA: no mailbox UID baseline captured before login; refusing to poll (fail closed)")
+        logger.warning(
+            "email-MFA: no mailbox UID baseline captured before login; refusing to poll "
+            "(fail closed)",
+        )
         return EmailFactor()
     timeout = max(0.0, min(query.timeout_s, _MAX_POLL_TIMEOUT))  # finite, bounded
     deadline = query.now() + timeout
@@ -392,15 +411,13 @@ def poll_for_factor(
                 logger.info("email-MFA: no matching message within %.0fs", timeout)
                 return EmailFactor()
             query.sleep(max(0.0, min(query.interval_s, deadline - query.now())))
-    except Exception:  # noqa: BLE001 — mailbox polling must never break the scan
+    except Exception:  # mailbox polling must never break the scan
         logger.exception("email-MFA mailbox poll failed")
         return EmailFactor()
     finally:
         if client is not None:
-            try:
+            with contextlib.suppress(Exception):
                 client.logout()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 def build_query(
