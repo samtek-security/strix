@@ -38,6 +38,7 @@ from strix.core.interception import (
     ApprovalGateway,
     InterceptionDecision,
     ask_timeout_from_context,
+    canonical_tool_input,
     evaluate,
     gateway_from_context,
     rules_from_context,
@@ -279,8 +280,16 @@ _ASK_INPUT_SUMMARY_MAX_CHARS = 4000
 
 def _interruption_input_text(item: Any) -> str:
     raw = item.raw_item
-    arguments = raw.get("arguments") if isinstance(raw, dict) else getattr(raw, "arguments", None)
-    return arguments if isinstance(arguments, str) else ""
+    def field(name: str) -> Any:
+        return raw.get(name) if isinstance(raw, dict) else getattr(raw, name, None)
+
+    # A function call carries ``arguments``; a native custom tool call carries a
+    # free-text ``input``.
+    for name in ("arguments", "input"):
+        value = field(name)
+        if isinstance(value, str):
+            return canonical_tool_input(value)
+    return ""
 
 
 def _dedup_key(tool_name: str, input_text: str) -> str:

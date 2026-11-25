@@ -100,3 +100,24 @@ def test_context_helpers_default_safely() -> None:
     assert interception.ask_timeout_from_context({"ask_timeout_seconds": 0}) == 0.0
     assert interception.ask_timeout_from_context({"ask_timeout_seconds": -30}) == 0.0
     assert interception.ask_timeout_from_context({"ask_timeout_seconds": 45}) == 45.0
+
+
+def test_one_input_form_whichever_path_produced_it() -> None:
+    parsed = {"cmd": "rm -rf /tmp/é", "b": 1}
+    raw_spaced = '{ "b": 1,\n  "cmd": "rm -rf /tmp/\\u00e9" }'
+    raw_other_order = '{"cmd":"rm -rf /tmp/\\u00e9","b":1}'
+    canonical = interception.canonical_tool_input(parsed)
+    assert interception.canonical_tool_input(raw_spaced) == canonical
+    assert interception.canonical_tool_input(raw_other_order) == canonical
+
+
+def test_non_json_input_is_left_alone() -> None:
+    assert interception.canonical_tool_input("*** Begin Patch") == "*** Begin Patch"
+    assert interception.canonical_tool_input("42") == "42"
+
+
+def test_a_tool_input_rule_matches_every_encoding_of_the_same_call() -> None:
+    rules = [_rule("ask-rm", field="tool_input", pattern='"cmd":"rm -rf', action="ask")]
+    for raw in ('{"cmd": "rm -rf /x"}', '{ "cmd":"rm -rf /x" }', {"cmd": "rm -rf /x"}):
+        decision = evaluate(rules, "exec_command", raw)  # type: ignore[arg-type]
+        assert decision is not None and decision.action == "ask", raw

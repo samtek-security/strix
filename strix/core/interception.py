@@ -13,6 +13,7 @@ implicit allow, matching every tool's behaviour before this module existed.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -59,6 +60,29 @@ def _compiled(pattern: str) -> re.Pattern[str] | None:
         return None
 
 
+def canonical_tool_input(value: object) -> str:
+    """One text form of a tool call's input, whichever path produced it.
+
+    The deny check sees the raw argument string, the ask check sees the parsed
+    arguments, and the resume path sees the raw string again. Matching each of
+    those directly lets whitespace, key order or unicode escapes make a rule fire
+    in one place and not another, so every path goes through this first. JSON is
+    re-encoded with sorted keys; anything that is not JSON (a custom tool's
+    free-text payload) is returned unchanged.
+    """
+    parsed = value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return value
+        if not isinstance(parsed, (dict, list)):
+            return value
+    elif not isinstance(value, (dict, list)):
+        return str(value)
+    return json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 def _rule_matches(rule: InterceptionRule, tool_name: str, tool_input_text: str) -> bool:
     haystack = tool_name if rule.field == "tool_name" else tool_input_text
     if not rule.regex:
@@ -75,6 +99,7 @@ def evaluate(
     """Return the first matching rule's decision, or ``None`` for an implicit allow."""
     if not rules:
         return None
+    tool_input_text = canonical_tool_input(tool_input_text)
     for rule in rules:
         if _rule_matches(rule, tool_name, tool_input_text):
             return InterceptionDecision(rule=rule, action=rule.action)

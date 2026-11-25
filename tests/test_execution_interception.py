@@ -214,3 +214,40 @@ async def test_no_budget_left_denies_at_once_without_opening_an_approval(budget:
     assert [rejected for rejected, _ in state.rejected] == [item]
     assert gateway.requests == []
     assert gateway.polls == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_matches_the_same_rule_the_wrapper_matched() -> None:
+    """The wrapper pauses on the parsed arguments; the resume path sees the raw
+    string. A differently spaced/ordered encoding must still reach the gateway."""
+    gateway = _ScriptedGateway(["approved"])
+    rule = InterceptionRule(
+        id="ask-rm", field="tool_input", pattern='"cmd":"rm -rf', action="ask", description="risky"
+    )
+    context = {
+        INTERCEPTION_RULES_KEY: [rule],
+        APPROVAL_GATEWAY_KEY: gateway,
+        ASK_TIMEOUT_SECONDS_KEY: 5.0,
+    }
+    item = _item(arguments='{ "b": 1,\n "cmd": "rm -rf /x" }')
+    stream = _FakeInterruptedStream(interruptions=[item])
+
+    state = await _resolve_interruptions(stream, context=context, report=None)
+
+    assert state.approved == [item]
+    assert gateway.requests and gateway.requests[0]["rule_id"] == "ask-rm"
+
+
+@pytest.mark.asyncio
+async def test_native_custom_tool_input_is_read_from_the_input_field() -> None:
+    gateway = _ScriptedGateway(["denied"])
+    rule = InterceptionRule(id="ask-patch", field="tool_input", pattern="/etc/", action="ask")
+    context = {INTERCEPTION_RULES_KEY: [rule], APPROVAL_GATEWAY_KEY: gateway}
+    item = _FakeApprovalItem(tool_name="apply_patch", raw_item={"input": "*** Update File: /etc/hosts"})
+    stream = _FakeInterruptedStream(interruptions=[item])
+
+    state = await _resolve_interruptions(stream, context=context, report=None)
+
+    assert len(state.rejected) == 1
+    assert "ask-patch" in (state.rejected[0][1] or "")
+    assert gateway.requests[0]["rule_id"] == "ask-patch"
