@@ -28,17 +28,18 @@ logger = logging.getLogger(__name__)
 
 # Tools whose call arguments or output reflect the target or an external
 # system verbatim: the exploitation workflow's Level-3 live-request proof, raw
-# HTTP captures from the proxy, and arbitrary MCP results. A call to one of
-# these never goes through shape-based redaction, whatever it contains - a
-# target's own leaked credential is the finding, not noise to scrub, and
-# shape-based matching can't tell "Recon's own token" from "a target's token"
-# when both happen to be a JWT or a Bearer string. It still gets Recon's exact
-# registered literals scrubbed (redact_literals_in_structure): that match has
-# no such ambiguity, so there is nothing to weigh against leaving a genuine
-# Recon credential on disk. Scoped at the whole-call granularity (not
-# per-field) since splitting a single call's arguments into redact/don't-
-# redact halves is itself a correctness risk this isn't worth taking for the
-# few surrounding fields (title/description context) it would spare.
+# HTTP captures from the proxy, fetched web pages/search results, and
+# arbitrary MCP results. A call to one of these never goes through
+# shape-based redaction, whatever it contains - a target's own leaked
+# credential is the finding, not noise to scrub, and shape-based matching
+# can't tell "Recon's own token" from "a target's token" when both happen to
+# be a JWT or a Bearer string. It still gets Recon's exact registered
+# literals scrubbed (redact_literals_in_structure): that match has no such
+# ambiguity, so there is nothing to weigh against leaving a genuine Recon
+# credential on disk. Scoped at the whole-call granularity (not per-field)
+# since splitting a single call's arguments into redact/don't-redact halves
+# is itself a correctness risk this isn't worth taking for the few
+# surrounding fields (title/description context) it would spare.
 _UNREDACTED_TOOL_NAMES = frozenset(
     {
         "view_request",
@@ -47,6 +48,8 @@ _UNREDACTED_TOOL_NAMES = frozenset(
         "promote_finding",
         "exec_command",
         "write_stdin",
+        "web_search",
+        "web_get_contents",
     }
 )
 

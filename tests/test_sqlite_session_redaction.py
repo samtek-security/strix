@@ -229,6 +229,60 @@ async def test_deeply_nested_literal_in_an_unredacted_tool_is_not_destroyed(
     assert "target evidence at the bottom" in stored[1]["output"]
 
 
+async def test_registered_literal_with_special_chars_is_found_inside_json(
+    tmp_path: Path,
+) -> None:
+    """A registered literal containing a quote/backslash comes out
+    JSON-escaped once embedded in a serialized blob; a plain substring
+    search against the escaped text would never match the literal as
+    registered, letting a fully reconstructable secret survive."""
+    secret = 'sec"ret\\value-0123456789'  # noqa: S105 - fixture token
+    redaction.register_secret(secret)
+    session = _session(tmp_path)
+    await session.add_items(
+        [
+            _call("exec_command", "c12", cmd="env"),
+            _output("c12", json.dumps({"token": secret})),
+        ]
+    )
+    stored = await session.get_items()
+    assert secret not in stored[1]["output"]
+    scrubbed_token = json.loads(stored[1]["output"])["token"]
+    assert scrubbed_token == redaction.REDACTED
+
+
+async def test_web_recon_results_are_not_shape_redacted(tmp_path: Path) -> None:
+    """A fetched page or search result is target-sourced the same way a
+    proxy capture is - a leaked credential on it is the finding."""
+    session = _session(tmp_path)
+    await session.add_items(
+        [
+            _call("web_get_contents", "c13", urls=["https://example.com"]),
+            _output("c13", f"leaked in page source: {_SECRET}"),
+        ]
+    )
+    stored = await session.get_items()
+    assert _SECRET in stored[1]["output"]
+
+
+async def test_recursion_error_from_json_loads_does_not_crash_persistence(
+    tmp_path: Path,
+) -> None:
+    """A pathologically nested JSON string makes ``json.loads`` raise
+    ``RecursionError`` on some builds; persistence must degrade to
+    plain-text redaction rather than propagate and abort the write."""
+    session = _session(tmp_path)
+    pathological = "[" * 100_000 + "]" * 100_000
+    await session.add_items(
+        [
+            _call("queue_finding", "c14", title="t"),
+            _output("c14", f"{pathological} token {_SECRET}"),
+        ]
+    )
+    stored = await session.get_items()
+    assert _SECRET not in stored[1]["output"]
+
+
 async def test_full_history_read_skipped_when_batch_resolves_itself(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

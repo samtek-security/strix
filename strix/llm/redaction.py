@@ -191,12 +191,20 @@ def redact_structure(value: Any) -> Any:
     return _redact_value(value, 0)
 
 
+def _safe_json_loads(text: str) -> Any:
+    """Parse ``text`` as JSON, or ``None`` if it isn't - including inputs
+    CPython's own parser refuses (too deeply nested, an integer with too
+    many digits). Those are still just ordinary text to redact as a string,
+    not a reason to abort the write a secret may be waiting in.
+    """
+    with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError, RecursionError):
+        return json.loads(text)
+    return None
+
+
 def _redact_value_json_aware(value: Any, depth: int) -> Any:
     if isinstance(value, str):
-        parsed: Any = None
-        if depth < 8:
-            with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError):
-                parsed = json.loads(value)
+        parsed = _safe_json_loads(value) if depth < 8 else None
         return (
             json.dumps(_redact_value_json_aware(parsed, depth + 1))
             if isinstance(parsed, dict | list)
@@ -265,7 +273,18 @@ _LITERAL_REDACTION_MAX_DEPTH = 64
 
 def _redact_literals_in_structure(value: Any, depth: int) -> Any:
     if isinstance(value, str):
-        return redact_literals_only(value)
+        # Parse first when possible: a registered literal containing a
+        # quote, backslash, control character, or non-ASCII character comes
+        # out JSON-escaped once embedded in a serialized blob, so a plain
+        # substring search against the escaped text would never match the
+        # literal as registered and the secret would survive intact.
+        # Redacting the decoded value and re-serializing sidesteps that.
+        parsed = _safe_json_loads(value) if depth < _LITERAL_REDACTION_MAX_DEPTH else None
+        return (
+            json.dumps(_redact_literals_in_structure(parsed, depth + 1))
+            if isinstance(parsed, dict | list)
+            else redact_literals_only(value)
+        )
     # Unlike the shape-based cutoff, this never falls back to a blunt
     # REDACTED past the limit: this function runs on raw-carrier tool data
     # that must never be destroyed, only have an exact Recon literal removed.
