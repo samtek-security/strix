@@ -336,7 +336,15 @@ def _redact_literal_json_string(text: str, depth: int) -> tuple[str, bool]:
     parsed = _safe_json_loads(text) if depth < _LITERAL_REDACTION_MAX_DEPTH else None
     if isinstance(parsed, dict | list):
         redacted, changed = _redact_literals_in_structure(parsed, depth + 1)
-        return (json.dumps(redacted), True) if changed else (text, False)
+        if changed:
+            return json.dumps(redacted), True
+        # The structural walk found nothing - but json.loads collapses a
+        # duplicate JSON object member to its last occurrence, so an
+        # earlier, shadowed member's secret was never visited and "nothing
+        # changed" cannot be trusted on its own. Verify the raw text
+        # directly before keeping it as-is.
+        scrubbed = _scrub_literals(text)
+        return (scrubbed, True) if scrubbed != text else (text, False)
     if isinstance(parsed, str):
         redacted_str = redact_literals_only(parsed)
         return (json.dumps(redacted_str), True) if redacted_str != parsed else (text, False)

@@ -25,6 +25,7 @@ from strix.llm import redaction
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -49,10 +50,17 @@ def _output(call_id: str, output: str) -> dict[str, Any]:
 
 
 @pytest.fixture(autouse=True)
-def _no_registered_literals() -> None:
-    # register_secret's set is process-global; keep tests isolated from
-    # whatever another test (or a prior run in this process) registered.
+def _isolate_registered_literals() -> Iterator[None]:
+    # register_secret's set is process-global; snapshot and restore it
+    # (not just clear it) so this module can't leave the registry emptied
+    # for whatever test file runs after it in the same process.
+    before = set(redaction._literal_secrets)
     redaction._literal_secrets.clear()
+    try:
+        yield
+    finally:
+        redaction._literal_secrets.clear()
+        redaction._literal_secrets.update(before)
 
 
 async def test_unredacted_tool_call_and_output_pass_through_verbatim(tmp_path: Path) -> None:
@@ -355,6 +363,27 @@ async def test_no_literal_match_preserves_raw_json_byte_for_byte(tmp_path: Path)
     )
     stored = await session.get_items()
     assert stored[1]["output"] == raw
+
+
+async def test_literal_hidden_by_a_duplicate_json_key_is_still_redacted(
+    tmp_path: Path,
+) -> None:
+    """``json.loads`` collapses a duplicate JSON object member to its last
+    occurrence, so a secret in an earlier, shadowed member never reaches
+    the structural walk at all - "nothing changed there" must not be
+    trusted without checking the raw text too."""
+    secret = "recon-own-broker-token-0123456789"  # noqa: S105 - fixture token
+    redaction.register_secret(secret)
+    session = _session(tmp_path)
+    raw = f'{{"token": "{secret}", "token": "benign"}}'
+    await session.add_items(
+        [
+            _call("exec_command", "c26", cmd="env"),
+            _output("c26", raw),
+        ]
+    )
+    stored = await session.get_items()
+    assert secret not in stored[1]["output"]
 
 
 async def test_full_history_read_skipped_when_batch_resolves_itself(
