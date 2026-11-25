@@ -1212,6 +1212,7 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
     # A supplied provider already chose the route, so no candidate may be
     # steered to another provider's first-party price.
     first_party_allowed = not (isinstance(provider, str) and provider)
+    provider_route_only = not first_party_allowed and "/" not in model
     retry_from = len(candidates)
     if "/" in model:
         candidates.append(model.rsplit("/", 1)[-1])
@@ -1221,6 +1222,10 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
             candidate, first_party=first_party_allowed and index < retry_from
         )
         if not resolved:
+            if provider_route_only and index == 0:
+                # The supplied provider is not in the catalog. The bare entry
+                # belongs to another provider, so leave the call unpriced.
+                return None
             continue
         try:
             value = completion_cost(

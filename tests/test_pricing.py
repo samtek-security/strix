@@ -405,3 +405,20 @@ def test_callers_price_a_bare_model_under_its_custom_provider() -> None:
 
 def test_callers_do_not_fall_back_to_first_party_for_an_unlisted_provider() -> None:
     assert _callback_price("glm-5", _DISAGREEING, provider="gateway-b") == []
+
+
+_CATALOG_BARE = {
+    "deepseek-v4-flash": {
+        "litellm_provider": "deepseek",
+        "input_cost_per_token": 1.0,
+        "output_cost_per_token": 2.0,
+    },
+}
+
+
+def test_callers_leave_a_catalog_bare_model_unpriced_for_an_unlisted_provider() -> None:
+    assert _callback_price("deepseek-v4-flash", _CATALOG_BARE, provider="gateway-b") == []
+
+
+def test_callers_still_price_a_catalog_bare_model_without_a_provider() -> None:
+    assert _callback_price("deepseek-v4-flash", _CATALOG_BARE) == ["deepseek/deepseek-v4-flash"]
