@@ -606,15 +606,22 @@ class AgentCoordinator:
             return False
         return True
 
-    async def is_resumable(self, agent_id: str) -> bool:
-        """Whether a stopped agent can still be woken into a new turn.
+    async def writes_are_final(self, agent_id: str) -> bool:
+        """Whether nothing more can ever be written to the agent's session.
 
-        An agent with no runtime recorded is treated as resumable: nothing
-        proves it cannot write again.
+        Read as one snapshot under the lock: the agent must be non-resumable,
+        in a terminal status, and its turn settled. A stop can race a cycle's
+        startup and see the status flip back to running, so a settled turn
+        alone does not prove the agent is done. An agent with no runtime
+        recorded is not treated as final.
         """
         async with self._lock:
             runtime = self.runtimes.get(agent_id)
-            return runtime is None or runtime.resumable
+            if runtime is None or runtime.resumable:
+                return False
+            return (
+                self.statuses.get(agent_id) in TERMINAL_STATUSES and runtime.turn_settled.is_set()
+            )
 
     async def session_items(self, agent_id: str) -> list[Any] | None:
         """Read back a stopped agent's own session items.

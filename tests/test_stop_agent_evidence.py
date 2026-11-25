@@ -686,6 +686,32 @@ async def test_unsettled_non_interactive_target_is_not_final(
 
 
 @pytest.mark.asyncio
+async def test_non_interactive_target_restored_to_running_is_not_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop can land while a cycle starts and mark_running flips the status
+    back; the settled turn then proves nothing about later writes."""
+    coordinator = await _graph()
+    await coordinator.attach_runtime("child", session=FakeSession([{"role": "assistant"}]))
+    original = coordinator.join_stopped
+
+    async def join_then_restart(agent_id: str, timeout: float) -> bool:
+        settled = await original(agent_id, timeout)
+        await coordinator.mark_running(agent_id)
+        return settled
+
+    monkeypatch.setattr(coordinator, "join_stopped", join_then_restart)
+
+    result = await _call(
+        stop_agent, coordinator, "root", {"target_agent_id": "child", "cascade": False}
+    )
+
+    entry = result["stopped_agents"][0]
+    assert entry["evidence_settled"] is True
+    assert entry["evidence_writes_final"] is False
+
+
+@pytest.mark.asyncio
 async def test_item_truncated_evidence_is_incomplete() -> None:
     coordinator = await _graph()
     items = [{"role": "assistant", "content": f"m{i}"} for i in range(100)]

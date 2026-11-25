@@ -1111,7 +1111,7 @@ async def stop_agent(
             )
             continue
         settled = await coordinator.join_stopped(aid, join_timeout)
-        writes_final = settled and not await coordinator.is_resumable(aid)
+        writes_final = settled and await coordinator.writes_are_final(aid)
         items = await coordinator.session_items(aid)
         if items is None:
             evidence.append(
