@@ -166,6 +166,14 @@ _MAX_TRANSIENT_MODEL_RETRIES = 5
 _TRANSIENT_MODEL_RETRY_BASE_DELAY_S = 2.0
 _TRANSIENT_MODEL_RETRY_MAX_DELAY_S = 90.0
 
+# Recon's egress gateway sets this on every 408 it denies (policy_addon.py's
+# _REASON_STATUS). Both reasons mean the engagement's signed elapsed budget has
+# already crossed its deadline - the gateway's acquire()/stream deadline check,
+# never a provider-side transient timeout - so replaying the call cannot help:
+# the deadline only moves forward.
+GATEWAY_ELAPSED_BUDGET_ERROR_PREFIX = "gateway_elapsed_budget_exhausted: "
+_GATEWAY_ELAPSED_EGRESS_REASONS = frozenset({"denied:elapsed", "denied:deadline"})
+
 
 def _model_error_status_code(exc: BaseException) -> int | None:
     code = getattr(exc, "status_code", None)
@@ -178,8 +186,32 @@ def _is_image_rejection(exc: BaseException) -> bool:
     )
 
 
+def _gateway_egress_reason(exc: BaseException) -> str | None:
+    """The egress gateway's X-Recon-Egress reason for this call, if any.
+
+    Reuses request_log's own recovery of a provider response's headers off a
+    LiteLLM-mapped exception - their home varies by provider adapter
+    (litellm_response_headers, headers, or the wrapped response), and LiteLLM's
+    own 408 mapping drops ``response``/``headers`` for most providers, so this is
+    the one place that still has them.
+    """
+    headers = request_log._exception_headers(exc)
+    if not headers:
+        return None
+    for name, value in headers.items():
+        if str(name).lower() == "x-recon-egress":
+            return str(value)
+    return None
+
+
+def _is_elapsed_budget_denial(exc: BaseException) -> bool:
+    return _gateway_egress_reason(exc) in _GATEWAY_ELAPSED_EGRESS_REASONS
+
+
 def _is_transient_model_error(exc: BaseException) -> bool:
     if codex.is_content_guardrail_error(exc):
+        return False
+    if _is_elapsed_budget_denial(exc):
         return False
     if isinstance(
         exc, APITimeoutError | APIConnectionError | TimeoutError | ConnectionError | OSError
@@ -922,11 +954,18 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
             else:
                 status = "crashed"
             logger.exception("agent run failed for %s; marking %s", agent_id, status)
+            error_text = request_log.failure_text(exc)
+            if _is_elapsed_budget_denial(exc):
+                # Tagged so the engine can tell this apart from an ordinary model/
+                # provider failure in the coordinator's persisted agent errors - a
+                # sub-agent's failure never raises out of its own background task,
+                # so that snapshot is the only place the engine can see this.
+                error_text = f"{GATEWAY_ELAPSED_BUDGET_ERROR_PREFIX}{error_text}"
             # Settle the status and wake the parent before the exception unwinds a
             # non-interactive agent's task: a child that dies still owes its parent a
             # report, and the parent would otherwise wait out its timeout on a message
             # the dead child can no longer send.
-            await coordinator.set_status(agent_id, status, error=request_log.failure_text(exc))
+            await coordinator.set_status(agent_id, status, error=error_text)
             await notify_parent_on_terminal(coordinator, agent_id, status)
             if not interactive:
                 raise
