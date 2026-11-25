@@ -16,24 +16,30 @@ import pytest
 # re-attempts the fetch at collection time, with no bound short enough to fit
 # a CI job's timeout. Force the bundled local pricing table instead; it's
 # the same data litellm falls back to anyway, just without the network round
-# trip. Must be set before anything imports litellm, so it happens here at
-# module scope rather than in a fixture.
-os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
+# trip. Set unconditionally, not with setdefault: an inherited
+# ``LITELLM_LOCAL_MODEL_COST_MAP=false`` from the caller's shell would
+# otherwise silently re-enable the fetch this isolates against. Must be set
+# before anything imports litellm, so it happens here at module scope rather
+# than in a fixture.
+os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "true"
 
 
 class RealNetworkBlockedError(RuntimeError):
     """Raised when a test tries to open a connection the suite didn't isolate."""
 
 
-def _is_loopback(address: object) -> bool:
-    host = address[0] if isinstance(address, tuple) else address
-    return isinstance(host, str) and host in ("127.0.0.1", "localhost", "::1")
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "", None)
+
+
+def _host_of(address: object) -> object:
+    return address[0] if isinstance(address, tuple) else address
 
 
 def _require_loopback(address: object) -> None:
-    if not _is_loopback(address):
+    host = _host_of(address)
+    if host not in _LOOPBACK_HOSTS:
         raise RealNetworkBlockedError(
-            f"a test tried to open a real network connection to {address!r}; "
+            f"a test tried to reach {host!r}, off 127.0.0.1; "
             "the suite only talks to 127.0.0.1 fixtures/gateways. If this is a "
             "genuine new dependency, isolate it the way LITELLM_LOCAL_MODEL_COST_MAP "
             "isolates litellm's pricing fetch above, rather than loosening this guard."
@@ -42,10 +48,14 @@ def _require_loopback(address: object) -> None:
 
 # A second, defense-in-depth layer behind LITELLM_LOCAL_MODEL_COST_MAP: any
 # future accidental real network call (a new dependency, a misconfigured
-# base_url, a cache TTL fetch) fails instantly and names the offending call,
+# base_url, a cache TTL fetch) fails instantly and names the offending host,
 # instead of hanging for minutes until something upstream times out.
+# ``getaddrinfo`` is guarded too, not just ``connect``: a hostname (as
+# opposed to an address literal) resolves via DNS first, and that lookup
+# alone can hang before a socket ever gets opened.
 _real_socket_connect = _socket.socket.connect
 _real_socket_connect_ex = _socket.socket.connect_ex
+_real_getaddrinfo = _socket.getaddrinfo
 
 
 def _guarded_connect(self, address, *args, **kwargs):  # type: ignore[no-untyped-def]
@@ -58,8 +68,14 @@ def _guarded_connect_ex(self, address, *args, **kwargs):  # type: ignore[no-unty
     return _real_socket_connect_ex(self, address, *args, **kwargs)
 
 
+def _guarded_getaddrinfo(host, *args, **kwargs):  # type: ignore[no-untyped-def]
+    _require_loopback(host)
+    return _real_getaddrinfo(host, *args, **kwargs)
+
+
 _socket.socket.connect = _guarded_connect  # type: ignore[method-assign]
 _socket.socket.connect_ex = _guarded_connect_ex  # type: ignore[method-assign]
+_socket.getaddrinfo = _guarded_getaddrinfo
 
 
 @pytest.fixture(autouse=True)
