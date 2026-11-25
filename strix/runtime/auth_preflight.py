@@ -206,17 +206,24 @@ def _origin(url: str) -> str:
     return f"{parts.scheme.lower()}://{host}" + (f":{port}" if port else "")
 
 
+# The only environment classes the hand-off may run in. Fail closed: a missing, blank or
+# unrecognized RECON_ENV_CLASS (including staging, which runs production-like infrastructure) is
+# NOT a safe class - an env var alone must never enable credential submission in production.
+_OIDC_HANDOFF_ENV_CLASSES = ("dev", "development", "local", "test")
+
+
 def _oidc_handoff_enabled() -> bool:
-    """The agent-driven OIDC hand-off is OFF unless ``RECON_AUTH_OIDC_HANDOFF=1`` is set, and it
-    is refused outright when ``RECON_ENV_CLASS`` is prod or production, whatever the flag says.
-    A host allowlist cannot tell an operator's OAuth client from an attacker-registered one on
-    the same provider, so production stays closed until per-flow issuer/client_id/redirect
-    validation exists (issue #122 item 3). Off, a redirect to an identity provider is an
-    ordinary login failure."""
+    """The agent-driven OIDC hand-off is OFF unless ``RECON_AUTH_OIDC_HANDOFF=1`` is set AND
+    ``RECON_ENV_CLASS`` explicitly names a non-production class (dev, development, local, test);
+    anything else, including an unset or unrecognized value, refuses it. A host allowlist cannot
+    tell an operator's OAuth client from an attacker-registered one on the same provider, so
+    production stays closed until per-flow issuer/client_id/redirect validation exists (issue
+    #122 item 3). Off, a redirect to an identity provider is an ordinary login failure."""
     if os.environ.get("RECON_AUTH_OIDC_HANDOFF", "0").strip() != "1":
         return False
-    if os.environ.get("RECON_ENV_CLASS", "").strip().lower() in ("prod", "production"):
-        logger.warning("RECON_AUTH_OIDC_HANDOFF=1 ignored: refused in a production environment")
+    if os.environ.get("RECON_ENV_CLASS", "").strip().lower() not in _OIDC_HANDOFF_ENV_CLASSES:
+        logger.warning("RECON_AUTH_OIDC_HANDOFF=1 ignored: RECON_ENV_CLASS is not an explicit "
+                       "non-production class")
         return False
     return True
 
@@ -784,7 +791,7 @@ async def run_auth_preflight(
                          role, seen_slugs[slug], slug)
             results.append({
                 "role": role, "session_name": f"recon-{slug}", "state_path": "",
-                "authenticated": False, "checks": {},
+                "authenticated": False, "checks": {}, "session_collision": True,
                 "reason": f"role name collides with role '{seen_slugs[slug]}' on session "
                           f"recon-{slug}; rename one of them",
             })
@@ -812,8 +819,10 @@ def preflight_instruction(results: list[dict]) -> str:
     if not results:
         return ""
     ok = [r for r in results if r.get("authenticated")]
+    clash = [r for r in results if r.get("session_collision")]
     oidc = [r for r in results if not r.get("authenticated") and r.get("needs_agent_oidc")]
-    bad = [r for r in results if not r.get("authenticated") and not r.get("needs_agent_oidc")]
+    bad = [r for r in results if not r.get("authenticated") and not r.get("needs_agent_oidc")
+           and not r.get("session_collision")]
     lines = ["\n\n== HOST-ESTABLISHED AUTH (authoritative - the host already logged these in) =="]
     if ok:
         lines.append(
@@ -843,6 +852,13 @@ def preflight_instruction(results: list[dict]) -> str:
             f"role with the same check it uses everywhere else."
             for r in oidc
         )
+    if clash:
+        lines.append(
+            "These roles share a browser session name with an earlier role. Logging them in "
+            "would overwrite that role's cookies, so do NOT log in or test as them at all, and "
+            "make no authenticated claims for them:"
+        )
+        lines.extend(f"  - Role '{r['role']}': {r.get('reason')}." for r in clash)
     if bad:
         lines.append(
             "These roles could NOT be pre-authenticated by the host - log in yourself following the "
