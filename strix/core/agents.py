@@ -565,6 +565,50 @@ class AgentCoordinator:
         await self._maybe_snapshot()
         return stopped
 
+    async def join_stopped(self, agent_id: str, timeout: float) -> bool:
+        """Wait for a gracefully-stopped agent's current turn to actually finish.
+
+        ``request_stop`` only cancels the stream with ``mode="after_turn"``;
+        the turn, and the session write that comes with it, finish later in
+        the agent's own background task. A caller that wants to read the
+        session straight after stopping (``stop_agent``'s evidence capture)
+        needs to know that write has happened, not just that the cancel was
+        requested. Returns ``False`` on timeout — the task is still running,
+        so the session may not yet reflect its last turn.
+        """
+        async with self._lock:
+            runtime = self.runtimes.get(agent_id)
+            task = runtime.task if runtime else None
+        if task is None or task.done():
+            return True
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except TimeoutError:
+            return False
+        except Exception:
+            # The task's own failure path already settles status/error; here
+            # we only care that the turn is over so the session stops moving.
+            logger.exception("stopped agent %s's task ended with an exception", agent_id)
+        return True
+
+    async def session_items(self, agent_id: str) -> list[Any]:
+        """Read back a stopped agent's own session items.
+
+        Used to recover evidence a validator already captured (tool calls,
+        proxy output, confirmed PoCs) before ``stop_agent`` ended it, instead
+        of discarding it and making the caller re-derive the same work.
+        """
+        async with self._lock:
+            runtime = self.runtimes.get(agent_id)
+            session = runtime.session if runtime else None
+        if session is None:
+            return []
+        try:
+            return list(await session.get_items())
+        except Exception:
+            logger.exception("failed to read session items for %s", agent_id)
+            return []
+
     async def attach_stream(
         self,
         agent_id: str,

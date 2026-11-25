@@ -751,7 +751,13 @@ async def agent_finish(
     )
 
 
-@function_tool(timeout=30)
+_STOP_AGENT_TIMEOUT_S = 30
+# Headroom under the tool's own timeout, split across every agent the cascade
+# stops, so joining them one by one can never itself trip that outer timeout.
+_STOP_AGENT_EVIDENCE_BUDGET_S = 20.0
+
+
+@function_tool(timeout=_STOP_AGENT_TIMEOUT_S)
 async def stop_agent(
     ctx: RunContextWrapper,
     target_agent_id: str,
@@ -765,6 +771,14 @@ async def stop_agent(
     session — before the run loop honors the cancel. The agent's
     interactive outer loop parks as ``stopped``; later user/peer
     messages can wake it again.
+
+    The result carries each stopped agent's session items directly, under
+    ``evidence`` — whatever it had already captured (confirmed requests,
+    responses, PoC output) before you stopped it. Use that evidence to file
+    or drop the lead yourself; do not re-derive the same work from scratch.
+    ``evidence_settled: false`` on an entry means its turn was still
+    finishing when this call gave up waiting, so its evidence may be
+    incomplete — treat it as partial, not missing.
 
     Use sparingly. Prefer ``send_message_to_agent`` (asking the agent
     to wrap up) for soft-stop scenarios. Reach for ``stop_agent`` when
@@ -797,7 +811,7 @@ async def stop_agent(
             ensure_ascii=False,
             default=str,
         )
-    _, statuses, _, _ = await coordinator.graph_snapshot()
+    _, statuses, names, _ = await coordinator.graph_snapshot()
     if target_agent_id not in statuses:
         return json.dumps(
             {"success": False, "error": f"Unknown agent_id: {target_agent_id}"},
@@ -836,6 +850,24 @@ async def stop_agent(
     for aid in orphaned:
         await notify_parent_on_terminal(coordinator, aid, "stopped")
 
+    # Capture each stopped agent's own evidence now, while we have the only
+    # handle on it. A stop is resumable in principle, but a non-interactive
+    # root never resumes a stopped validator to ask for what it found — so if
+    # we don't hand the evidence back here, it is gone.
+    join_timeout = _STOP_AGENT_EVIDENCE_BUDGET_S / max(len(stopped), 1)
+    evidence = []
+    for aid in stopped:
+        settled = await coordinator.join_stopped(aid, join_timeout)
+        items = await coordinator.session_items(aid)
+        evidence.append(
+            {
+                "agent_id": aid,
+                "name": names.get(aid, aid),
+                "evidence_settled": settled,
+                "evidence": _session_items_payload(items),
+            }
+        )
+
     logger.info(
         "stop_agent: target=%s cascade=%s reason=%r",
         target_agent_id,
@@ -848,7 +880,12 @@ async def stop_agent(
             "target_agent_id": target_agent_id,
             "cascade": cascade,
             "reason": reason,
-            "note": "Cancellation is graceful — current turn completes first.",
+            "note": (
+                "Cancellation is graceful — current turn completes first. "
+                "Each stopped agent's already-captured evidence is in "
+                "'evidence' below; use it directly instead of re-deriving it."
+            ),
+            "stopped_agents": evidence,
         },
         ensure_ascii=False,
         default=str,

@@ -122,12 +122,17 @@ _ROOT_DIRECTIVES: tuple[str, ...] = (
     (
         "As the root agent, prioritize wrapping up the whole scan now: stop opening new "
         "lines of investigation, close out only what is essential, and move toward calling "
-        "{finish_tool} to compile and deliver the final report."
+        "{finish_tool} to compile and deliver the final report. If you stop a still-running "
+        "validator to reclaim time, stop_agent hands back its already-captured evidence — "
+        "file or drop each lead straight from that evidence, don't re-run or re-derive it."
     ),
     (
         "As the root agent, STOP all other work on the whole scan and finish immediately: "
         "secure your findings and call {finish_tool} now — anything left unfinished when the "
-        "limit is hit is discarded."
+        "limit is hit is discarded. If you stop a validator to do this, use the evidence "
+        "stop_agent returns for it directly: file findings straight from that evidence. "
+        "Re-deriving a stopped validator's work from scratch is what burns the turns you "
+        "need to reach {finish_tool} — don't do it."
     ),
 )
 _SUBAGENT_DIRECTIVES: tuple[str, ...] = (
