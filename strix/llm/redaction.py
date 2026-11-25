@@ -202,14 +202,21 @@ def _safe_json_loads(text: str) -> Any:
     return None
 
 
+def _redact_json_string_shape_aware(text: str, depth: int) -> str:
+    parsed = _safe_json_loads(text) if depth < 8 else None
+    if isinstance(parsed, dict | list):
+        return json.dumps(_redact_value_json_aware(parsed, depth + 1))
+    if isinstance(parsed, str):
+        # The decoded value, not the still-escaped source text: a secret
+        # containing a quote or backslash only matches shape patterns in its
+        # raw form, which the JSON encoding of this very string hid.
+        return json.dumps(redact_text(parsed))
+    return redact_text(text)
+
+
 def _redact_value_json_aware(value: Any, depth: int) -> Any:
     if isinstance(value, str):
-        parsed = _safe_json_loads(value) if depth < 8 else None
-        return (
-            json.dumps(_redact_value_json_aware(parsed, depth + 1))
-            if isinstance(parsed, dict | list)
-            else redact_text(value)
-        )
+        return _redact_json_string_shape_aware(value, depth)
     if value is None or isinstance(value, bool | int | float):
         return value
     # A compound value past the depth cutoff is never returned as-is: unlike
@@ -271,20 +278,35 @@ def redact_literals_only(text: str) -> str:
 _LITERAL_REDACTION_MAX_DEPTH = 64
 
 
-def _redact_literals_in_structure(value: Any, depth: int) -> Any:
+def _redact_literal_json_string(text: str, depth: int) -> tuple[str, bool]:
+    # Parse first when possible: a registered literal containing a quote,
+    # backslash, control character, or non-ASCII character comes out
+    # JSON-escaped once embedded in a serialized blob, so a plain substring
+    # search against the escaped text would never match the literal as
+    # registered and the secret would survive intact. Redacting the decoded
+    # value and re-serializing sidesteps that - but only when something
+    # actually changed: reserializing unconditionally would silently drop
+    # duplicate keys and renormalize number/non-ASCII formatting even when
+    # there was nothing to redact, corrupting target evidence that must
+    # survive byte-for-byte.
+    parsed = _safe_json_loads(text) if depth < _LITERAL_REDACTION_MAX_DEPTH else None
+    if isinstance(parsed, dict | list):
+        redacted, changed = _redact_literals_in_structure(parsed, depth + 1)
+        return (json.dumps(redacted), True) if changed else (text, False)
+    if isinstance(parsed, str):
+        redacted_str = redact_literals_only(parsed)
+        return (json.dumps(redacted_str), True) if redacted_str != parsed else (text, False)
+    redacted_text = redact_literals_only(text)
+    return redacted_text, redacted_text != text
+
+
+def _redact_literals_in_structure(value: Any, depth: int) -> tuple[Any, bool]:
+    """Redact ``value`` for exact registered literals; returns ``(result,
+    changed)`` so a JSON-encoded string caller can keep its exact original
+    text when nothing was actually redacted inside it.
+    """
     if isinstance(value, str):
-        # Parse first when possible: a registered literal containing a
-        # quote, backslash, control character, or non-ASCII character comes
-        # out JSON-escaped once embedded in a serialized blob, so a plain
-        # substring search against the escaped text would never match the
-        # literal as registered and the secret would survive intact.
-        # Redacting the decoded value and re-serializing sidesteps that.
-        parsed = _safe_json_loads(value) if depth < _LITERAL_REDACTION_MAX_DEPTH else None
-        return (
-            json.dumps(_redact_literals_in_structure(parsed, depth + 1))
-            if isinstance(parsed, dict | list)
-            else redact_literals_only(value)
-        )
+        return _redact_literal_json_string(value, depth)
     # Unlike the shape-based cutoff, this never falls back to a blunt
     # REDACTED past the limit: this function runs on raw-carrier tool data
     # that must never be destroyed, only have an exact Recon literal removed.
@@ -293,28 +315,42 @@ def _redact_literals_in_structure(value: Any, depth: int) -> Any:
     # pathologically deep structure stops getting scanned, but is returned
     # intact rather than redacted away).
     if value is None or isinstance(value, bool | int | float):
-        return value
+        return value, False
     if depth >= _LITERAL_REDACTION_MAX_DEPTH:
-        return value
+        return value, False
     if isinstance(value, Mapping):
-        return {
-            key: _redact_literals_in_structure(item, depth + 1)
-            for key, item in cast("Mapping[Any, Any]", value).items()
-        }
+        out: dict[Any, Any] = {}
+        changed = False
+        for key, item in cast("Mapping[Any, Any]", value).items():
+            new_key = key
+            if isinstance(key, str):
+                new_key = redact_literals_only(key)
+                changed = changed or new_key != key
+            new_item, item_changed = _redact_literals_in_structure(item, depth + 1)
+            changed = changed or item_changed
+            out[new_key] = new_item
+        return out, changed
     if isinstance(value, Sequence | set | frozenset):
-        return [
+        results = [
             _redact_literals_in_structure(item, depth + 1)
             for item in cast("Sequence[Any]", value)
         ]
-    return value
+        return [r for r, _ in results], any(c for _, c in results)
+    return value, False
 
 
 def redact_literals_in_structure(value: Any) -> Any:
     """Recursively replace exact registered literals through ``value``,
     leaving shapes, header names, and all other content - including
     target-sourced data - untouched. See :func:`redact_literals_only`.
+
+    When ``value`` is (or contains) a JSON-encoded string with no registered
+    literal anywhere inside it, that exact original text is returned
+    unchanged rather than a reformatted reserialization - duplicate keys,
+    number formatting, and non-ASCII escaping all survive byte-for-byte.
     """
-    return _redact_literals_in_structure(value, 0)
+    redacted, _ = _redact_literals_in_structure(value, 0)
+    return redacted
 
 
 def _redact_headers(headers: Mapping[str, str]) -> dict[str, str]:

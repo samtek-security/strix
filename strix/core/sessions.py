@@ -138,7 +138,19 @@ class _PooledConnectionSession(SQLiteSession):
             return redaction.redact_literals_in_structure(item)
         if item_type == "function_call_output" and item.get("call_id") in unredacted_call_ids:
             return redaction.redact_literals_in_structure(item)
-        return redaction.redact_structure_json_aware(item)
+        if item_type in ("function_call", "function_call_output"):
+            # A non-denylisted tool's own call/output is Recon/LLM-synthesized
+            # content (queue_finding, notes, todo, ...) - safe to scan for a
+            # shape-matched secret.
+            return redaction.redact_structure_json_aware(item)
+        # Anything else - a plain user/assistant message, an inter-agent
+        # mailbox relay, a seeded ``--instruction`` - may carry
+        # operator-supplied content the scan depends on verbatim. A test
+        # credential for an authenticated scan is exactly this shape: it
+        # must reach the model, not get shape-redacted away as if it were a
+        # leaked secret. Only Recon's own exact registered literals are safe
+        # to remove here.
+        return redaction.redact_literals_in_structure(item)
 
 
 def _is_unredacted_call(item: Any) -> bool:

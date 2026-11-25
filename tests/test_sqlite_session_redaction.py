@@ -82,11 +82,34 @@ async def test_non_denylisted_tool_output_is_redacted(tmp_path: Path) -> None:
     assert "[redacted]" in stored[1]["output"]
 
 
-async def test_plain_message_item_is_redacted(tmp_path: Path) -> None:
+async def test_plain_message_with_shape_matched_secret_is_not_redacted(tmp_path: Path) -> None:
+    """A plain user/mailbox message may be operator-supplied content the
+    scan depends on verbatim - a seeded ``--instruction`` test credential
+    for an authenticated scan looks exactly like this. Only Recon's own
+    registered literals are safe to remove here, never a shape match."""
     session = _session(tmp_path)
-    await session.add_items([{"role": "user", "content": f"token={_SECRET}"}])
+    await session.add_items([{"role": "user", "content": f"Authorization: Bearer {_SECRET}"}])
     stored = await session.get_items()
-    assert _SECRET not in stored[0]["content"]
+    assert _SECRET in stored[0]["content"]
+
+
+async def test_plain_message_with_registered_literal_is_redacted(tmp_path: Path) -> None:
+    secret = "recon-own-broker-token-0123456789"  # noqa: S105 - fixture token
+    redaction.register_secret(secret)
+    session = _session(tmp_path)
+    await session.add_items([{"role": "user", "content": f"token={secret}"}])
+    stored = await session.get_items()
+    assert secret not in stored[0]["content"]
+
+
+async def test_non_denylisted_tool_call_itself_is_still_shape_redacted(tmp_path: Path) -> None:
+    """Fix 1 narrows the shape-based path to Recon's own tool calls/outputs,
+    not away from them: a non-denylisted tool's own arguments are still
+    Recon/LLM-synthesized content, safe to scan for a shape match."""
+    session = _session(tmp_path)
+    await session.add_items([_call("queue_finding", "c17", guard_evidence=_SECRET)])
+    stored = await session.get_items()
+    assert _SECRET not in stored[0]["arguments"]
 
 
 async def test_promote_finding_evidence_never_shape_redacted(tmp_path: Path) -> None:
@@ -281,6 +304,57 @@ async def test_recursion_error_from_json_loads_does_not_crash_persistence(
     )
     stored = await session.get_items()
     assert _SECRET not in stored[1]["output"]
+
+
+async def test_registered_literal_used_as_a_json_key_is_redacted(tmp_path: Path) -> None:
+    secret = "recon-own-broker-token-0123456789"  # noqa: S105 - fixture token
+    redaction.register_secret(secret)
+    session = _session(tmp_path)
+    await session.add_items(
+        [
+            _call("exec_command", "c15", cmd="env"),
+            _output("c15", json.dumps({secret: "some-value", "other": "fine"})),
+        ]
+    )
+    stored = await session.get_items()
+    assert secret not in stored[1]["output"]
+    parsed = json.loads(stored[1]["output"])
+    assert parsed["other"] == "fine"
+
+
+async def test_decoded_json_scalar_string_literal_is_redacted(tmp_path: Path) -> None:
+    """``output`` can itself be a bare JSON-encoded string, not an object -
+    the decoded value (not its still-escaped source) must be checked for a
+    registered literal, same as the dict/list case."""
+    secret = 'sec"ret\\value-0123456789'  # noqa: S105 - fixture token
+    redaction.register_secret(secret)
+    session = _session(tmp_path)
+    await session.add_items(
+        [
+            _call("exec_command", "c16", cmd="env"),
+            _output("c16", json.dumps(secret)),
+        ]
+    )
+    stored = await session.get_items()
+    assert secret not in stored[1]["output"]
+
+
+async def test_no_literal_match_preserves_raw_json_byte_for_byte(tmp_path: Path) -> None:
+    """When nothing is registered (or nothing registered appears), a
+    JSON-encoded carrier output must survive exactly as captured - a
+    reparse+reserialize round-trip would silently drop a duplicate key and
+    renormalize number/non-ASCII formatting, corrupting target evidence
+    that was never touched."""
+    session = _session(tmp_path)
+    raw = '{"a": 1, "a": 2, "val": 1.50, "name": "café"}'
+    await session.add_items(
+        [
+            _call("exec_command", "c18", cmd="curl ..."),
+            _output("c18", raw),
+        ]
+    )
+    stored = await session.get_items()
+    assert stored[1]["output"] == raw
 
 
 async def test_full_history_read_skipped_when_batch_resolves_itself(
