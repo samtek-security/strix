@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """SDK-native state for Strix's addressable agent graph."""
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from agents.items import TResponseInputItem
     from agents.memory import Session
 
+    from strix.core.action_approvals import ActionApprovalGuard
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,7 @@ class AgentCoordinator:
     """Single owner for graph state, SDK runtimes, messages, and resume snapshots."""
 
     def __init__(self) -> None:
+        self.action_approvals: ActionApprovalGuard | None = None
         self.statuses: dict[str, Status] = {}
         self.parent_of: dict[str, str | None] = {}
         self.names: dict[str, str] = {}
@@ -87,6 +90,8 @@ class AgentCoordinator:
 
     def mark_shutting_down(self) -> None:
         self.is_shutting_down = True
+        if self.action_approvals is not None:
+            self.action_approvals.block_pending()
 
     @property
     def budget_stopped(self) -> bool:
@@ -318,6 +323,8 @@ class AgentCoordinator:
 
     def _set_running_locked(self, agent_id: str) -> None:
         self.statuses[agent_id] = "running"
+        if self.action_approvals is not None:
+            self.action_approvals.resume_agent(agent_id)
         self.errors.pop(agent_id, None)
         self.wait_kinds.pop(agent_id, None)
         self.runtimes.setdefault(agent_id, AgentRuntime()).user_wake_required = False
@@ -385,6 +392,11 @@ class AgentCoordinator:
         self, agent_id: str, status: Status | str, *, error: str | None = None
     ) -> None:
         self.statuses[agent_id] = status  # type: ignore[assignment]
+        if self.action_approvals is not None:
+            if status in TERMINAL_STATUSES:
+                self.action_approvals.block_pending(agent_id)
+            elif status == "running":
+                self.action_approvals.resume_agent(agent_id)
         if error is not None:
             self.errors[agent_id] = error
         elif status == "running":
@@ -467,7 +479,10 @@ class AgentCoordinator:
             stream = runtime.stream
             interrupt_on_message = runtime.interrupt_on_message
         if stream is not None and interrupt and interrupt_on_message:
-            stream.cancel(mode="immediate")
+            pending_approval = self.action_approvals is not None and any(
+                item["agent_id"] == target_agent_id for item in self.action_approvals.pending()
+            )
+            stream.cancel(mode="after_turn" if pending_approval else "immediate")
         await self._maybe_snapshot()
         return True
 
@@ -536,6 +551,8 @@ class AgentCoordinator:
             if agent_id not in self.statuses:
                 return
             self.statuses[agent_id] = "stopped"
+            if self.action_approvals is not None:
+                self.action_approvals.block_pending(agent_id)
             runtime = self.runtimes.setdefault(agent_id, AgentRuntime())
             runtime.wake.set()
             stream = runtime.stream

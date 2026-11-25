@@ -1,6 +1,16 @@
 # Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 # Digest recut after I8(b) engine-image rebuild. kali-rolling is a moving distro;
 # the digest freezes the base used for THIS sandbox image.
+#
+# Upstream's 2026-11 merge added a `gobuilder` stage that builds the Go tools
+# (httpx, vulnx, gospider, interactsh-client, govulncheck, katana) from
+# `@latest`/branch refs and copies the static binaries into the runtime stage,
+# trimming the Go toolchain out of the final image. Not adopted here: it would
+# mean dropping the checksum/version pins this image carries for those same
+# tools (see the `go install ...@v1.11.0` etc. block below) in favor of
+# upstream's unpinned builds, which the fork's supply-chain discipline doesn't
+# allow without a provenance review. Tracked as a follow-up, not done in this
+# sync. See strix#<TBD>.
 FROM kalilinux/kali-rolling:latest@sha256:c6d78f57ebfdd9fec428a8b04f74876e66fddd08dfd328c076224a552e7332a3
 
 LABEL description="AI Agent Penetration Testing Environment with Comprehensive Automated Tools"
@@ -204,6 +214,9 @@ RUN set -eux; \
     tar -xzf /tmp/gitleaks.tgz -C /tmp; \
     install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks; \
     rm -f /tmp/gitleaks /tmp/gitleaks.tgz
+# Not adopted: upstream's `curl .../install.sh | sh` trufflehog installer (a raw
+# script pipe, not a checksummed release artifact) and its gitleaks build off
+# the dropped `gobuilder` stage. Kept the pinned, checksummed installs above.
 
 RUN apt-get update && \
     apt-get install -y zaproxy && \

@@ -1,0 +1,53 @@
+{
+  "run_id": "run-779ce045",
+  "run_name": null,
+  "start_time": "2026-11-25T15:56:31.783331+00:00",
+  "end_time": null,
+  "status": "running",
+  "auth_mode": "api_key",
+  "targets_info": [],
+  "llm_usage": {
+    "requests": 3,
+    "input_tokens": 300,
+    "input_tokens_details": [
+      {
+        "cache_write_tokens": 0,
+        "cached_tokens": 0
+      }
+    ],
+    "output_tokens": 50,
+    "output_tokens_details": [
+      {
+        "reasoning_tokens": 0
+      }
+    ],
+    "total_tokens": 350,
+    "request_usage_entries": [],
+    "cost": 0.0,
+    "providers": {},
+    "agents": [
+      {
+        "requests": 3,
+        "input_tokens": 300,
+        "input_tokens_details": [
+          {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          }
+        ],
+        "output_tokens": 50,
+        "output_tokens_details": [
+          {
+            "reasoning_tokens": 0
+          }
+        ],
+        "total_tokens": 350,
+        "request_usage_entries": [],
+        "agent_id": "agent",
+        "agent_name": "agent",
+        "model": "unknown",
+        "cost": 0.0
+      }
+    ]
+  }
+}
