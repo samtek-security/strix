@@ -83,7 +83,7 @@ def spec_file(tmp_path: Any) -> str:
 @pytest.fixture
 def token_file(tmp_path: Any) -> str:
     path = tmp_path / "reporter-token"
-    path.write_text("tok")
+    path.write_text("t" * 32)
     path.chmod(0o600)
     return str(path)
 
@@ -158,5 +158,23 @@ def test_refuses_unreadable_token_file(
     monkeypatch.setenv("RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE", str(tmp_path / "absent"))
 
     with pytest.raises(ValueError, match="not a readable file"):
+        _start(spec_file)
+    assert fake_docker.run_calls == []
+
+
+@pytest.mark.parametrize("content", ["", "  \n", "short-token"])
+def test_refuses_empty_or_short_token_file(
+    fake_docker: _FakeDocker,
+    spec_file: str,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+) -> None:
+    path = tmp_path / "weak-token"
+    path.write_text(content)
+    monkeypatch.setenv(URL_VAR, URL)
+    monkeypatch.setenv(TOKEN_VAR, str(path))
+
+    with pytest.raises(ValueError, match="fewer than 32 bytes"):
         _start(spec_file)
     assert fake_docker.run_calls == []

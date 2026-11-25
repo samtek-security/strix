@@ -69,6 +69,7 @@ async def _docker_backend(
 
 
 _REPORTER_TOKEN_MOUNT = "/etc/recon/target-health-token"
+_REPORTER_TOKEN_MIN_BYTES = 32
 
 
 def _gateway_name(scan_id: str) -> str:
@@ -137,9 +138,19 @@ async def _contained_docker_backend(
             "contained docker backend requires the control-plane escalation reporter; "
             f"missing {', '.join(missing)}"
         )
-    if not os.path.isfile(reporter_token_host):
+    try:
+        with open(reporter_token_host, encoding="utf-8") as fh:
+            reporter_token = fh.read().strip()
+    except (OSError, UnicodeDecodeError) as exc:
         raise ValueError(
-            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {reporter_token_host!r} is not a readable file"
+            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {reporter_token_host!r} is not a readable file: {exc}"
+        ) from exc
+    # The control plane rejects gateway credentials under 32 bytes, so a shorter token would
+    # only fail after a trip, when the emergency stop can no longer be delivered.
+    if len(reporter_token.encode()) < _REPORTER_TOKEN_MIN_BYTES:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {reporter_token_host!r} holds fewer than "
+            f"{_REPORTER_TOKEN_MIN_BYTES} bytes"
         )
 
     dc = docker.from_env()
