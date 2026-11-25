@@ -39,7 +39,7 @@ Two extensions on top of the above:
   redirects to a different origin matching a known identity-provider pattern can't be completed by ``recon-browser``'s deterministic form-fill (the
   target's OWN login page is often just a redirect, not a form). Such a role is flagged
   (``result["needs_agent_oidc"]``) rather than just reported failed, with the provider URL the
-  agent should drive the redirect/consent sequence in. ``reverify_role`` lets a caller re-run the
+  agent should complete the provider sign-in in. ``reverify_role`` lets a caller re-run the
   unchanged 3-part check afterward, once the agent believes it has landed on an authenticated
   page - the host verification is never weakened or bypassed for an agent-driven login.
 """
@@ -229,7 +229,7 @@ def _is_approved_oidc_host(hostname: str, flow: dict) -> bool:
     through belongs with the already-held "fully declarative auth config" design pass (issue
     #122's third item), not bolted on here - this hatch is ready for it, callable directly today
     by anything that builds a flow dict itself (tests, a future internal caller)."""
-    if not hostname:
+    if not hostname or not _in_signed_scope(hostname, flow):
         return False
 
     def _matches(host: str) -> bool:
@@ -239,6 +239,28 @@ def _is_approved_oidc_host(hostname: str, flow: dict) -> bool:
     if declared and _matches(declared):
         return True
     return any(_matches(host) for host in _KNOWN_OIDC_HOSTS)
+
+
+def _in_signed_scope(hostname: str, flow: dict) -> bool:
+    """The provider host must ALSO be inside the engagement's signed in-scope host list, carried
+    on the flow as ``scope_hosts`` (the compiled config's ``allow_hosts``; a leading dot covers
+    that domain and every subdomain, a plain entry matches exactly - the same rule the agent's
+    login redirect guard states). No list means nothing is approved: fail closed, never infer
+    scope from the identity provider's own name."""
+    entries = flow.get("scope_hosts")
+    if not isinstance(entries, (list, tuple)):
+        return False
+    for raw in entries:
+        entry = str(raw).strip().lower()
+        if not entry:
+            continue
+        if entry.startswith("."):
+            bare = entry[1:]
+            if bare and (hostname == bare or hostname.endswith(entry)):
+                return True
+        elif hostname == entry:
+            return True
+    return False
 
 
 def _looks_like_oidc_redirect(login_url: str, current_url: str, flow: dict) -> bool:
@@ -282,8 +304,8 @@ async def _check_oidc_handoff(
 def _oidc_handoff_reason(provider_url: str, session_name: str) -> str:
     return (
         f"login redirected to an external identity provider at {provider_url} - the "
-        f"deterministic form login can't complete this; the agent must drive the redirect/"
-        f"consent sequence in session '{session_name}'"
+        f"deterministic form login can't complete this; the agent must sign in through the "
+        f"provider in session '{session_name}' and stop at any consent screen"
     )
 
 
@@ -527,7 +549,11 @@ async def preflight_role(
             _is_approved_oidc_host((parsed_login.hostname or "").lower(), flow))
     except ValueError:  # a malformed login_url just means "not an IdP" - never raise from here
         login_is_idp = False
-    if external_state and _looks_like_a_session_blob(external_state):
+    # Without a declared success_condition, _verify's "semantic" check collapses to the protected
+    # probe, so a stale nonempty cookie on a target that lands on a public page would pass. A
+    # cross-run resume skips the credential login entirely, so it demands explicit semantic proof.
+    can_prove_resume = bool((flow.get("success_condition") or "").strip())
+    if external_state and can_prove_resume and _looks_like_a_session_blob(external_state):
         # Load the host-supplied blob into the live session and run the SAME 3-part check before
         # trusting it. A clearly-garbage/tampered blob is rejected before it ever reaches the
         # sandbox (the shape check above). An expired-but-well-formed blob can still leave stale
@@ -610,6 +636,9 @@ async def preflight_role(
         # redirect we'd see partway through a form-fill. Checked only AFTER both resume paths
         # above had their chance (a valid persisted session spares the interactive SSO entirely),
         # and before the form-fill, which has no target-side form to find on a provider page.
+        # Open it in the named session first: the agent continues in that session, which would
+        # otherwise still be blank (the hand-off only carries the provider's origin).
+        await _run(session, "recon-browser", "--session-name", session_name, "open", login_url)
         result["needs_agent_oidc"] = True
         result["oidc_provider_url"] = _origin(login_url)
         result["reason"] = _oidc_handoff_reason(_origin(login_url), session_name)
@@ -672,7 +701,7 @@ async def preflight_role(
 
 async def reverify_role(session: Any, flow: dict, *, target_url: str) -> dict:
     """Re-run the SAME fail-closed 3-part check for a role the agent just finished logging in to
-    directly - e.g. after completing an OIDC redirect/consent sequence that ``preflight_role``
+    directly - e.g. after completing an OIDC sign-in that ``preflight_role``
     flagged with ``needs_agent_oidc``. Never trust the agent's own claim of success without this:
     it is the identical ``_verify`` used for a host-driven login, never a weaker check. Returns the
     same result shape as ``preflight_role`` (never raises)."""
@@ -758,9 +787,11 @@ def preflight_instruction(results: list[dict]) -> str:
     if oidc:
         lines.append(
             "These roles redirect to an external identity provider. The host could not complete "
-            "the login deterministically - YOU must drive the redirect/consent sequence yourself, "
-            "in the SAME named session (do not open a new one), using recon-browser with "
-            "`--session-name <that session>`:"
+            "the login deterministically - YOU must complete the provider sign-in yourself, in "
+            "the SAME named session (do not open a new one), using recon-browser with "
+            "`--session-name <that session>`. NEVER click or grant any consent or permission "
+            "screen (\"Accept\", \"Allow\", \"Consent\", \"Grant access\"): if the provider "
+            "shows one, stop and report the role as NOT authenticated:"
         )
         lines.extend(
             f"  - Role '{r['role']}': session '{r['session_name']}', provider at "
