@@ -48,6 +48,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import io
 import json
 import logging
 import os
@@ -55,6 +56,7 @@ import re
 import shlex
 import shutil
 import time
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 from urllib.parse import urlsplit
 
@@ -64,15 +66,17 @@ logger = logging.getLogger(__name__)
 _STATE_DIR = "/workspace/.recon-auth"
 AUTH_STATE_DIR = _STATE_DIR  # public alias
 _LOGIN_PAGE_RE = re.compile(r"(login|signin|sign-in|/auth\b|/sso\b|/oauth)", re.I)
-# Known enterprise identity-provider HOSTNAMES (exact match or proper subdomain, never a substring
-# match against the whole URL - a lookalike host like "okta.com.attacker.example" or a path like
-# "https://attacker.example/authorize" must NOT match). An operator can add their own via the
-# flow's "oidc_provider_host" field (e.g. a customer's self-hosted IdP) - same exact/subdomain
-# matching rule applies to it.
-_KNOWN_OIDC_HOSTS = (
-    "login.microsoftonline.com", "accounts.google.com", "okta.com",
-    "auth0.com", "onelogin.com", "pingidentity.com", "pingone.com",
-)
+# Fixed, single-tenant identity-provider HOSTNAMES ONLY - Microsoft and Google serve every tenant
+# from these exact hosts (a "tenant" there is a path segment, e.g. /common/ or a tenant GUID, not
+# a subdomain), so there is no attacker-controlled tenant that could qualify by hostname alone.
+# Deliberately EXCLUDES multi-tenant SaaS IdPs (Okta, Auth0, OneLogin, Ping...) where a customer
+# gets their OWN subdomain of a shared base domain - a bare suffix match on "okta.com" would let
+# an attacker's own paid Okta tenant ("evil.okta.com") qualify just as well as the operator's real
+# one. For those, the flow must declare its EXACT tenant subdomain via "oidc_provider_host" -
+# matched the same exact/subdomain way, never a substring match against the whole URL (a lookalike
+# host like "okta.com.attacker.example" or a path like "https://attacker.example/authorize" must
+# NOT match regardless of which list it is checked against).
+_KNOWN_OIDC_HOSTS = ("login.microsoftonline.com", "accounts.google.com")
 
 
 class _ExecResult(Protocol):
@@ -164,30 +168,25 @@ def _looks_like_a_session_blob(raw_json: str) -> bool:
 
 
 async def _write_state_file(session: Any, path: str, raw_json: str) -> bool:
-    """Write a HOST-provided ``storage_state`` blob into the sandbox at ``path``.
-
-    There is no assumed stdin API on the exec Protocol this module targets (see ``_ExecResult`` /
-    ``ExecFn`` above), so the content travels as a shell POSITIONAL PARAMETER (``$1``), never
-    interpolated into the command string itself - the same rule ``_do_login`` already follows for
-    the password (a secret only ever crosses the exec boundary through an argument slot, never a
-    string substitution). This also keeps ``_run``'s own exception-path log (``cmd[:1]``) from ever
-    containing the blob: with positional params, ``cmd[0]`` is just ``"sh"``. The blob still
-    travels through exec's argv (there is no stdin on this Protocol), so it remains visible to
-    anything with access to the sandbox's own process table - unavoidable without a stdin API, but
-    it is never written into a HOST-side log or a shell string that could land in a trace.
+    """Write a HOST-provided ``storage_state`` blob into the sandbox at ``path`` via the
+    session's own ``write`` (the same file-write primitive ``strix.core.runner``'s
+    ``_spill_to_workspace`` already uses, not a shell command) - the blob never crosses an exec
+    argv at all, so it can't appear in a HOST-side exec log, a sandbox backend's own exec audit
+    trail (e.g. a K8s ``ExecTransportError``), or blow an argv size limit on a large session.
     Never trusts the content's shape: the caller's own ``_verify`` JSON-parse + cookie/origin check
     is what actually gates authentication, so a garbage blob here just fails that check, same as
     any other unreadable state file. Returns False on any failure; never raises."""
     if not raw_json:
         return False
-    try:
-        blob = base64.b64encode(raw_json.encode("utf-8")).decode("ascii")
-    except Exception:  # noqa: BLE001
-        return False
     dirname = path.rsplit("/", 1)[0] or "/"
-    script = 'mkdir -p "$2" && printf "%s" "$1" | base64 -d > "$3"'
-    ok, _ = await _run(session, "sh", "-c", script, "write-state", blob, dirname, path, shell=False)
-    return ok
+    await _run(session, "mkdir", "-p", dirname)
+    try:
+        await session.write(Path(path), io.BytesIO(raw_json.encode("utf-8")))
+    except Exception:  # a write failure just means the resume attempt fails
+        logger.exception("writing external_state into the sandbox failed")
+        return False
+    else:
+        return True
 
 
 def _origin(url: str) -> str:
@@ -203,7 +202,17 @@ def _origin(url: str) -> str:
 def _is_approved_oidc_host(hostname: str, flow: dict) -> bool:
     """Exact match or proper subdomain match only - never a substring match against the whole
     URL, so a lookalike host (``okta.com.attacker.example``) or a path signature on an arbitrary
-    host (``https://attacker.example/authorize``) can never pass as an identity provider."""
+    host (``https://attacker.example/authorize``) can never pass as an identity provider.
+
+    ``flow["oidc_provider_host"]`` is the only way to approve a multi-tenant SaaS IdP (a
+    customer's own Okta/Auth0/OneLogin/Ping subdomain) or any self-hosted/government IdP
+    (Login.gov, Azure Government, a CMS agency's own Keycloak/ADFS) - NOT YET REACHABLE from the
+    control plane today: ``store.AuthFlow`` (control-plane/internal/store/store.go) has no such
+    field, and ``sanitizeAuthFlows`` (control-plane/internal/api/lifecycle.go) rebuilds the
+    struct field-by-field, so it would be silently dropped even if submitted. Wiring that field
+    through belongs with the already-held "fully declarative auth config" design pass (issue
+    #122's third item), not bolted on here - this hatch is ready for it, callable directly today
+    by anything that builds a flow dict itself (tests, a future internal caller)."""
     if not hostname:
         return False
 
@@ -244,7 +253,11 @@ async def _check_oidc_handoff(
     ok_url, cur_url = await _run(
         session, "recon-browser", "--session-name", session_name, "get", "url")
     if ok_url and cur_url and _looks_like_oidc_redirect(login_url, cur_url, flow):
-        return {"needs_agent_oidc": True, "oidc_provider_url": cur_url}
+        # Origin only, never the full URL: a real provider redirect can carry a one-time
+        # sessionToken/login_hint/etc in its query string, and this value lands in the result,
+        # the agent prompt and (via preflight_instruction) the model context - the agent already
+        # has the full URL in its own live browser session if it needs it.
+        return {"needs_agent_oidc": True, "oidc_provider_url": _origin(cur_url)}
     return None
 
 
@@ -486,8 +499,20 @@ async def preflight_role(
         "role": role, "session_name": session_name, "state_path": state_path,
         "authenticated": False, "reason": "", "checks": {},
     }
-    if not (flow.get("login_url") or "").strip():
+    login_url = (flow.get("login_url") or "").strip()
+    if not login_url:
         result["reason"] = "no login_url - can't preflight; agent will handle auth"
+        return result
+    if _is_approved_oidc_host((urlsplit(login_url).hostname or "").lower(), flow) and (
+        urlsplit(login_url).scheme.lower() == "https"
+    ):
+        # The target's login_url IS the identity provider - a direct SSO entry point, not a
+        # redirect we'd see partway through a form-fill. There is no target-side form to try
+        # first, so hand off immediately rather than letting recon-browser's generic form
+        # auto-detect fumble around on a page it was never meant to handle.
+        result["needs_agent_oidc"] = True
+        result["oidc_provider_url"] = _origin(login_url)
+        result["reason"] = _oidc_handoff_reason(_origin(login_url), session_name)
         return result
     if external_state and _looks_like_a_session_blob(external_state):
         # Load the host-supplied blob into the live session and run the SAME 3-part check before
@@ -503,6 +528,12 @@ async def preflight_role(
                 load_ok, _ = await _run(session, "recon-browser", "--session-name", session_name,
                                         "state", "load", state_path)
                 if load_ok:
+                    # "state load" restores cookies/local-storage but leaves the browser wherever
+                    # it already was (a fresh session starts blank) - navigate to the target
+                    # BEFORE verifying, or success_condition's url_contains/element_present would
+                    # evaluate against nothing and a genuinely valid resume would still fail.
+                    await _run(session, "recon-browser", "--session-name", session_name,
+                              "open", target_url)
                     ver = await _verify(session, flow, session_name, state_path, target_url)
                     if ver.get("authenticated"):
                         result["checks"] = ver["checks"]
@@ -549,6 +580,9 @@ async def preflight_role(
                 load_ok, _ = await _run(session, "recon-browser", "--session-name", session_name,
                                         "state", "load", state_path)
                 if load_ok:
+                    # Same reason as the external_state branch above: navigate before verifying.
+                    await _run(session, "recon-browser", "--session-name", session_name,
+                              "open", target_url)
                     ver = await _verify(session, flow, session_name, state_path, target_url)
                     if ver.get("authenticated"):
                         result["checks"] = ver["checks"]
@@ -558,7 +592,6 @@ async def preflight_role(
                         return result
         except Exception:  # noqa: BLE001 - resume is best-effort; never block the full login
             pass
-    login_url = (flow.get("login_url") or "").strip()
 
     async def _oidc_or(fallback_reason: str) -> dict | None:
         """Check for an OIDC hand-off right now, before anything navigates the browser further
