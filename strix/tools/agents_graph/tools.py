@@ -18,6 +18,7 @@ from strix.core.execution import notify_parent_on_terminal
 from strix.core.hooks import LLM_TURN_KEY
 from strix.report.state import get_global_report_state
 from strix.skills import validate_requested_skills
+from strix.tools.output_store import bound_text
 
 
 logger = logging.getLogger(__name__)
@@ -384,6 +385,23 @@ def _fit_evidence_to_byte_cap(
         target["evidence_total_items"] = total_items_by_agent.get(
             target["agent_id"], len(target["evidence"])
         )
+    overage = _result_byte_size(result) - cap
+    if overage <= 0:
+        return
+    # Every agent's evidence is already gone and the response is still over
+    # the cap: a long reason/note, or enough agents' own id/name fields, is
+    # what's left. Compact the free-text fields we control instead of
+    # handing back an oversized response for the generic wrapper to turn
+    # into a non-JSON preview anyway.
+    for key in ("note", "reason"):
+        text = result.get(key)
+        if not isinstance(text, str) or not text:
+            continue
+        budget = max(len(text.encode("utf-8")) - overage - 64, 32)
+        result[key] = bound_text(text, max_lines=20, max_bytes=budget)
+        overage = _result_byte_size(result) - cap
+        if overage <= 0:
+            return
 
 
 _WAIT_DEFAULT_TIMEOUT_S = 300

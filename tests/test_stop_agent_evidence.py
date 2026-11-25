@@ -93,6 +93,34 @@ async def test_is_ancestor_false_for_peers_and_descendants() -> None:
     assert await coordinator.is_ancestor("unknown", "child") is False
 
 
+# --- AgentCoordinator.try_claim_next_cycle ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_try_claim_next_cycle_succeeds_while_running() -> None:
+    coordinator = await _graph()
+    await coordinator.mark_turn_settled("child")
+
+    assert await coordinator.try_claim_next_cycle("child") is True
+    assert coordinator.runtimes["child"].turn_settled.is_set() is False
+
+
+@pytest.mark.asyncio
+async def test_try_claim_next_cycle_fails_once_stopped() -> None:
+    """The exact race round 6 flagged: a status check and a later,
+    separate mark_turn_unsettled call leave a gap a stop can land in.
+    try_claim_next_cycle checks and clears under one lock acquisition, so
+    there is no such gap - a stop that landed before this call is seen."""
+    coordinator = await _graph()
+    await coordinator.mark_turn_settled("child")
+    await coordinator.request_stop("child")
+
+    assert await coordinator.try_claim_next_cycle("child") is False
+    # Already-settled evidence from the stop is left alone - nothing here
+    # should make it look like a new cycle is about to write over it.
+    assert coordinator.runtimes["child"].turn_settled.is_set() is True
+
+
 # --- AgentCoordinator.join_stopped -----------------------------------------------
 
 

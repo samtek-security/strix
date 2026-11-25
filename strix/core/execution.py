@@ -572,7 +572,7 @@ async def respawn_subagents(
 _INTERACTIVE_TOOL_RECOVERY_LIMIT = 3
 
 
-async def _run_until_lifecycle(
+async def _run_until_lifecycle(  # noqa: PLR0912
     agent: Any,
     coordinator: AgentCoordinator,
     agent_id: str,
@@ -646,17 +646,22 @@ async def _run_until_lifecycle(
             # point is already in its session. Once resumed, the same call goes
             # out with nothing added to the conversation.
             await coordinator.wait_for_budget_resume(agent_id, parked_epoch=exc.resume_epoch)
-            if (
-                not coordinator.budget_stopped
-                and await _agent_status(coordinator, agent_id) != "running"
-            ):
-                # Stopped while parked (operator stop or a parent's stop_agent).
+            # bool(...) defeats a mypy false positive: it narrows this property
+            # to False from the loop's earlier check and doesn't widen it back
+            # even though trigger_budget_stop() could have set it True during
+            # the await above.
+            budget_stopped = bool(coordinator.budget_stopped)
+            if budget_stopped:
+                # The top of this loop raises BudgetExceededError on the next
+                # pass regardless of this agent's own status, so there is no
+                # new cycle to guard here - just the mailbox write below.
+                await coordinator.mark_turn_unsettled(agent_id)
+            elif not await coordinator.try_claim_next_cycle(agent_id):
+                # Stopped while parked (operator stop or a parent's
+                # stop_agent) - checked and unsettled atomically, so a stop
+                # landing right at this boundary can't be missed.
                 await coordinator.reset_recovery(agent_id)
                 return result
-            # Resuming into another turn: unsettled before the mailbox drain
-            # below writes to the session, for the same reason as the nudge
-            # write further down this loop.
-            await coordinator.mark_turn_unsettled(agent_id)
             await coordinator.consume_pending(agent_id)
             if session is not None:
                 input_data = []
@@ -685,13 +690,16 @@ async def _run_until_lifecycle(
         if recoveries >= recovery_limit:
             return await _exhausted_recovery(coordinator, agent_id, result, interactive=interactive)
 
-        # The previous _run_cycle call already settled (mark_turn_settled fired
-        # on its way out), but this nudge write happens here, outside that
-        # cycle's own bracket, before the next _run_cycle call clears the
-        # event again at its own top. Without this, a stop landing in this
-        # exact window would read a stale "settled" signal while this write
-        # (and the whole next turn it triggers) is still ahead of it.
-        await coordinator.mark_turn_unsettled(agent_id)
+        # The previous _run_cycle call already settled (mark_turn_settled
+        # fired on its way out), and the status check above only confirms
+        # "running" as of that moment - record_recovery/_log_recovery each
+        # cross an await, any of which a stop can land in. try_claim_next_cycle
+        # re-checks status and clears turn_settled in the same lock
+        # acquisition, so nothing can land in between the two: the nudge
+        # write below (and the whole next turn it triggers) is covered.
+        if not await coordinator.try_claim_next_cycle(agent_id):
+            await coordinator.reset_recovery(agent_id)
+            return result
         input_data = await _append_tool_required_message(
             session=session,
             context=context,

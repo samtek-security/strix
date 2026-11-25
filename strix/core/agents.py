@@ -663,6 +663,26 @@ class AgentCoordinator:
         async with self._lock:
             self.runtimes.setdefault(agent_id, AgentRuntime()).turn_settled.clear()
 
+    async def try_claim_next_cycle(self, agent_id: str) -> bool:
+        """Atomically check "is this agent still running" and, if so, mark
+        its turn unsettled for the write that is about to follow.
+
+        A separate status check and ``mark_turn_unsettled`` call leave a gap
+        between them — any ``await`` is a point where ``request_stop`` can
+        interleave and flip the status, and ``_run_until_lifecycle``'s
+        recovery path has several between its own status check and its
+        session write. Doing both under one lock closes that: a stop either
+        lands before this call (seen here, nothing proceeds) or after it
+        (turn_settled is already correctly cleared for it to wait on).
+        Returns ``False`` when the agent is not running - the caller must
+        not write to its session or start another cycle.
+        """
+        async with self._lock:
+            if self.statuses.get(agent_id) != "running":
+                return False
+            self.runtimes.setdefault(agent_id, AgentRuntime()).turn_settled.clear()
+            return True
+
     async def mark_turn_settled(self, agent_id: str) -> None:
         """Signal that a cycle is done writing to the agent's session.
 
