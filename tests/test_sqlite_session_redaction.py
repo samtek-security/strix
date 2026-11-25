@@ -174,6 +174,61 @@ async def test_shape_redaction_preserves_json_structure_in_arguments(tmp_path: P
     assert _SECRET not in parsed["Authorization"]
 
 
+async def test_oversized_json_number_does_not_crash_persistence(tmp_path: Path) -> None:
+    """A huge integer literal in captured content makes ``json.loads`` raise
+    ``ValueError`` (CPython's int-string-conversion guard), not
+    ``JSONDecodeError`` - persistence must degrade to plain-text redaction,
+    not propagate and abort the write."""
+    session = _session(tmp_path)
+    huge_number_output = f'{{"id": {"9" * 5000}, "token": "{_SECRET}"}}'
+    await session.add_items(
+        [
+            _call("queue_finding", "c9", title="t"),
+            _output("c9", huge_number_output),
+        ]
+    )
+    stored = await session.get_items()
+    assert _SECRET not in stored[1]["output"]
+
+
+async def test_deeply_nested_secret_is_redacted_not_passed_through(tmp_path: Path) -> None:
+    """Past the shape-based recursion cutoff, a compound value must not be
+    returned unchanged - that would silently skip redacting whatever secret
+    lives in the unvisited subtree."""
+    session = _session(tmp_path)
+    nested: Any = _SECRET
+    for _ in range(12):
+        nested = {"nested": nested}
+    await session.add_items(
+        [
+            _call("queue_finding", "c10", title="t"),
+            {"type": "function_call_output", "call_id": "c10", "output": json.dumps(nested)},
+        ]
+    )
+    stored = await session.get_items()
+    assert _SECRET not in stored[1]["output"]
+
+
+async def test_deeply_nested_literal_in_an_unredacted_tool_is_not_destroyed(
+    tmp_path: Path,
+) -> None:
+    """The literal-only pass on raw-carrier tool data must never fall back to
+    a blunt REDACTED past its recursion cutoff - that would destroy target
+    evidence, which this scoping exists specifically to preserve."""
+    session = _session(tmp_path)
+    nested: Any = "target evidence at the bottom"
+    for _ in range(12):
+        nested = {"nested": nested}
+    await session.add_items(
+        [
+            _call("exec_command", "c11", cmd="curl ..."),
+            {"type": "function_call_output", "call_id": "c11", "output": json.dumps(nested)},
+        ]
+    )
+    stored = await session.get_items()
+    assert "target evidence at the bottom" in stored[1]["output"]
+
+
 async def test_full_history_read_skipped_when_batch_resolves_itself(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

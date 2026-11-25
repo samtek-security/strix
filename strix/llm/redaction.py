@@ -195,13 +195,20 @@ def _redact_value_json_aware(value: Any, depth: int) -> Any:
     if isinstance(value, str):
         parsed: Any = None
         if depth < 8:
-            with contextlib.suppress(json.JSONDecodeError, TypeError):
+            with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError):
                 parsed = json.loads(value)
-        if isinstance(parsed, dict | list):
-            return json.dumps(_redact_value_json_aware(parsed, depth + 1))
-        return redact_text(value)
-    if value is None or isinstance(value, bool | int | float) or depth >= 8:
+        return (
+            json.dumps(_redact_value_json_aware(parsed, depth + 1))
+            if isinstance(parsed, dict | list)
+            else redact_text(value)
+        )
+    if value is None or isinstance(value, bool | int | float):
         return value
+    # A compound value past the depth cutoff is never returned as-is: unlike
+    # a scalar, it could still hold a secret in an unvisited leaf, and
+    # "stop descending" must not mean "stop redacting."
+    if depth >= 8:
+        return REDACTED
     if isinstance(value, Mapping):
         out: dict[Any, Any] = {}
         for key, item in cast("Mapping[Any, Any]", value).items():
@@ -253,10 +260,22 @@ def redact_literals_only(text: str) -> str:
     return text
 
 
+_LITERAL_REDACTION_MAX_DEPTH = 64
+
+
 def _redact_literals_in_structure(value: Any, depth: int) -> Any:
     if isinstance(value, str):
         return redact_literals_only(value)
-    if value is None or isinstance(value, bool | int | float) or depth >= 8:
+    # Unlike the shape-based cutoff, this never falls back to a blunt
+    # REDACTED past the limit: this function runs on raw-carrier tool data
+    # that must never be destroyed, only have an exact Recon literal removed.
+    # A cutoff still exists purely as a recursion-safety bound, so it is set
+    # far past any depth real HTTP/shell/MCP data plausibly nests at (a
+    # pathologically deep structure stops getting scanned, but is returned
+    # intact rather than redacted away).
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if depth >= _LITERAL_REDACTION_MAX_DEPTH:
         return value
     if isinstance(value, Mapping):
         return {
