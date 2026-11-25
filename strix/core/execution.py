@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import logging
 import re
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from functools import cache
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agents import ItemHelpers, MessageOutputItem, RunConfig, Runner
 from agents.exceptions import AgentsException, MaxTurnsExceeded, UserError
@@ -31,6 +33,14 @@ from strix.core.hooks import (
     SubagentBudgetReservedError,
 )
 from strix.core.inputs import child_initial_input
+from strix.core.interception import (
+    ApprovalGateway,
+    InterceptionDecision,
+    ask_timeout_from_context,
+    evaluate,
+    gateway_from_context,
+    rules_from_context,
+)
 from strix.core.sessions import (
     enforce_image_budget,
     open_agent_session,
@@ -260,6 +270,132 @@ async def _seed_and_prepare_first_input(
             if await seed_initial_input(session, initial_input):
                 return []
     return initial_input
+
+
+_ASK_POLL_INTERVAL_S = 5.0
+_ASK_INPUT_SUMMARY_MAX_CHARS = 4000
+
+
+def _interruption_input_text(item: Any) -> str:
+    raw = item.raw_item
+    arguments = raw.get("arguments") if isinstance(raw, dict) else getattr(raw, "arguments", None)
+    return arguments if isinstance(arguments, str) else ""
+
+
+def _dedup_key(tool_name: str, input_text: str) -> str:
+    return hashlib.sha256(f"{tool_name}:{input_text}".encode()).hexdigest()
+
+
+def _bounded_summary(text: str) -> str:
+    if len(text) <= _ASK_INPUT_SUMMARY_MAX_CHARS:
+        return text
+    return text[:_ASK_INPUT_SUMMARY_MAX_CHARS] + "…(truncated)"
+
+
+def _unexplained_pause_rejection_message(tool_name: str) -> str:
+    return (
+        f"Denied: this run has no interception rule or approval channel to explain why "
+        f"{tool_name!r} was paused for approval; defaulting to deny."
+    )
+
+
+def _decision_rejection_message(decision: InterceptionDecision, outcome: str) -> str:
+    base = f"Denied by interception rule {decision.rule.id!r} ({outcome})."
+    return f"{base} {decision.rule.description}".strip() if decision.rule.description else base
+
+
+async def _wait_for_human_decision(
+    gateway: ApprovalGateway,
+    *,
+    decision: InterceptionDecision,
+    tool_name: str,
+    input_text: str,
+    timeout: float,
+    report: Callable[[str], None] | None,
+) -> Literal["approved", "denied"]:
+    """Open (or join) a pending approval and poll it to a decision or a deadline.
+
+    ``report`` is pinged every poll, mirroring ``_run_coverage_on_exit``'s
+    progress pump: a legitimate multi-minute human wait must look like progress
+    to whatever keepalive/stall watchdog the host (Recon's Temporal activity)
+    has wrapped around this run, not like a hang.
+    """
+    try:
+        approval_id = await gateway.request(
+            dedup_key=_dedup_key(tool_name, input_text),
+            tool_name=tool_name,
+            tool_input_summary=_bounded_summary(input_text),
+            rule_id=decision.rule.id,
+            rule_description=decision.rule.description,
+            ttl_seconds=timeout,
+        )
+    except Exception:
+        logger.exception("interception ask: could not open an approval request for %s", tool_name)
+        return "denied"
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        if report is not None:
+            with contextlib.suppress(Exception):
+                report(f"awaiting approval for {tool_name}")
+        try:
+            status = await gateway.poll(approval_id)
+        except Exception:
+            logger.exception("interception ask: approval poll failed for %s", approval_id)
+            status = "pending"
+        if status == "approved":
+            return "approved"
+        if status == "denied":
+            return "denied"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning(
+                "interception ask: approval %s for %s timed out after %.0fs; defaulting to deny",
+                approval_id,
+                tool_name,
+                timeout,
+            )
+            return "denied"
+        await asyncio.sleep(min(_ASK_POLL_INTERVAL_S, remaining))
+
+
+async def _resolve_interruptions(
+    stream: Any,
+    *,
+    context: dict[str, Any],
+    report: Callable[[str], None] | None,
+) -> Any:
+    """Approve or reject every pending interruption on ``stream``, returning a resumable state.
+
+    An interruption this run cannot explain — the rule that caused it is gone
+    (rules changed mid-run), or a tool paused on its own intrinsic need with no
+    rule and no approval channel configured — is rejected outright: a pause
+    nothing here can account for defaults to deny, not to guessing allow.
+    """
+    state = stream.to_state()
+    gateway = gateway_from_context(context)
+    timeout = ask_timeout_from_context(context)
+    rules = rules_from_context(context)
+    for item in stream.interruptions:
+        tool_name = item.tool_name or ""
+        input_text = _interruption_input_text(item)
+        decision = evaluate(rules, tool_name, input_text)
+        if decision is None or decision.action != "ask" or gateway is None:
+            state.reject(item, rejection_message=_unexplained_pause_rejection_message(tool_name))
+            continue
+        outcome = await _wait_for_human_decision(
+            gateway,
+            decision=decision,
+            tool_name=tool_name,
+            input_text=input_text,
+            timeout=timeout,
+            report=report,
+        )
+        if outcome == "approved":
+            state.approve(item)
+        else:
+            state.reject(item, rejection_message=_decision_rejection_message(decision, outcome))
+    return state
 
 
 async def run_agent_loop(
@@ -835,38 +971,58 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
                 session=session,
                 hooks=hooks,
             )
-            await coordinator.attach_stream(agent_id, stream)
-            try:
+            report = context.get("status_sink")
+            report = report if callable(report) else None
+            while True:
+                await coordinator.attach_stream(agent_id, stream)
                 try:
-                    async for event in stream.stream_events():
-                        if event_sink is not None:
-                            try:
-                                event_sink(agent_id, event)
-                            except Exception:
-                                logger.exception("stream event sink failed for %s", agent_id)
-                    if stream.run_loop_exception is not None:
-                        raise stream.run_loop_exception
-                    if refusal := _structured_provider_refusal(stream):
-                        raise ProviderRefusalError(refusal)
-                except (BudgetExceededError, BudgetPausedError, SubagentBudgetReservedError):
-                    raise
-                except RuntimeError as stream_exc:
-                    if "after shutdown" not in str(stream_exc):
+                    try:
+                        async for event in stream.stream_events():
+                            if event_sink is not None:
+                                try:
+                                    event_sink(agent_id, event)
+                                except Exception:
+                                    logger.exception("stream event sink failed for %s", agent_id)
+                        if stream.run_loop_exception is not None:
+                            raise stream.run_loop_exception
+                        if refusal := _structured_provider_refusal(stream):
+                            raise ProviderRefusalError(refusal)
+                    except (BudgetExceededError, BudgetPausedError, SubagentBudgetReservedError):
                         raise
-                    logger.warning(
-                        "Ignoring LiteLLM end-of-stream shutdown race for %s",
-                        agent_id,
-                    )
-                except _teardown_sandbox_errors():
-                    if not coordinator.is_shutting_down:
-                        raise
-                    logger.warning(
-                        "Ignoring sandbox container error during teardown for %s",
-                        agent_id,
-                        exc_info=True,
-                    )
-            finally:
-                await coordinator.detach_stream(agent_id, stream)
+                    except RuntimeError as stream_exc:
+                        if "after shutdown" not in str(stream_exc):
+                            raise
+                        logger.warning(
+                            "Ignoring LiteLLM end-of-stream shutdown race for %s",
+                            agent_id,
+                        )
+                    except _teardown_sandbox_errors():
+                        if not coordinator.is_shutting_down:
+                            raise
+                        logger.warning(
+                            "Ignoring sandbox container error during teardown for %s",
+                            agent_id,
+                            exc_info=True,
+                        )
+                finally:
+                    await coordinator.detach_stream(agent_id, stream)
+
+                if not getattr(stream, "interruptions", None):
+                    break
+                # The SDK paused this turn for one or more gated tool calls (see
+                # strix.core.interception): resolve each via its rule + the run's
+                # approval gateway (or reject outright with no explanation for
+                # one), then resume the SAME turn with the decisions applied.
+                # Not a new _run_cycle iteration — the outer retry/recovery
+                # counters below must not see this as a fresh attempt.
+                resumed_state = await _resolve_interruptions(stream, context=context, report=report)
+                stream = Runner.run_streamed(
+                    agent,
+                    input=resumed_state,
+                    run_config=_with_image_scrub(run_config, context),
+                    session=session,
+                    hooks=hooks,
+                )
         except BudgetPausedError as exc:
             logger.info("agent %s paused at the scan budget limit: %s", agent_id, exc)
             if coordinator.budget_policy == "pause" or exc.operator_pause:

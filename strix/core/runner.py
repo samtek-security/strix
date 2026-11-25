@@ -18,7 +18,7 @@ import io
 import json
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -52,6 +52,11 @@ from strix.core.hooks import (
     ReportUsageHooks,
     recomputed_budget_flags,
 )
+from strix.core.interception import (
+    APPROVAL_GATEWAY_KEY,
+    ASK_TIMEOUT_SECONDS_KEY,
+    INTERCEPTION_RULES_KEY,
+)
 from strix.core.inputs import (
     build_root_task,
     build_scan_targets,
@@ -78,6 +83,7 @@ if TYPE_CHECKING:
     from agents.result import RunResultBase
     from agents.tool import Tool
 
+    from strix.core.interception import ApprovalGateway, InterceptionRule
     from strix.runtime.status import StatusSink
     from strix.tools.mcp import (
         McpConnectionRequest,
@@ -270,6 +276,9 @@ async def _run_scan(
     gateway_target_ports: tuple[int, ...] = (),
     coverage_context: Any = None,
     run_coverage_worker_on_exit: bool = False,
+    interception_rules: Sequence[InterceptionRule] | None = None,
+    approval_gateway: ApprovalGateway | None = None,
+    ask_timeout_seconds: float | None = None,
 ) -> RunResultBase | None:
     """Shared scan body for :func:`run_strix_scan` and :func:`run_recon_scan`.
 
@@ -308,6 +317,16 @@ async def _run_scan(
     are documented on :func:`run_recon_scan`; they default to inert values so the
     upstream path (empty gateway policy, no coverage worker) is byte-for-byte the
     old behaviour.
+    ``interception_rules`` are allow/deny/ask rules (see ``strix.core.interception``)
+    evaluated against every tool call's name and JSON-encoded arguments, in list
+    order, first match wins; ``None``/empty matches nothing, so a caller that never
+    passes them (every upstream use, and the plain CLI) sees no behaviour change.
+    An "ask" match needs ``approval_gateway`` to actually pause for a human
+    decision; without one, an ask-matched call is rejected outright rather than
+    silently allowed. ``ask_timeout_seconds`` bounds that wait (default-deny past
+    it); the caller is expected to clamp it to whatever real deadline it is
+    itself bound by (Recon clamps it to the engagement's remaining elapsed
+    budget), since this function has no notion of one.
     """
 
     def report(phase: str) -> None:
@@ -647,6 +666,14 @@ async def _run_scan(
             "supports_images": supports_images,
             "coverage_tools": coverage_tools,
             SUBAGENT_TURN_LIMITS_KEY: dict(subagent_turn_limits or {}),
+            # Lets a paused-for-approval wait (strix.core.execution) ping the same
+            # progress channel _run_coverage_on_exit already uses, so the host's
+            # stall/keepalive watchdog sees a legitimate human wait as progress,
+            # not a hang. None when the caller gave no status_sink (plain CLI use).
+            "status_sink": status_sink,
+            INTERCEPTION_RULES_KEY: list(interception_rules or ()),
+            APPROVAL_GATEWAY_KEY: approval_gateway,
+            ASK_TIMEOUT_SECONDS_KEY: ask_timeout_seconds,
         }
 
         root_session = open_agent_session(root_id, agents_db)
@@ -954,6 +981,9 @@ async def run_strix_scan(
     report_tool: Tool = create_vulnerability_report,
     coverage_tools: bool = True,
     subagent_turn_limits: Mapping[str, int] | None = None,
+    interception_rules: Sequence[InterceptionRule] | None = None,
+    approval_gateway: ApprovalGateway | None = None,
+    ask_timeout_seconds: float | None = None,
 ) -> RunResultBase | None:
     """Run or resume one Strix scan against a sandbox.
 
@@ -996,6 +1026,9 @@ async def run_strix_scan(
         report_tool=report_tool,
         coverage_tools=coverage_tools,
         subagent_turn_limits=subagent_turn_limits,
+        interception_rules=interception_rules,
+        approval_gateway=approval_gateway,
+        ask_timeout_seconds=ask_timeout_seconds,
     )
 
 
@@ -1029,6 +1062,9 @@ async def run_recon_scan(
     gateway_target_ports: tuple[int, ...] = (),
     coverage_context: Any = None,
     run_coverage_worker_on_exit: bool = False,
+    interception_rules: Sequence[InterceptionRule] | None = None,
+    approval_gateway: ApprovalGateway | None = None,
+    ask_timeout_seconds: float | None = None,
 ) -> RunResultBase | None:
     """Recon's scan entrypoint: :func:`run_strix_scan` plus trusted egress + coverage.
 
@@ -1054,6 +1090,10 @@ async def run_recon_scan(
     ``cleanup_on_exit``); on earlier phases it is ``False`` so the shared sandbox
     survives. The worker writes its results to the run dir for the engine to
     fold onto the coverage ledger after this returns.
+    ``interception_rules`` / ``approval_gateway`` / ``ask_timeout_seconds`` are
+    documented on :func:`_run_scan`; Recon compiles the rules from the
+    engagement's signed RoE and clamps the timeout to its remaining elapsed
+    budget before calling in.
     """
     return await _run_scan(
         scan_config=scan_config,
@@ -1084,4 +1124,7 @@ async def run_recon_scan(
         gateway_target_ports=gateway_target_ports,
         coverage_context=coverage_context,
         run_coverage_worker_on_exit=run_coverage_worker_on_exit,
+        interception_rules=interception_rules,
+        approval_gateway=approval_gateway,
+        ask_timeout_seconds=ask_timeout_seconds,
     )
