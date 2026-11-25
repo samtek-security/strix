@@ -41,6 +41,14 @@ ACTIVE_STATUSES: frozenset[str] = frozenset({"running", "waiting", "budget_pause
 WaitKind = Literal["user", "agents", "stalled"]
 
 
+def _settled_event() -> asyncio.Event:
+    """An Event that starts set: an agent with no cycle in flight yet has
+    nothing unsettled to wait for."""
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
 @dataclass(slots=True)
 class AgentRuntime:
     session: Session | None = None
@@ -54,6 +62,15 @@ class AgentRuntime:
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     mailbox: list[dict[str, Any]] = field(default_factory=list)
     user_wake_required: bool = False
+    # Cleared by mark_turn_unsettled/attach_stream before each point in
+    # execution.py that writes to this agent's session (a cycle starting,
+    # the initial seed, a recovery nudge, a post-pause mailbox drain), set
+    # by mark_turn_settled once a cycle truly ends and every write for it
+    # (including a crash's salvage write) has landed. An interactive
+    # agent's background task keeps running (it parks in wait_for_message)
+    # after a stop, so the task finishing is not a usable "turn is over"
+    # signal — this event is, for a non-interactive agent.
+    turn_settled: asyncio.Event = field(default_factory=_settled_event)
 
 
 class AgentCoordinator:
@@ -582,13 +599,62 @@ class AgentCoordinator:
         await self._maybe_snapshot()
         return stopped
 
+    async def join_stopped(self, agent_id: str, timeout: float) -> bool:
+        """Wait for a gracefully-stopped agent's current turn to actually finish.
+
+        ``request_stop`` only cancels the stream with ``mode="after_turn"``;
+        the turn, and the session write that comes with it, finish later,
+        signalled by ``turn_settled``. Do not wait on the agent's whole
+        background task instead: an interactive agent's task keeps running
+        after a stop (it parks in an indefinite wait-for-message loop), so
+        it would never finish even once the session is already stable.
+        Returns ``False`` on timeout — the turn may still be in flight, so
+        the session may not yet reflect it.
+        """
+        async with self._lock:
+            runtime = self.runtimes.get(agent_id)
+            event = runtime.turn_settled if runtime else None
+        if event is None or event.is_set():
+            return True
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+        except TimeoutError:
+            return False
+        return True
+
+    async def session_items(self, agent_id: str) -> list[Any] | None:
+        """Read back a stopped agent's own session items.
+
+        Used to recover evidence a validator already captured (tool calls,
+        proxy output, confirmed PoCs) before ``stop_agent`` ended it, instead
+        of discarding it and making the caller re-derive the same work.
+
+        Returns ``None`` if the read itself failed (a closed/unavailable
+        session store) — distinct from ``[]``, which means the agent simply
+        has no session or an empty one. A caller that treated a failed read
+        the same as "no evidence" could report a lead dropped when the
+        evidence was actually there and just unreadable right now.
+        """
+        async with self._lock:
+            runtime = self.runtimes.get(agent_id)
+            session = runtime.session if runtime else None
+        if session is None:
+            return []
+        try:
+            return list(await session.get_items())
+        except Exception:
+            logger.exception("failed to read session items for %s", agent_id)
+            return None
+
     async def attach_stream(
         self,
         agent_id: str,
         stream: Any,
     ) -> None:
         async with self._lock:
-            self.runtimes.setdefault(agent_id, AgentRuntime()).stream = stream
+            runtime = self.runtimes.setdefault(agent_id, AgentRuntime())
+            runtime.stream = stream
+            runtime.turn_settled.clear()
 
     async def detach_stream(
         self,
@@ -599,6 +665,66 @@ class AgentCoordinator:
             runtime = self.runtimes.setdefault(agent_id, AgentRuntime())
             if runtime.stream is stream:
                 runtime.stream = None
+
+    async def mark_turn_unsettled(self, agent_id: str) -> None:
+        """Signal that a new cycle has begun and may write to the session.
+
+        Called at the very top of ``_run_cycle``'s loop body, before the
+        pre-stream work (image-budget enforcement, compaction) that can
+        itself mutate the session. Without this, a stop landing between two
+        cycles would see the previous cycle's settled ``turn_settled`` and
+        report evidence as final while that pre-stream work was still
+        running — ``attach_stream`` clears the same event, but only once the
+        stream actually starts, which is too late to cover that window.
+        """
+        async with self._lock:
+            self.runtimes.setdefault(agent_id, AgentRuntime()).turn_settled.clear()
+
+    async def try_claim_next_cycle(self, agent_id: str) -> bool:
+        """Atomically check "is this agent still running" and, if so, mark
+        its turn unsettled for the write that is about to follow.
+
+        A separate status check and ``mark_turn_unsettled`` call leave a gap
+        between them — any ``await`` is a point where ``request_stop`` can
+        interleave and flip the status, and ``_run_until_lifecycle``'s
+        recovery path has several between its own status check and its
+        session write. Doing both under one lock closes that: a stop either
+        lands before this call (seen here, nothing proceeds) or after it
+        (turn_settled is already correctly cleared for it to wait on).
+        Returns ``False`` when the agent is not running - the caller must
+        not write to its session or start another cycle.
+        """
+        async with self._lock:
+            if self.statuses.get(agent_id) != "running":
+                return False
+            self.runtimes.setdefault(agent_id, AgentRuntime()).turn_settled.clear()
+            return True
+
+    async def mark_turn_settled(self, agent_id: str) -> None:
+        """Signal that a cycle is done writing to the agent's session.
+
+        Called from the cycle's own true exit points (success, a terminal
+        failure after any salvage write, or a budget exception with nothing
+        left to write) — never from ``detach_stream``, which fires before a
+        retry's own session write (image-strip, compaction, salvage) and
+        would otherwise mark the turn settled while it is still mutating
+        the session.
+        """
+        async with self._lock:
+            self.runtimes.setdefault(agent_id, AgentRuntime()).turn_settled.set()
+
+    async def is_ancestor(self, ancestor_id: str, agent_id: str) -> bool:
+        """Whether ``ancestor_id`` is ``agent_id``'s parent, grandparent, etc."""
+        async with self._lock:
+            parent_of = dict(self.parent_of)
+        seen: set[str] = set()
+        current = parent_of.get(agent_id)
+        while current is not None and current not in seen:
+            if current == ancestor_id:
+                return True
+            seen.add(current)
+            current = parent_of.get(current)
+        return False
 
     async def active_agents_except(self, agent_id: str) -> list[dict[str, Any]]:
         async with self._lock:

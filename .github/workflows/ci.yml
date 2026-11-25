@@ -115,7 +115,10 @@ jobs:
         run: |
           uv venv --python 3.12 /tmp/strix-smoke
           uv pip install --python /tmp/strix-smoke/bin/python dist/*.whl
-          /tmp/strix-smoke/bin/strix --version
-          /tmp/strix-smoke/bin/strix --help >/dev/null
+          # Fork patch: this fork's console script is `recon`, not upstream's
+          # `strix` (pyproject.toml [project.scripts]). Tracked in the recon
+          # repo's docs/strix-fork-patches.md so a future sync doesn't drop it.
+          /tmp/strix-smoke/bin/recon --version
+          /tmp/strix-smoke/bin/recon --help >/dev/null
       - name: Vertex AI and Bedrock dependencies install with the wheel
         run: /tmp/strix-smoke/bin/python -c "import google.auth.transport.requests, boto3"

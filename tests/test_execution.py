@@ -952,6 +952,95 @@ async def test_crashing_noninteractive_child_settles_and_wakes_its_parent(
 
     assert coordinator.statuses["child"] == "crashed"
     assert coordinator.pending_counts.get("root", 0) > 0
+    # A crash is still a true exit: nothing more will be written for this turn.
+    assert coordinator.runtimes["child"].turn_settled.is_set() is True
+
+
+class _CleanStream:
+    """A turn that streams no events and completes with nothing to report."""
+
+    def __init__(self) -> None:
+        self.run_loop_exception: BaseException | None = None
+        self.new_items: list[Any] = []
+
+    async def stream_events(self) -> Any:
+        for event in _NO_STREAM_EVENTS:
+            yield event
+
+    def cancel(self, mode: str = "after_turn") -> None:  # noqa: ARG002
+        return
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_unsettles_at_entry_and_settles_only_on_true_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop landing between cycles must not see a stale "settled" signal
+    from the previous cycle while this one's pre-stream work is still
+    running — and a clean cycle must settle once it truly finishes."""
+    stream = _CleanStream()
+    monkeypatch.setattr(
+        "strix.core.execution.Runner.run_streamed", lambda *_args, **_kwargs: stream
+    )
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    await coordinator.mark_turn_settled("root")  # as if a prior cycle already settled
+
+    real_attach_stream = coordinator.attach_stream
+    settled_once_the_new_cycle_starts_work = []
+
+    async def _spy_attach_stream(agent_id: str, s: Any) -> None:
+        settled_once_the_new_cycle_starts_work.append(
+            coordinator.runtimes[agent_id].turn_settled.is_set()
+        )
+        await real_attach_stream(agent_id, s)
+
+    monkeypatch.setattr(coordinator, "attach_stream", _spy_attach_stream)
+
+    result = await execution._run_cycle(
+        MagicMock(),
+        coordinator,
+        "root",
+        input_data="task",
+        run_config=MagicMock(),
+        context={},
+        max_turns=5,
+        session=None,
+        interactive=True,
+        event_sink=None,
+        hooks=None,
+    )
+
+    assert result is stream
+    assert settled_once_the_new_cycle_starts_work == [False]
+    assert coordinator.runtimes["root"].turn_settled.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_run_until_lifecycle_settles_on_a_global_budget_stop() -> None:
+    """The scan-wide budget stop raises immediately, with nothing more to
+    write - a concurrent stop_agent must not wait out the full evidence
+    timeout only to find exactly that true anyway."""
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    await coordinator.trigger_budget_stop()
+
+    with pytest.raises(execution.BudgetExceededError):
+        await execution._run_until_lifecycle(
+            MagicMock(),
+            coordinator,
+            "root",
+            initial_input="task",
+            run_config=MagicMock(),
+            context={},
+            max_turns=5,
+            session=None,
+            interactive=False,
+            event_sink=None,
+            hooks=None,
+        )
+
+    assert coordinator.runtimes["root"].turn_settled.is_set() is True
 
 
 @pytest.mark.asyncio
@@ -992,6 +1081,82 @@ async def test_run_agent_loop_seeds_identity_before_first_cycle(
     stored = await session.get_items()
     assert any("recon" in str(cast("dict[str, Any]", i).get("content", "")) for i in stored)
     session.close()
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_unsettles_before_the_identity_seed(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """turn_settled defaults to settled; without an explicit unsettle at the
+    top of _run_agent_loop, a stop landing before the identity seed below
+    would read that stale default instead of "a write is in flight"."""
+    coordinator = AgentCoordinator()
+    await coordinator.register("child", "recon", parent_id="root")
+    session = SQLiteSession("child", tmp_path / "agents.db")
+
+    seen_unsettled_before_first_cycle = []
+
+    async def _record_and_crash(*_args: Any, **_kwargs: Any) -> Any:
+        seen_unsettled_before_first_cycle.append(
+            coordinator.runtimes["child"].turn_settled.is_set()
+        )
+        raise RuntimeError("first-turn crash")
+
+    monkeypatch.setattr(execution, "_run_cycle", _record_and_crash)
+
+    identity = [{"role": "user", "content": "You are agent recon (abc)."}]
+    with pytest.raises(RuntimeError, match="first-turn crash"):
+        await execution.run_agent_loop(
+            agent=object(),
+            initial_input=identity,
+            run_config=None,  # type: ignore[arg-type]
+            context={"agent_id": "child", "parent_id": "root"},
+            max_turns=5,
+            coordinator=coordinator,
+            agent_id="child",
+            interactive=False,
+            session=session,
+        )
+
+    # Unsettled by the time the first cycle runs - the identity seed (which
+    # ran just before it) is covered, not read back as stale-settled.
+    assert seen_unsettled_before_first_cycle == [False]
+    session.close()
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_leaves_turn_settled_alone_for_a_parked_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """start_parked + interactive skips the seed and _run_until_lifecycle
+    entirely, going straight to parking for a message - nothing will write
+    before then, so turn_settled's default (settled) must survive, not get
+    stuck cleared with nothing left to ever set it again."""
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+
+    async def _cancel_immediately(*_args: Any, **_kwargs: Any) -> bool:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(coordinator, "wait_for_message", _cancel_immediately)
+
+    result = await execution._run_agent_loop(
+        agent=MagicMock(),
+        initial_input="task",
+        run_config=MagicMock(),
+        context={},
+        max_turns=5,
+        coordinator=coordinator,
+        agent_id="root",
+        interactive=True,
+        session=None,
+        start_parked=True,
+        event_sink=None,
+        hooks=None,
+    )
+
+    assert result is None
+    assert coordinator.runtimes["root"].turn_settled.is_set() is True
 
 
 def _scripted_cycle(

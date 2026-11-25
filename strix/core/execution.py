@@ -5,14 +5,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import logging
 import re
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from functools import cache
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from agents import ItemHelpers, MessageOutputItem, RunConfig, Runner
 from agents.exceptions import AgentsException, MaxTurnsExceeded, UserError
@@ -34,6 +36,14 @@ from strix.core.hooks import (
     subagent_finish_tool,
 )
 from strix.core.inputs import child_initial_input
+from strix.core.interception import (
+    ApprovalGateway,
+    InterceptionDecision,
+    ask_timeout_from_context,
+    evaluate,
+    gateway_from_context,
+    rules_from_context,
+)
 from strix.core.sessions import (
     enforce_image_budget,
     open_agent_session,
@@ -265,6 +275,132 @@ async def _seed_and_prepare_first_input(
     return initial_input
 
 
+_ASK_POLL_INTERVAL_S = 5.0
+_ASK_INPUT_SUMMARY_MAX_CHARS = 4000
+
+
+def _interruption_input_text(item: Any) -> str:
+    raw = item.raw_item
+    arguments = raw.get("arguments") if isinstance(raw, dict) else getattr(raw, "arguments", None)
+    return arguments if isinstance(arguments, str) else ""
+
+
+def _dedup_key(tool_name: str, input_text: str) -> str:
+    return hashlib.sha256(f"{tool_name}:{input_text}".encode()).hexdigest()
+
+
+def _bounded_summary(text: str) -> str:
+    if len(text) <= _ASK_INPUT_SUMMARY_MAX_CHARS:
+        return text
+    return text[:_ASK_INPUT_SUMMARY_MAX_CHARS] + "…(truncated)"
+
+
+def _unexplained_pause_rejection_message(tool_name: str) -> str:
+    return (
+        f"Denied: this run has no interception rule or approval channel to explain why "
+        f"{tool_name!r} was paused for approval; defaulting to deny."
+    )
+
+
+def _decision_rejection_message(decision: InterceptionDecision, outcome: str) -> str:
+    base = f"Denied by interception rule {decision.rule.id!r} ({outcome})."
+    return f"{base} {decision.rule.description}".strip() if decision.rule.description else base
+
+
+async def _wait_for_human_decision(
+    gateway: ApprovalGateway,
+    *,
+    decision: InterceptionDecision,
+    tool_name: str,
+    input_text: str,
+    timeout: float,
+    report: Callable[[str], None] | None,
+) -> Literal["approved", "denied"]:
+    """Open (or join) a pending approval and poll it to a decision or a deadline.
+
+    ``report`` is pinged every poll, mirroring ``_run_coverage_on_exit``'s
+    progress pump: a legitimate multi-minute human wait must look like progress
+    to whatever keepalive/stall watchdog the host (Recon's Temporal activity)
+    has wrapped around this run, not like a hang.
+    """
+    try:
+        approval_id = await gateway.request(
+            dedup_key=_dedup_key(tool_name, input_text),
+            tool_name=tool_name,
+            tool_input_summary=_bounded_summary(input_text),
+            rule_id=decision.rule.id,
+            rule_description=decision.rule.description,
+            ttl_seconds=timeout,
+        )
+    except Exception:
+        logger.exception("interception ask: could not open an approval request for %s", tool_name)
+        return "denied"
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        if report is not None:
+            with contextlib.suppress(Exception):
+                report(f"awaiting approval for {tool_name}")
+        try:
+            status = await gateway.poll(approval_id)
+        except Exception:
+            logger.exception("interception ask: approval poll failed for %s", approval_id)
+            status = "pending"
+        if status == "approved":
+            return "approved"
+        if status == "denied":
+            return "denied"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning(
+                "interception ask: approval %s for %s timed out after %.0fs; defaulting to deny",
+                approval_id,
+                tool_name,
+                timeout,
+            )
+            return "denied"
+        await asyncio.sleep(min(_ASK_POLL_INTERVAL_S, remaining))
+
+
+async def _resolve_interruptions(
+    stream: Any,
+    *,
+    context: dict[str, Any],
+    report: Callable[[str], None] | None,
+) -> Any:
+    """Approve or reject every pending interruption on ``stream``, returning a resumable state.
+
+    An interruption this run cannot explain — the rule that caused it is gone
+    (rules changed mid-run), or a tool paused on its own intrinsic need with no
+    rule and no approval channel configured — is rejected outright: a pause
+    nothing here can account for defaults to deny, not to guessing allow.
+    """
+    state = stream.to_state()
+    gateway = gateway_from_context(context)
+    timeout = ask_timeout_from_context(context)
+    rules = rules_from_context(context)
+    for item in stream.interruptions:
+        tool_name = item.tool_name or ""
+        input_text = _interruption_input_text(item)
+        decision = evaluate(rules, tool_name, input_text)
+        if decision is None or decision.action != "ask" or gateway is None:
+            state.reject(item, rejection_message=_unexplained_pause_rejection_message(tool_name))
+            continue
+        outcome = await _wait_for_human_decision(
+            gateway,
+            decision=decision,
+            tool_name=tool_name,
+            input_text=input_text,
+            timeout=timeout,
+            report=report,
+        )
+        if outcome == "approved":
+            state.approve(item)
+        else:
+            state.reject(item, rejection_message=_decision_rejection_message(decision, outcome))
+    return state
+
+
 async def run_agent_loop(
     *,
     agent: Any,
@@ -303,7 +439,7 @@ async def run_agent_loop(
         request_log.reset_call_context(token)
 
 
-async def _run_agent_loop(
+async def _run_agent_loop(  # noqa: PLR0912
     *,
     agent: Any,
     initial_input: Any,
@@ -324,6 +460,16 @@ async def _run_agent_loop(
         interrupt_on_message=interactive,
         resumable=interactive,
     )
+    # A start_parked interactive resume skips the seed below and
+    # _run_until_lifecycle entirely, going straight to wait_for_message with
+    # nothing left to write - turn_settled's default (settled) is already
+    # correct for it, and clearing it here would leave it stuck unsettled
+    # with nothing that will ever set it again. Every other path does write
+    # (the seed, if nothing else), so it needs the same unsettled-until-
+    # proven-otherwise treatment as a cycle: default is "nothing in flight
+    # yet," not "necessarily settled."
+    if not (start_parked and interactive):
+        await coordinator.mark_turn_unsettled(agent_id)
     result: RunResultBase | None = None
 
     first_cycle_input = await _seed_and_prepare_first_input(
@@ -334,9 +480,11 @@ async def _run_agent_loop(
     reserve_stopped = coordinator.reserve_stopped
     if budget_stopped:
         await coordinator.set_status(agent_id, "stopped")
+        await coordinator.mark_turn_settled(agent_id)
         raise BudgetExceededError("scan budget reached")
     if reserve_stopped and context.get("parent_id") is not None:
         await coordinator.set_status(agent_id, "stopped")
+        await coordinator.mark_turn_settled(agent_id)
         raise SubagentBudgetReservedError("scan reached the sub-agent budget reserve")
 
     if reserve_stopped and start_parked and interactive and context.get("parent_id") is None:
@@ -572,7 +720,7 @@ async def respawn_subagents(
 _INTERACTIVE_TOOL_RECOVERY_LIMIT = 3
 
 
-async def _run_until_lifecycle(
+async def _run_until_lifecycle(  # noqa: PLR0912
     agent: Any,
     coordinator: AgentCoordinator,
     agent_id: str,
@@ -605,10 +753,15 @@ async def _run_until_lifecycle(
     while True:
         if coordinator.budget_stopped:
             await coordinator.set_status(agent_id, "stopped")
+            # Terminal from here - nothing more will be written for this
+            # agent, so a concurrent stop_agent should not wait out the full
+            # evidence timeout only to find this exact thing true anyway.
+            await coordinator.mark_turn_settled(agent_id)
             raise BudgetExceededError("scan budget reached")
 
         if coordinator.reserve_stopped and context.get("parent_id") is not None:
             await coordinator.set_status(agent_id, "stopped")
+            await coordinator.mark_turn_settled(agent_id)
             raise SubagentBudgetReservedError("scan reached the sub-agent budget reserve")
 
         try:
@@ -646,11 +799,20 @@ async def _run_until_lifecycle(
             # point is already in its session. Once resumed, the same call goes
             # out with nothing added to the conversation.
             await coordinator.wait_for_budget_resume(agent_id, parked_epoch=exc.resume_epoch)
-            if (
-                not coordinator.budget_stopped
-                and await _agent_status(coordinator, agent_id) != "running"
-            ):
-                # Stopped while parked (operator stop or a parent's stop_agent).
+            # bool(...) defeats a mypy false positive: it narrows this property
+            # to False from the loop's earlier check and doesn't widen it back
+            # even though trigger_budget_stop() could have set it True during
+            # the await above.
+            budget_stopped = bool(coordinator.budget_stopped)
+            if budget_stopped:
+                # The top of this loop raises BudgetExceededError on the next
+                # pass regardless of this agent's own status, so there is no
+                # new cycle to guard here - just the mailbox write below.
+                await coordinator.mark_turn_unsettled(agent_id)
+            elif not await coordinator.try_claim_next_cycle(agent_id):
+                # Stopped while parked (operator stop or a parent's
+                # stop_agent) - checked and unsettled atomically, so a stop
+                # landing right at this boundary can't be missed.
                 await coordinator.reset_recovery(agent_id)
                 return result
             await coordinator.consume_pending(agent_id)
@@ -681,6 +843,16 @@ async def _run_until_lifecycle(
         if recoveries >= recovery_limit:
             return await _exhausted_recovery(coordinator, agent_id, result, interactive=interactive)
 
+        # The previous _run_cycle call already settled (mark_turn_settled
+        # fired on its way out), and the status check above only confirms
+        # "running" as of that moment - record_recovery/_log_recovery each
+        # cross an await, any of which a stop can land in. try_claim_next_cycle
+        # re-checks status and clears turn_settled in the same lock
+        # acquisition, so nothing can land in between the two: the nudge
+        # write below (and the whole next turn it triggers) is covered.
+        if not await coordinator.try_claim_next_cycle(agent_id):
+            await coordinator.reset_recovery(agent_id)
+            return result
         input_data = await _append_tool_required_message(
             session=session,
             context=context,
@@ -814,6 +986,10 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
     while True:
         stream: Any = None
         pre_run_items: list[Any] = []
+        # Before any pre-stream work (which can itself write to the session via
+        # compaction) touches this cycle, so a stop landing right here is never
+        # read back as "settled" from the previous cycle's signal.
+        await coordinator.mark_turn_unsettled(agent_id)
         try:
             await coordinator.mark_running(agent_id)
             if session is not None:
@@ -838,49 +1014,71 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
                 session=session,
                 hooks=hooks,
             )
-            await coordinator.attach_stream(agent_id, stream)
-            try:
+            report = context.get("status_sink")
+            report = report if callable(report) else None
+            while True:
+                await coordinator.attach_stream(agent_id, stream)
                 try:
-                    async for event in stream.stream_events():
-                        if event_sink is not None:
-                            try:
-                                event_sink(agent_id, event)
-                            except Exception:
-                                logger.exception("stream event sink failed for %s", agent_id)
-                    if stream.run_loop_exception is not None:
-                        raise stream.run_loop_exception
-                    if refusal := _structured_provider_refusal(stream):
-                        raise ProviderRefusalError(refusal)
-                except (BudgetExceededError, BudgetPausedError, SubagentBudgetReservedError):
-                    raise
-                except RuntimeError as stream_exc:
-                    if "after shutdown" not in str(stream_exc):
+                    try:
+                        async for event in stream.stream_events():
+                            if event_sink is not None:
+                                try:
+                                    event_sink(agent_id, event)
+                                except Exception:
+                                    logger.exception("stream event sink failed for %s", agent_id)
+                        if stream.run_loop_exception is not None:
+                            raise stream.run_loop_exception
+                        if refusal := _structured_provider_refusal(stream):
+                            raise ProviderRefusalError(refusal)
+                    except (BudgetExceededError, BudgetPausedError, SubagentBudgetReservedError):
                         raise
-                    logger.warning(
-                        "Ignoring LiteLLM end-of-stream shutdown race for %s",
-                        agent_id,
-                    )
-                except _teardown_sandbox_errors():
-                    if not coordinator.is_shutting_down:
-                        raise
-                    logger.warning(
-                        "Ignoring sandbox container error during teardown for %s",
-                        agent_id,
-                        exc_info=True,
-                    )
-            finally:
-                await coordinator.detach_stream(agent_id, stream)
+                    except RuntimeError as stream_exc:
+                        if "after shutdown" not in str(stream_exc):
+                            raise
+                        logger.warning(
+                            "Ignoring LiteLLM end-of-stream shutdown race for %s",
+                            agent_id,
+                        )
+                    except _teardown_sandbox_errors():
+                        if not coordinator.is_shutting_down:
+                            raise
+                        logger.warning(
+                            "Ignoring sandbox container error during teardown for %s",
+                            agent_id,
+                            exc_info=True,
+                        )
+                finally:
+                    await coordinator.detach_stream(agent_id, stream)
+
+                if not getattr(stream, "interruptions", None):
+                    break
+                # The SDK paused this turn for one or more gated tool calls (see
+                # strix.core.interception): resolve each via its rule + the run's
+                # approval gateway (or reject outright with no explanation for
+                # one), then resume the SAME turn with the decisions applied.
+                # Not a new _run_cycle iteration — the outer retry/recovery
+                # counters below must not see this as a fresh attempt.
+                resumed_state = await _resolve_interruptions(stream, context=context, report=report)
+                stream = Runner.run_streamed(
+                    agent,
+                    input=resumed_state,
+                    run_config=_with_image_scrub(run_config, context),
+                    session=session,
+                    hooks=hooks,
+                )
         except BudgetPausedError as exc:
             logger.info("agent %s paused at the scan budget limit: %s", agent_id, exc)
             if coordinator.budget_policy == "pause" or exc.operator_pause:
                 await coordinator.park_for_budget(agent_id)
             else:
                 await coordinator.pause_for_budget(agent_id)
+            await coordinator.mark_turn_settled(agent_id)
             raise
         except SubagentBudgetReservedError as exc:
             logger.info("sub-agent %s stopped at the budget reserve: %s", agent_id, exc)
             await coordinator.set_status(agent_id, "stopped")
             await _notify_root_on_budget_reserve(coordinator)
+            await coordinator.mark_turn_settled(agent_id)
             raise
         except BudgetExceededError as exc:
             logger.info(
@@ -888,6 +1086,7 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
             )
             await coordinator.set_status(agent_id, "stopped")
             await coordinator.trigger_budget_stop()
+            await coordinator.mark_turn_settled(agent_id)
             raise
         except Exception as exc:
             if image_strips < 3 and session is not None and _is_image_rejection(exc):
@@ -949,6 +1148,7 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
                     agent_id, "failed", error=request_log.failure_text(exc)
                 )
                 await notify_parent_on_terminal(coordinator, agent_id, "failed")
+                await coordinator.mark_turn_settled(agent_id)
                 return None
             if isinstance(exc, MaxTurnsExceeded):
                 status: Status = "stopped"
@@ -970,10 +1170,12 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
             # the dead child can no longer send.
             await coordinator.set_status(agent_id, status, error=error_text)
             await notify_parent_on_terminal(coordinator, agent_id, status)
+            await coordinator.mark_turn_settled(agent_id)
             if not interactive:
                 raise
             return None
         else:
+            await coordinator.mark_turn_settled(agent_id)
             return cast("RunResultBase | None", stream)
 
 
