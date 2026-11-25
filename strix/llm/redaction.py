@@ -132,6 +132,17 @@ def register_secret(value: object) -> None:
 
     Short values are ignored: a one- or two-character "key" would redact
     ordinary text wholesale and leak nothing worth hiding.
+
+    Invariant this call site relies on: a registered secret must not
+    contain a quote, backslash, or control character. ``_scrub_literals``
+    only checks a secret's raw and canonically JSON-escaped forms
+    (``json.dumps(secret)[1:-1]``), not every other valid-but-noncanonical
+    JSON escape spelling of the same bytes (e.g. ``\\u0070`` for a plain
+    "p"); that bypass stays theoretical only because every secret actually
+    registered today (broker tokens, provider API keys) is an opaque
+    alphanumeric/base64-shaped string with nothing in it that JSON would
+    ever need to escape. If a future caller ever registers a secret that
+    does contain one of those characters, this bypass becomes live.
     """
     if isinstance(value, str) and len(value.strip()) >= 8:
         _literal_secrets.add(value.strip())
