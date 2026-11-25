@@ -10,7 +10,7 @@ import os
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from stat import S_IMODE
+from stat import S_IMODE, S_ISREG
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -102,7 +102,13 @@ def _reporter_settings() -> tuple[str, Path]:
             "contained docker backend requires the control-plane escalation reporter; "
             f"missing {', '.join(missing)}"
         )
-    parsed = urlsplit(url)
+    try:
+        parsed = urlsplit(url)
+        parsed.port  # noqa: B018  (raises ValueError on a non-numeric or out-of-range port)
+    except ValueError as exc:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_URL {url!r} is not a valid URL: {exc}"
+        ) from exc
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise ValueError(
             f"RECON_TARGET_HEALTH_REPORTER_URL {url!r} must be an http(s) URL with a host"
@@ -114,6 +120,10 @@ def _reporter_settings() -> tuple[str, Path]:
         raise ValueError(
             f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} is not a readable file: {exc}"
         ) from exc
+    if not S_ISREG(token_stat.st_mode):
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} is not a regular file"
+        )
     # Same rule as the signed spec: this is a bearer credential that can stop engagements.
     if token_stat.st_uid != os.geteuid() or S_IMODE(token_stat.st_mode) & 0o077:
         raise ValueError(

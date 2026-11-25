@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -185,7 +186,17 @@ def test_refuses_empty_or_short_token_file(
     assert fake_docker.run_calls == []
 
 
-@pytest.mark.parametrize("url", ["control-plane:4001", "ftp://control-plane", "http://", "/api"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "control-plane:4001",
+        "ftp://control-plane",
+        "http://",
+        "/api",
+        "http://control-plane:abc",
+        "http://control-plane:70000",
+    ],
+)
 def test_refuses_a_reporter_url_without_http_scheme_and_host(
     fake_docker: _FakeDocker,
     spec_file: str,
@@ -196,7 +207,7 @@ def test_refuses_a_reporter_url_without_http_scheme_and_host(
     monkeypatch.setenv(URL_VAR, url)
     monkeypatch.setenv(TOKEN_VAR, token_file)
 
-    with pytest.raises(ValueError, match="http"):
+    with pytest.raises(ValueError, match=r"http|valid URL"):
         _start(spec_file)
     assert fake_docker.run_calls == []
 
@@ -223,3 +234,16 @@ def test_refuses_to_start_the_agent_when_the_gateway_cannot_read_the_token(
 
     with pytest.raises(RuntimeError, match="cannot read the escalation token"):
         _start(spec_file)
+
+
+def test_refuses_a_token_path_that_is_not_a_regular_file(
+    fake_docker: _FakeDocker, spec_file: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fifo = tmp_path / "token-fifo"
+    os.mkfifo(fifo, 0o600)
+    monkeypatch.setenv(URL_VAR, URL)
+    monkeypatch.setenv(TOKEN_VAR, str(fifo))
+
+    with pytest.raises(ValueError, match="not a regular file"):
+        _start(spec_file)
+    assert fake_docker.run_calls == []
