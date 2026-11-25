@@ -122,11 +122,31 @@ print("done")
 """
 
 
-def test_process_exit_prints_nothing_to_stderr() -> None:
+def _child_env() -> dict[str, str]:
     env = {
         k: v for k, v in os.environ.items() if k in {"PATH", "HOME", "SYSTEMROOT", "TEMP", "TMP"}
     }
+    # Without this, the child's litellm import fetches its pricing table over
+    # the network and warns on stderr when that fetch is blocked.
+    env["LITELLM_LOCAL_MODEL_COST_MAP"] = "true"
     env |= {"PYTHONPATH": str(Path(__file__).resolve().parents[1]), "STRIX_DEBUG": ""}
+    return env
+
+
+def test_child_env_keeps_the_local_pricing_flag() -> None:
+    proc = subprocess.run(
+        [sys.executable, "-c", "import os; print(os.environ.get('LITELLM_LOCAL_MODEL_COST_MAP'))"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=_child_env(),
+        check=False,
+    )
+    assert proc.stdout.strip() == "true"
+
+
+def test_process_exit_prints_nothing_to_stderr() -> None:
+    env = _child_env()
     proc = subprocess.run(  # noqa: S603
         [sys.executable, "-c", _EXIT_SCRIPT],
         capture_output=True,
