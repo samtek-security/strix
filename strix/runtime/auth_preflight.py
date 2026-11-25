@@ -503,17 +503,12 @@ async def preflight_role(
     if not login_url:
         result["reason"] = "no login_url - can't preflight; agent will handle auth"
         return result
-    if _is_approved_oidc_host((urlsplit(login_url).hostname or "").lower(), flow) and (
-        urlsplit(login_url).scheme.lower() == "https"
-    ):
-        # The target's login_url IS the identity provider - a direct SSO entry point, not a
-        # redirect we'd see partway through a form-fill. There is no target-side form to try
-        # first, so hand off immediately rather than letting recon-browser's generic form
-        # auto-detect fumble around on a page it was never meant to handle.
-        result["needs_agent_oidc"] = True
-        result["oidc_provider_url"] = _origin(login_url)
-        result["reason"] = _oidc_handoff_reason(_origin(login_url), session_name)
-        return result
+    try:
+        parsed_login = urlsplit(login_url)
+        login_is_idp = parsed_login.scheme.lower() == "https" and _is_approved_oidc_host(
+            (parsed_login.hostname or "").lower(), flow)
+    except ValueError:  # a malformed login_url just means "not an IdP" - never raise from here
+        login_is_idp = False
     if external_state and _looks_like_a_session_blob(external_state):
         # Load the host-supplied blob into the live session and run the SAME 3-part check before
         # trusting it. A clearly-garbage/tampered blob is rejected before it ever reaches the
@@ -592,6 +587,15 @@ async def preflight_role(
                         return result
         except Exception:  # noqa: BLE001 - resume is best-effort; never block the full login
             pass
+    if login_is_idp:
+        # The target's login_url IS the identity provider - a direct SSO entry point, not a
+        # redirect we'd see partway through a form-fill. Checked only AFTER both resume paths
+        # above had their chance (a valid persisted session spares the interactive SSO entirely),
+        # and before the form-fill, which has no target-side form to find on a provider page.
+        result["needs_agent_oidc"] = True
+        result["oidc_provider_url"] = _origin(login_url)
+        result["reason"] = _oidc_handoff_reason(_origin(login_url), session_name)
+        return result
 
     async def _oidc_or(fallback_reason: str) -> dict | None:
         """Check for an OIDC hand-off right now, before anything navigates the browser further
@@ -628,6 +632,15 @@ async def preflight_role(
         mfa_ok, mfa_note = await _complete_totp(session, flow, session_name, flow.get("role") or role)
         if not mfa_ok:
             return await _oidc_or(mfa_note)
+    if is_email_mfa or is_totp_mfa:
+        # A SUCCESSFUL OTP submit or magic-link open can itself land on an identity provider
+        # (command-level success, redirect afterward). Check before _verify's probes navigate
+        # away and erase the provider's location.
+        oidc_after_mfa = await _check_oidc_handoff(session, session_name, login_url, flow)
+        if oidc_after_mfa:
+            result.update(oidc_after_mfa)
+            result["reason"] = _oidc_handoff_reason(oidc_after_mfa["oidc_provider_url"], session_name)
+            return result
     ver = await _verify(session, flow, session_name, state_path, target_url)
     result["checks"] = ver["checks"]
     result["authenticated"] = ver["authenticated"]
