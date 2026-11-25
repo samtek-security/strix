@@ -10,7 +10,9 @@ import os
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from stat import S_IMODE
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 
 if TYPE_CHECKING:
@@ -100,7 +102,24 @@ def _reporter_settings() -> tuple[str, Path]:
             "contained docker backend requires the control-plane escalation reporter; "
             f"missing {', '.join(missing)}"
         )
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_URL {url!r} must be an http(s) URL with a host"
+        )
     token_file = Path(token_path)
+    try:
+        token_stat = token_file.stat()
+    except OSError as exc:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} is not a readable file: {exc}"
+        ) from exc
+    # Same rule as the signed spec: this is a bearer credential that can stop engagements.
+    if token_stat.st_uid != os.geteuid() or S_IMODE(token_stat.st_mode) & 0o077:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} must be owned by the worker "
+            "user and not accessible by group or other"
+        )
     try:
         token = token_file.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeDecodeError) as exc:
@@ -309,6 +328,14 @@ async def _contained_docker_backend(
         _cleanup_boundary(gw)
         raise RuntimeError(f"egress gateway {gw_name} not ready; refusing to start the agent (fail-closed)")
 
+    if not _gateway_can_read_token(gw):
+        _cleanup_boundary(gw)
+        raise RuntimeError(
+            f"egress gateway {gw_name} cannot read the escalation token at "
+            f"{_REPORTER_TOKEN_MOUNT}; refusing to start the agent (fail-closed). The token "
+            "file must be readable by the gateway's user"
+        )
+
     # Dual-home only after the private listener is ready. Attachment is mandatory:
     # without it the run is broken, so remove the gateway and fail before the agent.
     egress_net = os.environ.get("RECON_EGRESS_NETWORK", "bridge")
@@ -351,6 +378,20 @@ async def _contained_docker_backend(
         raise
     return client, session
 
+
+
+def _gateway_can_read_token(gateway: Any) -> bool:
+    """The gateway runs as an unprivileged user, so a private host file can mount yet be unreadable.
+
+    Readiness never opens the token, and the failure would surface only after a trip.
+    """
+    import docker
+
+    try:
+        code, _out = gateway.exec_run(["head", "-c", "1", _REPORTER_TOKEN_MOUNT])
+    except docker.errors.DockerException:
+        return False
+    return code == 0
 
 
 def _wait_gateway_ready(container: Any, timeout_s: int = 30, require_capture_ready: bool = False) -> bool:

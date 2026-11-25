@@ -39,6 +39,7 @@ class _FakeNetwork:
 class _FakeDocker:
     def __init__(self) -> None:
         self.run_calls: list[dict[str, Any]] = []
+        self.exec_code = 0
         self.networks = SimpleNamespace(create=self._create_network)
         self.volumes = SimpleNamespace(create=self._create_volume)
         self.containers = SimpleNamespace(run=self._run)
@@ -52,9 +53,12 @@ class _FakeDocker:
             attrs={"Labels": labels}, reload=lambda: None, remove=lambda **_: None
         )
 
+    def exec_run(self, _cmd: list[str]) -> tuple[int, bytes]:
+        return self.exec_code, b""
+
     def _run(self, _image: str, **kw: Any) -> Any:
         self.run_calls.append(kw)
-        return SimpleNamespace(remove=lambda **_: None)
+        return SimpleNamespace(remove=lambda **_: None, exec_run=self.exec_run)
 
 
 @pytest.fixture
@@ -172,9 +176,50 @@ def test_refuses_empty_or_short_token_file(
 ) -> None:
     path = tmp_path / "weak-token"
     path.write_text(content)
+    path.chmod(0o600)
     monkeypatch.setenv(URL_VAR, URL)
     monkeypatch.setenv(TOKEN_VAR, str(path))
 
     with pytest.raises(ValueError, match="fewer than 32 bytes"):
         _start(spec_file)
     assert fake_docker.run_calls == []
+
+
+@pytest.mark.parametrize("url", ["control-plane:4001", "ftp://control-plane", "http://", "/api"])
+def test_refuses_a_reporter_url_without_http_scheme_and_host(
+    fake_docker: _FakeDocker,
+    spec_file: str,
+    token_file: str,
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+) -> None:
+    monkeypatch.setenv(URL_VAR, url)
+    monkeypatch.setenv(TOKEN_VAR, token_file)
+
+    with pytest.raises(ValueError, match="http"):
+        _start(spec_file)
+    assert fake_docker.run_calls == []
+
+
+def test_refuses_a_token_file_open_to_group_or_other(
+    fake_docker: _FakeDocker, spec_file: str, token_file: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    Path(token_file).chmod(0o640)
+    monkeypatch.setenv(URL_VAR, URL)
+    monkeypatch.setenv(TOKEN_VAR, token_file)
+
+    with pytest.raises(ValueError, match="not accessible by group or other"):
+        _start(spec_file)
+    assert fake_docker.run_calls == []
+
+
+def test_refuses_to_start_the_agent_when_the_gateway_cannot_read_the_token(
+    fake_docker: _FakeDocker, spec_file: str, token_file: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(backends, "_wait_gateway_ready", lambda *_a, **_k: True)
+    fake_docker.exec_code = 1
+    monkeypatch.setenv(URL_VAR, URL)
+    monkeypatch.setenv(TOKEN_VAR, token_file)
+
+    with pytest.raises(RuntimeError, match="cannot read the escalation token"):
+        _start(spec_file)
