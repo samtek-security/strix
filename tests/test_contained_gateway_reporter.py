@@ -197,6 +197,11 @@ def test_refuses_empty_or_short_token_file(
         "http://control-plane:70000",
         "http://control-plane:4001/?x=1",
         "http://control-plane:4001/#frag",
+        "http://control-plane:4001/?",
+        "http://control-plane:4001/#",
+        "http://control plane:4001",
+        "http://user:pw@control-plane:4001",
+        "http://control-plane:4001/a\tb",
     ],
 )
 def test_refuses_a_reporter_url_without_http_scheme_and_host(

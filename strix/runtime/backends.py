@@ -109,10 +109,16 @@ def _reporter_settings() -> tuple[str, Path]:
         raise ValueError(
             f"RECON_TARGET_HEALTH_REPORTER_URL {url!r} is not a valid URL: {exc}"
         ) from exc
-    if parsed.query or parsed.fragment:
+    if (
+        "?" in url
+        or "#" in url
+        or parsed.username is not None
+        or parsed.password is not None
+        or any(ch.isspace() or not ch.isprintable() for ch in url)
+    ):
         raise ValueError(
             f"RECON_TARGET_HEALTH_REPORTER_URL {url!r} must be a base URL "
-            "with no query or fragment"
+            "with no query, fragment, credentials, whitespace or control characters"
         )
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise ValueError(
