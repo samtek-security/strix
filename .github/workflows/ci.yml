@@ -32,7 +32,11 @@ jobs:
   pytest:
     name: pytest (${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The suite itself runs in ~4-5 minutes (measured directly, not the
+    # inherited 15-minute default every other job in this file also carries).
+    # 10 gives real headroom over that without silently absorbing a 15-minute
+    # hang the way 15 just did -- see #266.
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
