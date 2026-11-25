@@ -12,8 +12,8 @@ from pydantic import ValidationError
 from strix.config import loader
 from strix.config.settings import LlmSettings
 from strix.report.pricing import resolve_litellm_model
-from strix.report.state import litellm_cost_callback
-from strix.report.usage import LLMUsageLedger
+from strix.report.state import ReportState, litellm_cost_callback
+from strix.report.usage import LLMUsageLedger, is_custom_api_base
 
 
 if TYPE_CHECKING:
@@ -430,7 +430,14 @@ def test_callers_price_a_catalog_bare_model_under_its_listed_provider() -> None:
     ]
 
 
-def _usage_cost(model: str, cost_map: dict[str, dict[str, float]]) -> list[str]:
+def _usage_cost(
+    model: str,
+    cost_map: dict[str, dict[str, float]],
+    *,
+    agent_id: str = "a",
+    custom_base: bool = False,
+    dedupe_custom_base: bool = False,
+) -> list[str]:
     original = litellm.model_cost
     _with_cost_map(cost_map)
     asked: list[str] = []
@@ -441,7 +448,10 @@ def _usage_cost(model: str, cost_map: dict[str, dict[str, float]]) -> list[str]:
 
     try:
         with patch("litellm.completion_cost", side_effect=fake_completion_cost):
-            LLMUsageLedger().record(agent_id="a", usage=_usage(1000, 200), model=model)
+            ledger = LLMUsageLedger()
+            ledger.custom_base = custom_base
+            ledger.dedupe_custom_base = dedupe_custom_base
+            ledger.record(agent_id=agent_id, usage=_usage(1000, 200), model=model)
     finally:
         litellm.model_cost = original
         resolve_litellm_model.cache_clear()
@@ -454,3 +464,55 @@ def test_ledger_leaves_a_wrapped_name_unpriced_when_candidates_disagree() -> Non
 
 def test_ledger_prices_a_first_party_route_on_its_default_base() -> None:
     assert _usage_cost("glm-5", _DISAGREEING) == ["zai/glm-5"]
+
+
+def test_ledger_leaves_a_bare_model_unpriced_behind_a_custom_base() -> None:
+    assert _usage_cost("glm-5", _DISAGREEING, custom_base=True) == []
+
+
+def test_ledger_still_prices_a_bare_model_with_no_custom_base() -> None:
+    assert _usage_cost("glm-5", _DISAGREEING) == ["zai/glm-5"]
+
+
+def test_dedupe_base_is_handled_separately_from_the_main_base() -> None:
+    main_only = _usage_cost("glm-5", _DISAGREEING, agent_id="dedupe", custom_base=True)
+    dedupe_only = _usage_cost("glm-5", _DISAGREEING, agent_id="dedupe", dedupe_custom_base=True)
+    assert main_only == ["zai/glm-5"]
+    assert dedupe_only == []
+    assert _usage_cost("glm-5", _DISAGREEING, dedupe_custom_base=True) == ["zai/glm-5"]
+
+
+def test_a_provider_default_base_is_not_a_custom_base() -> None:
+    assert not is_custom_api_base(None)
+    assert not is_custom_api_base("  ")
+    assert not is_custom_api_base("https://api.openai.com/v1")
+    assert not is_custom_api_base("https://api.moonshot.ai/v1")
+    assert not is_custom_api_base("https://dashscope.aliyuncs.com/compatible-mode/v1")
+    assert is_custom_api_base("http://localhost:4000/v1")
+
+
+def _bases(monkeypatch: pytest.MonkeyPatch, **env: str) -> tuple[bool, bool]:
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(loader, "_cached", None)
+    ledger = ReportState(run_name="bases")._llm_usage
+    return ledger.custom_base, ledger.dedupe_custom_base
+
+
+def test_dedupe_without_its_own_model_follows_the_main_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _bases(monkeypatch, LLM_API_BASE="http://gateway.local/v1") == (True, True)
+
+
+def test_dedupe_with_its_own_model_uses_only_its_own_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = {"LLM_API_BASE": "http://gateway.local/v1", "STRIX_DEDUPE_MODEL": "glm-5"}
+    assert _bases(monkeypatch, **env) == (True, False)
+
+
+def test_a_stray_dedupe_base_without_a_dedupe_model_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _bases(monkeypatch, DEDUPE_LLM_API_BASE="http://gateway.local/v1") == (False, False)

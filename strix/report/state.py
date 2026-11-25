@@ -219,12 +219,17 @@ class ReportState:
         self.scan_config: dict[str, Any] | None = None
         # Imported here so importing this module never enters the agents SDK
         # package (which the warm-up thread may be initializing concurrently).
-        from strix.report.usage import LLMUsageLedger
+        from strix.report.usage import LLMUsageLedger, is_custom_api_base
 
         self._llm_usage = LLMUsageLedger()
         self._telemetry_llm_usage_baseline: dict[str, Any] = {}
         auth_mode = codex.auth_mode(load_settings().llm.model)
         self._llm_usage.zero_cost = auth_mode == "subscription"
+        settings = load_settings()
+        self._llm_usage.custom_base = is_custom_api_base(settings.llm.api_base)
+        # Without a dedicated dedupe model, dedupe runs on the main endpoint.
+        dedupe_base = settings.dedupe.api_base if settings.dedupe.model else settings.llm.api_base
+        self._llm_usage.dedupe_custom_base = is_custom_api_base(dedupe_base)
         self.run_record: dict[str, Any] = {
             "run_id": self.run_id,
             "run_name": self.run_name,
