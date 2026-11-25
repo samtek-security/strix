@@ -49,16 +49,11 @@ def test_resolves_common_bare_model_names() -> None:
     resolve_litellm_model.cache_clear()
     assert resolve_litellm_model("deepseek-v4-flash") == "deepseek/deepseek-v4-flash"
     assert resolve_litellm_model("openai/deepseek-v4-flash") == "deepseek/deepseek-v4-flash"
-    # LiteLLM prices grok-4.5 identically under xai/, perplexity/xai/ and
-    # openrouter/x-ai/, so the resolver may return any of them; the contract
-    # is a provider-qualified name LiteLLM can price.
-    grok = resolve_litellm_model("grok-4.5")
-    assert grok is not None
-    assert grok.endswith("/grok-4.5")
-    assert grok in litellm.model_cost
-    # MiniMax-M3 is sold by several LiteLLM providers at different prices, so
-    # the resolver must not guess from its bare name. A provider-qualified
-    # model remains deterministic.
+    # Resellers list grok-4.5 under their own prefixes, so the resolver
+    # prefers the first-party xai/ route whatever the resellers charge.
+    assert resolve_litellm_model("grok-4.5") == "xai/grok-4.5"
+    assert "xai/grok-4.5" in litellm.model_cost
+    # A provider-qualified model remains deterministic.
     assert resolve_litellm_model("minimax/MiniMax-M3") == "minimax/MiniMax-M3"
 
 
@@ -266,6 +261,71 @@ def test_resolver_does_not_guess_between_differently_priced_providers() -> None:
     try:
         resolve_litellm_model.cache_clear()
         assert resolve_litellm_model("example") is None
+    finally:
+        litellm.model_cost = original
+        resolve_litellm_model.cache_clear()
+
+
+def _with_cost_map(cost_map: dict[str, dict[str, float]]) -> None:
+    litellm.model_cost = cost_map
+    resolve_litellm_model.cache_clear()
+
+
+def test_resolver_prefers_first_party_route_when_resellers_disagree() -> None:
+    original = litellm.model_cost
+    # Shape of the remote cost map: one model, several resellers, three prices.
+    _with_cost_map(
+        {
+            "xai/grok-4.5": {"input_cost_per_token": 2e-6, "output_cost_per_token": 6e-6},
+            "perplexity/xai/grok-4.5": {
+                "input_cost_per_token": 3e-6,
+                "output_cost_per_token": 9e-6,
+            },
+            "openrouter/x-ai/grok-4.5": {
+                "input_cost_per_token": 2.5e-6,
+                "output_cost_per_token": 7e-6,
+            },
+        }
+    )
+    try:
+        assert resolve_litellm_model("grok-4.5") == "xai/grok-4.5"
+        assert resolve_litellm_model("openai/grok-4.5") == "xai/grok-4.5"
+    finally:
+        litellm.model_cost = original
+        resolve_litellm_model.cache_clear()
+
+
+def test_first_party_rule_applies_to_other_publishers() -> None:
+    original = litellm.model_cost
+    _with_cost_map(
+        {
+            "openrouter/deepseek/deepseek-x": {
+                "input_cost_per_token": 2.0,
+                "output_cost_per_token": 3.0,
+            },
+            "deepseek/deepseek-x": {"input_cost_per_token": 1.0, "output_cost_per_token": 2.0},
+            "bedrock/claude-y": {"input_cost_per_token": 5.0, "output_cost_per_token": 6.0},
+            "anthropic/claude-y": {"input_cost_per_token": 4.0, "output_cost_per_token": 5.0},
+        }
+    )
+    try:
+        assert resolve_litellm_model("deepseek-x") == "deepseek/deepseek-x"
+        assert resolve_litellm_model("claude-y") == "anthropic/claude-y"
+    finally:
+        litellm.model_cost = original
+        resolve_litellm_model.cache_clear()
+
+
+def test_resolver_returns_none_when_no_first_party_route_exists() -> None:
+    original = litellm.model_cost
+    _with_cost_map(
+        {
+            "perplexity/xai/grok-9": {"input_cost_per_token": 3.0, "output_cost_per_token": 9.0},
+            "openrouter/x-ai/grok-9": {"input_cost_per_token": 2.0, "output_cost_per_token": 7.0},
+        }
+    )
+    try:
+        assert resolve_litellm_model("grok-9") is None
     finally:
         litellm.model_cost = original
         resolve_litellm_model.cache_clear()
