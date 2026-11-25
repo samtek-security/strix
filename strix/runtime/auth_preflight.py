@@ -34,8 +34,9 @@ Two extensions on top of the above:
   reported authenticated. On ANY successful preflight (fresh login or resume) the result carries
   back the current ``storage_state`` text (``result["storage_state"]``) so the caller can persist
   it for the next run.
-- **OIDC/SSO handoff**: a login that redirects to a different origin matching a known
-  identity-provider pattern can't be completed by ``recon-browser``'s deterministic form-fill (the
+- **OIDC/SSO handoff** (OFF by default; ``RECON_AUTH_OIDC_HANDOFF=1`` enables it, and enabling
+  it is gated on per-flow issuer/client_id validation, issue #122 item 3): a login that
+  redirects to a different origin matching a known identity-provider pattern can't be completed by ``recon-browser``'s deterministic form-fill (the
   target's OWN login page is often just a redirect, not a form). Such a role is flagged
   (``result["needs_agent_oidc"]``) rather than just reported failed, with the provider URL the
   agent should drive the redirect/consent sequence in. ``reverify_role`` lets a caller re-run the
@@ -199,6 +200,14 @@ def _origin(url: str) -> str:
         return ""
 
 
+def _oidc_handoff_enabled() -> bool:
+    """The agent-driven OIDC hand-off is OFF unless ``RECON_AUTH_OIDC_HANDOFF=1`` is set. A host
+    allowlist cannot tell an operator's OAuth client from an attacker-registered one on the same
+    provider, so enabling this is gated on per-flow issuer/client_id/redirect validation (issue
+    #122 item 3). Off, a redirect to an identity provider is an ordinary login failure."""
+    return os.environ.get("RECON_AUTH_OIDC_HANDOFF", "0").strip() == "1"
+
+
 def _is_approved_oidc_host(hostname: str, flow: dict) -> bool:
     """Exact match or proper subdomain match only - never a substring match against the whole
     URL, so a lookalike host (``okta.com.attacker.example``) or a path signature on an arbitrary
@@ -250,6 +259,8 @@ async def _check_oidc_handoff(
     """Check whether we are sitting on an approved external identity provider's page rather than
     just having failed. Returns an enrichment dict (``needs_agent_oidc``, ``oidc_provider_url``)
     or None when this isn't an OIDC hand-off."""
+    if not _oidc_handoff_enabled():
+        return None
     ok_url, cur_url = await _run(
         session, "recon-browser", "--session-name", session_name, "get", "url")
     if ok_url and cur_url and _looks_like_oidc_redirect(login_url, cur_url, flow):
@@ -505,8 +516,8 @@ async def preflight_role(
         return result
     try:
         parsed_login = urlsplit(login_url)
-        login_is_idp = parsed_login.scheme.lower() == "https" and _is_approved_oidc_host(
-            (parsed_login.hostname or "").lower(), flow)
+        login_is_idp = _oidc_handoff_enabled() and parsed_login.scheme.lower() == "https" and (
+            _is_approved_oidc_host((parsed_login.hostname or "").lower(), flow))
     except ValueError:  # a malformed login_url just means "not an IdP" - never raise from here
         login_is_idp = False
     if external_state and _looks_like_a_session_blob(external_state):
