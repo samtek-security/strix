@@ -321,6 +321,10 @@ async def _run_agent_loop(
         interrupt_on_message=interactive,
         resumable=interactive,
     )
+    # Unsettled from the moment the runtime exists: the identity/task seed
+    # below writes to the session before _run_cycle's own loop (and its own
+    # mark_turn_unsettled) ever runs, and turn_settled defaults to settled.
+    await coordinator.mark_turn_unsettled(agent_id)
     result: RunResultBase | None = None
 
     first_cycle_input = await _seed_and_prepare_first_input(
@@ -649,6 +653,10 @@ async def _run_until_lifecycle(
                 # Stopped while parked (operator stop or a parent's stop_agent).
                 await coordinator.reset_recovery(agent_id)
                 return result
+            # Resuming into another turn: unsettled before the mailbox drain
+            # below writes to the session, for the same reason as the nudge
+            # write further down this loop.
+            await coordinator.mark_turn_unsettled(agent_id)
             await coordinator.consume_pending(agent_id)
             if session is not None:
                 input_data = []
@@ -677,6 +685,13 @@ async def _run_until_lifecycle(
         if recoveries >= recovery_limit:
             return await _exhausted_recovery(coordinator, agent_id, result, interactive=interactive)
 
+        # The previous _run_cycle call already settled (mark_turn_settled fired
+        # on its way out), but this nudge write happens here, outside that
+        # cycle's own bracket, before the next _run_cycle call clears the
+        # event again at its own top. Without this, a stop landing in this
+        # exact window would read a stale "settled" signal while this write
+        # (and the whole next turn it triggers) is still ahead of it.
+        await coordinator.mark_turn_unsettled(agent_id)
         input_data = await _append_tool_required_message(
             session=session,
             context=context,

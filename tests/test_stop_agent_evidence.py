@@ -339,7 +339,7 @@ def test_bound_evidence_preserves_custom_tool_call_evidence() -> None:
         {"type": "custom_tool_call_output", "call_id": "call-1", "output": "patch applied"},
     ]
 
-    payload, truncated = agents_graph_tools._bound_evidence(items, max_items=60, max_bytes=10_000)
+    payload, truncated = agents_graph_tools._bound_evidence(items, max_items=60)
 
     assert truncated is False
     assert payload == [
@@ -363,28 +363,73 @@ def test_bound_evidence_drops_a_leading_orphaned_output() -> None:
 
     # max_items=2 would naively keep [the output, the trailing message] and
     # orphan the output from its call.
-    payload, truncated = agents_graph_tools._bound_evidence(items, max_items=2, max_bytes=10_000)
+    payload, truncated = agents_graph_tools._bound_evidence(items, max_items=2)
 
     assert truncated is True
     assert payload == [{"role": "assistant", "content": "kept"}]
 
 
-def test_bound_evidence_respects_a_byte_budget_even_under_the_item_cap() -> None:
-    items: list[Any] = []
-    for i in range(5):
-        items.append(
-            {"type": "function_call", "call_id": f"c{i}", "name": "http_request", "arguments": "{}"}
-        )
-        items.append({"type": "function_call_output", "call_id": f"c{i}", "output": "x" * 500})
+def test_bound_evidence_drops_an_orphaned_output_from_interleaved_parallel_calls() -> None:
+    # Parallel tool calls can persist as call A, call B, output A, output B -
+    # not call A, output A, call B, output B. A naive "check only the first
+    # kept item" filter misses output A here: it isn't first, call B is.
+    items = [
+        {
+            "type": "function_call",
+            "call_id": "cut-off-a",
+            "name": "http_request",
+            "arguments": "{}",
+        },
+        {"type": "function_call", "call_id": "kept-b", "name": "http_request", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "cut-off-a", "output": "200 OK (a)"},
+        {"type": "function_call_output", "call_id": "kept-b", "output": "200 OK (b)"},
+    ]
 
-    payload, truncated = agents_graph_tools._bound_evidence(items, max_items=60, max_bytes=800)
+    # max_items=3 keeps [call B, output A, output B]; output A's call is cut.
+    payload, truncated = agents_graph_tools._bound_evidence(items, max_items=3)
 
     assert truncated is True
-    serialized = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
-    assert len(serialized) <= 800
-    # What survives is still a complete call/output pair, not a dangling half.
-    assert payload[0]["type"] == "function_call"
-    assert payload[0]["call_id"] == payload[1]["call_id"]
+    assert payload == [
+        {"type": "function_call", "call_id": "kept-b", "name": "http_request", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "kept-b", "output": "200 OK (b)"},
+    ]
+
+
+def test_fit_evidence_to_byte_cap_trims_the_largest_entry_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    small = [{"role": "assistant", "content": "short lead"}]
+    large: list[Any] = []
+    for i in range(10):
+        large.append(
+            {"type": "function_call", "call_id": f"c{i}", "name": "http_request", "arguments": "{}"}
+        )
+        large.append({"type": "function_call_output", "call_id": f"c{i}", "output": "x" * 200})
+
+    stopped_agents = [
+        {"agent_id": "a", "name": "A", "evidence_settled": True, "evidence": list(small)},
+        {"agent_id": "b", "name": "B", "evidence_settled": True, "evidence": list(large)},
+    ]
+    result = {"success": True, "stopped_agents": stopped_agents}
+
+    class _Context:
+        tool_output_max_bytes = 1024
+
+    class _Settings:
+        context = _Context()
+
+    monkeypatch.setattr(agents_graph_tools, "load_settings", _Settings)
+
+    agents_graph_tools._fit_evidence_to_byte_cap(
+        result, stopped_agents, {"a": len(small), "b": len(large)}
+    )
+
+    assert agents_graph_tools._result_byte_size(result) <= 1024
+    # The small entry is untouched; the large one took the cut.
+    assert stopped_agents[0]["evidence"] == small
+    assert len(stopped_agents[1]["evidence"]) < len(large)
+    assert stopped_agents[1]["evidence_truncated"] is True
+    assert stopped_agents[1]["evidence_total_items"] == len(large)
 
 
 @pytest.mark.asyncio
@@ -426,3 +471,39 @@ async def test_stop_agent_preserves_custom_tool_call_evidence() -> None:
         },
         {"type": "custom_tool_call_output", "call_id": "patch-1", "output": "applied"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_stop_agent_result_stays_under_a_small_configured_byte_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Context:
+        tool_output_max_bytes = 1024
+
+    class _Settings:
+        context = _Context()
+
+    monkeypatch.setattr(agents_graph_tools, "load_settings", _Settings)
+
+    coordinator = await _graph()
+    items: list[Any] = []
+    for i in range(10):
+        items.append(
+            {"type": "function_call", "call_id": f"c{i}", "name": "http_request", "arguments": "{}"}
+        )
+        items.append({"type": "function_call_output", "call_id": f"c{i}", "output": "x" * 200})
+    await coordinator.attach_runtime("child", session=FakeSession(items))
+
+    result = await _call(
+        stop_agent,
+        coordinator,
+        "root",
+        {"target_agent_id": "child", "cascade": False},
+    )
+
+    # _call already round-tripped this through json.dumps/json.loads, so a
+    # non-JSON preview from the generic wrapper would have failed there - the
+    # assertion is really that stop_agent produced one on its own, not that.
+    assert result["success"] is True
+    entry = result["stopped_agents"][0]
+    assert entry["evidence_truncated"] is True

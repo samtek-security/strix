@@ -60,12 +60,14 @@ class AgentRuntime:
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     mailbox: list[dict[str, Any]] = field(default_factory=list)
     user_wake_required: bool = False
-    # Cleared by attach_stream when a cycle starts, set by mark_turn_settled
-    # once it truly ends and every write for that turn (including a crash's
-    # salvage write) has landed. An interactive agent's background task keeps
-    # running (it parks in wait_for_message) after a stop, so the task
-    # finishing is not a usable "turn is over"
-    # signal — this event is.
+    # Cleared by mark_turn_unsettled/attach_stream before each point in
+    # execution.py that writes to this agent's session (a cycle starting,
+    # the initial seed, a recovery nudge, a post-pause mailbox drain), set
+    # by mark_turn_settled once a cycle truly ends and every write for it
+    # (including a crash's salvage write) has landed. An interactive
+    # agent's background task keeps running (it parks in wait_for_message)
+    # after a stop, so the task finishing is not a usable "turn is over"
+    # signal — this event is, for a non-interactive agent.
     turn_settled: asyncio.Event = field(default_factory=_settled_event)
 
 

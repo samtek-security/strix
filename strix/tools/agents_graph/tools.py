@@ -314,63 +314,76 @@ def _session_items_payload(items: list[Any]) -> list[dict[str, Any]]:
     return payload
 
 
-def _drop_leading_orphaned_outputs(items: list[Any]) -> list[Any]:
-    """Drop a leading function_call_output/custom_tool_call_output whose
-    matching call got cut off by truncation. An orphaned output has no tool
-    name or arguments, just a dangling call_id and a result nobody can trace
-    back to what produced it."""
+def _drop_orphaned_outputs(items: list[Any]) -> list[Any]:
+    """Drop every function_call_output/custom_tool_call_output whose
+    matching call isn't in this list (truncation cut it, or it's not
+    adjacent — parallel calls can persist as call A, call B, output A,
+    output B, so a cut can orphan one without being at either end). An
+    orphaned output has no tool name or arguments, just a dangling call_id
+    and a result nobody can trace back to what produced it."""
     call_ids = {
         item.get("call_id")
         for item in items
         if isinstance(item, dict) and item.get("type") in _CALL_ITEM_TYPES
     }
-    start = 0
-    while start < len(items):
-        item = items[start]
-        if (
+    return [
+        item
+        for item in items
+        if not (
             isinstance(item, dict)
             and item.get("type") in _OUTPUT_ITEM_TYPES
             and item.get("call_id") not in call_ids
-        ):
-            start += 1
-            continue
-        break
-    return items[start:]
+        )
+    ]
 
 
-_EVIDENCE_SCAFFOLD_RESERVE_BYTES = 2048
-
-
-def _evidence_byte_budget(agent_count: int) -> int:
-    """Per-agent byte budget for one stop_agent call's evidence, comfortably
-    under the generic per-tool-result cap every tool's output already gets.
-    Staying under it ourselves means a large evidence blob gets our own
-    clean, still-valid-JSON truncation instead of that generic wrapper's
-    non-JSON head/tail preview, which would hide evidence in the middle."""
-    max_bytes = load_settings().context.tool_output_max_bytes
-    usable = max(max_bytes - _EVIDENCE_SCAFFOLD_RESERVE_BYTES, 1024)
-    return max(usable // max(agent_count, 1), 512)
-
-
-def _bound_evidence(
-    items: list[Any], *, max_items: int, max_bytes: int
-) -> tuple[list[dict[str, Any]], bool]:
-    """Bound one agent's evidence by item count and by serialized bytes,
-    keeping call/output pairs together. Returns the bounded payload and
-    whether anything was cut."""
+def _bound_evidence(items: list[Any], *, max_items: int) -> tuple[list[dict[str, Any]], bool]:
+    """Bound one agent's evidence by item count, keeping call/output pairs
+    together. Byte-bounding the complete response happens separately, once
+    every agent's evidence is assembled — see ``_fit_evidence_to_byte_cap``.
+    Returns the bounded payload and whether anything was cut."""
     total = len(items)
     bounded = items[-max_items:] if total > max_items else list(items)
-    bounded = _drop_leading_orphaned_outputs(bounded)
+    bounded = _drop_orphaned_outputs(bounded)
     truncated = len(bounded) < total
-    payload = _session_items_payload(bounded)
-    while bounded:
-        size = len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
-        if size <= max_bytes:
+    return _session_items_payload(bounded), truncated
+
+
+def _result_byte_size(result: dict[str, Any]) -> int:
+    return len(json.dumps(result, ensure_ascii=False, default=str).encode("utf-8"))
+
+
+_RESULT_BYTE_CAP_MARGIN = 256
+
+
+def _fit_evidence_to_byte_cap(
+    result: dict[str, Any],
+    stopped_agents: list[dict[str, Any]],
+    total_items_by_agent: dict[str, int],
+) -> None:
+    """Shrink stopped_agents' evidence in place until the whole stop_agent
+    result fits the tool-output byte cap every tool's result is bound to.
+
+    Each agent's evidence is already item-count-bounded, but that bounds
+    item count, not bytes — one agent's evidence, or several added
+    together, can still be the one thing that pushes the complete response
+    over the cap the generic per-tool-result wrapper enforces. Missing this
+    means that wrapper replaces the whole response with a non-JSON
+    head/tail preview, which would hide evidence in the middle rather than
+    say plainly how much was cut. Trims from whichever entry currently
+    holds the most evidence, so one huge session doesn't starve the rest.
+    """
+    cap = max(load_settings().context.tool_output_max_bytes - _RESULT_BYTE_CAP_MARGIN, 512)
+    while _result_byte_size(result) > cap:
+        candidates = [e for e in stopped_agents if e.get("evidence")]
+        if not candidates:
             break
-        bounded = _drop_leading_orphaned_outputs(bounded[1:])
-        truncated = True
-        payload = _session_items_payload(bounded)
-    return payload, truncated
+        target = max(candidates, key=lambda e: len(json.dumps(e["evidence"], default=str)))
+        target["evidence"] = _drop_orphaned_outputs(target["evidence"][1:])
+        target["evidence_truncated"] = True
+        target["evidence_total_items"] = total_items_by_agent.get(
+            target["agent_id"], len(target["evidence"])
+        )
 
 
 _WAIT_DEFAULT_TIMEOUT_S = 300
@@ -974,8 +987,8 @@ async def stop_agent(
     # target covers every agent in ``stopped``.
     may_read_evidence = me is not None and await coordinator.is_ancestor(me, target_agent_id)
     join_timeout = _STOP_AGENT_EVIDENCE_BUDGET_S / max(len(stopped), 1)
-    evidence_byte_budget = _evidence_byte_budget(len(stopped))
     evidence: list[dict[str, Any]] = []
+    total_items_by_agent: dict[str, int] = {}
     for aid in stopped:
         if not may_read_evidence:
             evidence.append(
@@ -998,10 +1011,8 @@ async def stop_agent(
                 }
             )
             continue
-        total_items = len(items)
-        bounded_payload, truncated = _bound_evidence(
-            items, max_items=_EVIDENCE_MAX_ITEMS_PER_AGENT, max_bytes=evidence_byte_budget
-        )
+        total_items_by_agent[aid] = len(items)
+        bounded_payload, truncated = _bound_evidence(items, max_items=_EVIDENCE_MAX_ITEMS_PER_AGENT)
         entry: dict[str, Any] = {
             "agent_id": aid,
             "name": names.get(aid, aid),
@@ -1010,7 +1021,7 @@ async def stop_agent(
         }
         if truncated:
             entry["evidence_truncated"] = True
-            entry["evidence_total_items"] = total_items
+            entry["evidence_total_items"] = total_items_by_agent[aid]
         evidence.append(entry)
 
     logger.info(
@@ -1032,15 +1043,17 @@ async def stop_agent(
             "list_reports for what it already filed."
         )
     )
+    result = {
+        "success": True,
+        "target_agent_id": target_agent_id,
+        "cascade": cascade,
+        "reason": reason,
+        "note": note,
+        "stopped_agents": evidence,
+    }
+    _fit_evidence_to_byte_cap(result, evidence, total_items_by_agent)
     return json.dumps(
-        {
-            "success": True,
-            "target_agent_id": target_agent_id,
-            "cascade": cascade,
-            "reason": reason,
-            "note": note,
-            "stopped_agents": evidence,
-        },
+        result,
         ensure_ascii=False,
         default=str,
     )

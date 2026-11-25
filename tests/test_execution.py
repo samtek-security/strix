@@ -1056,6 +1056,47 @@ async def test_run_agent_loop_seeds_identity_before_first_cycle(
     session.close()
 
 
+@pytest.mark.asyncio
+async def test_run_agent_loop_unsettles_before_the_identity_seed(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """turn_settled defaults to settled; without an explicit unsettle at the
+    top of _run_agent_loop, a stop landing before the identity seed below
+    would read that stale default instead of "a write is in flight"."""
+    coordinator = AgentCoordinator()
+    await coordinator.register("child", "recon", parent_id="root")
+    session = SQLiteSession("child", tmp_path / "agents.db")
+
+    seen_unsettled_before_first_cycle = []
+
+    async def _record_and_crash(*_args: Any, **_kwargs: Any) -> Any:
+        seen_unsettled_before_first_cycle.append(
+            coordinator.runtimes["child"].turn_settled.is_set()
+        )
+        raise RuntimeError("first-turn crash")
+
+    monkeypatch.setattr(execution, "_run_cycle", _record_and_crash)
+
+    identity = [{"role": "user", "content": "You are agent recon (abc)."}]
+    with pytest.raises(RuntimeError, match="first-turn crash"):
+        await execution.run_agent_loop(
+            agent=object(),
+            initial_input=identity,
+            run_config=None,  # type: ignore[arg-type]
+            context={"agent_id": "child", "parent_id": "root"},
+            max_turns=5,
+            coordinator=coordinator,
+            agent_id="child",
+            interactive=False,
+            session=session,
+        )
+
+    # Unsettled by the time the first cycle runs - the identity seed (which
+    # ran just before it) is covered, not read back as stale-settled.
+    assert seen_unsettled_before_first_cycle == [False]
+    session.close()
+
+
 def _scripted_cycle(
     coordinator: AgentCoordinator,
     agent_id: str,
