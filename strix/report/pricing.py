@@ -43,8 +43,16 @@ def _first_party_match(name: str, matches: list[str]) -> str | None:
     return None
 
 
-def _pick_match(name: str, matches: list[str], model_cost: dict[str, dict[str, Any]]) -> str | None:
-    first_party = _first_party_match(name, matches)
+def _pick_match(
+    name: str,
+    matches: list[str],
+    model_cost: dict[str, dict[str, Any]],
+    *,
+    bare: bool,
+) -> str | None:
+    # A provider-qualified request named its route, so only a bare name is
+    # steered to the first-party one.
+    first_party = _first_party_match(name, matches) if bare else None
     if first_party is not None:
         return first_party
     prices = {
@@ -93,7 +101,7 @@ def resolve_litellm_model(model: str) -> str | None:
             matches = sorted(key for key in model_cost if key.endswith(f"/{name}"))
             if not matches:
                 continue
-            picked = _pick_match(name, matches, model_cost)
+            picked = _pick_match(name, matches, model_cost, bare="/" not in normalized)
             if picked is not None:
                 return picked
         return None  # noqa: TRY300

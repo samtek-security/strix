@@ -329,3 +329,19 @@ def test_resolver_returns_none_when_no_first_party_route_exists() -> None:
     finally:
         litellm.model_cost = original
         resolve_litellm_model.cache_clear()
+
+
+def test_first_party_rule_does_not_override_an_explicit_route() -> None:
+    original = litellm.model_cost
+    _with_cost_map(
+        {
+            "zai/glm-5": {"input_cost_per_token": 1.0, "output_cost_per_token": 2.0},
+            "gateway-a/glm-5": {"input_cost_per_token": 3.0, "output_cost_per_token": 4.0},
+        }
+    )
+    try:
+        assert resolve_litellm_model("gateway-b/glm-5") is None
+        assert resolve_litellm_model("glm-5") == "zai/glm-5"
+    finally:
+        litellm.model_cost = original
+        resolve_litellm_model.cache_clear()
