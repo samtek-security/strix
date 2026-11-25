@@ -21,7 +21,7 @@ _FIRST_PARTY_PROVIDERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("gemini", ("gemini", "vertex_ai")),
     ("deepseek", ("deepseek",)),
     ("mistral", ("mistral",)),
-    ("codestral", ("codestral", "mistral")),
+    ("codestral", ("mistral", "codestral")),
     ("command", ("cohere", "cohere_chat")),
     ("minimax", ("minimax",)),
     ("kimi", ("moonshot",)),
