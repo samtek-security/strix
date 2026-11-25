@@ -23,11 +23,30 @@ Non-standard flows (custom multi-step / natural-language ``login_steps``) are in
 scripted here - recon-browser's ``auth login`` auto-detects standard form fields; anything it
 can't handle falls back to the agent's own prompt-driven login. Best-effort throughout: a role
 that errors is reported failed, never crashes the scan.
+
+Two extensions on top of the above:
+
+- **Cross-run resume** (``external_state``): the caller (the host, outside this module) may hand
+  ``preflight_role``/``run_auth_preflight`` a previously-saved ``storage_state`` blob for a role,
+  already freshness-checked by the caller (keyed by tenant/target/role, not this module's
+  concern). It is written into the sandbox and run through the SAME 3-part ``_verify`` before
+  anything is trusted - an invalid/expired blob falls straight through to a full login, never
+  reported authenticated. On ANY successful preflight (fresh login or resume) the result carries
+  back the current ``storage_state`` text (``result["storage_state"]``) so the caller can persist
+  it for the next run.
+- **OIDC/SSO handoff**: a login that redirects to a different origin matching a known
+  identity-provider pattern can't be completed by ``recon-browser``'s deterministic form-fill (the
+  target's OWN login page is often just a redirect, not a form). Such a role is flagged
+  (``result["needs_agent_oidc"]``) rather than just reported failed, with the provider URL the
+  agent should drive the redirect/consent sequence in. ``reverify_role`` lets a caller re-run the
+  unchanged 3-part check afterward, once the agent believes it has landed on an authenticated
+  page - the host verification is never weakened or bypassed for an agent-driven login.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import binascii
 import json
 import logging
@@ -37,6 +56,7 @@ import shlex
 import shutil
 import time
 from typing import Any, Awaitable, Callable, Protocol
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +64,12 @@ logger = logging.getLogger(__name__)
 _STATE_DIR = "/workspace/.recon-auth"
 AUTH_STATE_DIR = _STATE_DIR  # public alias
 _LOGIN_PAGE_RE = re.compile(r"(login|signin|sign-in|/auth\b|/sso\b|/oauth)", re.I)
+# A known identity-provider path/host signature. Matched only against a URL whose ORIGIN already
+# differs from the target's login_url - an OIDC endpoint hosted ON the target itself (same origin)
+# is not a hand-off the agent needs to drive differently, so origin-change gates this regex too.
+_OIDC_PROVIDER_RE = re.compile(
+    r"(/oauth2?/|/openid|/authorize\b|/oidc\b|/sso/|login\.microsoftonline\.|accounts\.google\.|"
+    r"okta\.com|auth0\.com|onelogin\.com|pingidentity\.com)", re.I)
 
 
 class _ExecResult(Protocol):
@@ -120,6 +146,66 @@ async def purge_auth_state(session: Any) -> bool:
         return False
 
 
+async def _write_state_file(session: Any, path: str, raw_json: str) -> bool:
+    """Write a HOST-provided ``storage_state`` blob into the sandbox at ``path``.
+
+    There is no assumed stdin API on the exec Protocol this module targets (see ``_ExecResult`` /
+    ``ExecFn`` above), so the content travels base64-encoded as a single shell-quoted argv value -
+    the same "one shell command, every interpolated value quoted" shape ``_do_login`` already uses.
+    Never trusts the content's shape: the caller's own ``_verify`` JSON-parse + cookie/origin check
+    is what actually gates authentication, so a garbage blob here just fails that check, same as
+    any other unreadable state file. Returns False on any failure; never raises."""
+    try:
+        blob = base64.b64encode(raw_json.encode("utf-8")).decode("ascii")
+    except Exception:  # noqa: BLE001
+        return False
+    dirname = path.rsplit("/", 1)[0] or "/"
+    cmd = (
+        f"mkdir -p {shlex.quote(dirname)} && printf '%s' {shlex.quote(blob)} "
+        f"| base64 -d > {shlex.quote(path)}"
+    )
+    ok, _ = await _run(session, cmd, shell=True)
+    return ok
+
+
+def _origin(url: str) -> str:
+    try:
+        parts = urlsplit(url or "")
+        if not parts.scheme or not parts.netloc:
+            return ""
+        return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+    except ValueError:
+        return ""
+
+
+def _looks_like_oidc_redirect(login_url: str, current_url: str) -> bool:
+    """A login that lands on a DIFFERENT origin matching a known identity-provider signature is an
+    OIDC/SSO hand-off the deterministic form-login can't complete - distinct from simply being
+    bounced back to the target's own login page (``_LOGIN_PAGE_RE``), which is an ordinary failure."""
+    login_origin, current_origin = _origin(login_url), _origin(current_url)
+    if not current_origin or current_origin == login_origin:
+        return False
+    return bool(_OIDC_PROVIDER_RE.search(current_url or ""))
+
+
+async def _check_oidc_handoff(session: Any, session_name: str, login_url: str) -> dict | None:
+    """After a login attempt that did not land us authenticated, check whether we are sitting on
+    an external identity provider's page rather than just having failed. Returns an enrichment
+    dict (``needs_agent_oidc``, ``oidc_provider_url``) or None when this isn't an OIDC hand-off."""
+    ok_url, cur_url = await _run(session, "recon-browser", "--session-name", session_name, "get", "url")
+    if ok_url and cur_url and _looks_like_oidc_redirect(login_url, cur_url):
+        return {"needs_agent_oidc": True, "oidc_provider_url": cur_url}
+    return None
+
+
+def _oidc_handoff_reason(provider_url: str, session_name: str) -> str:
+    return (
+        f"login redirected to an external identity provider at {provider_url} - the "
+        f"deterministic form login can't complete this; the agent must drive the redirect/"
+        f"consent sequence in session '{session_name}'"
+    )
+
+
 def _parse_success_condition(cond: str) -> tuple[str, str]:
     """('url_contains:/dashboard') -> ('url_contains', '/dashboard'). '' -> ('', '')."""
     cond = (cond or "").strip()
@@ -177,6 +263,9 @@ async def _verify(session: Any, flow: dict, session_name: str, state_path: str, 
         except (json.JSONDecodeError, ValueError):
             cookies_ok = False
     checks["saved_state"] = cookies_ok
+    # Raw state text for a caller that wants to persist it (cross-run resume) - only handed back
+    # when it actually passed the parseable-with-real-cookies check above, never a bogus blob.
+    state_text = cat if cookies_ok else ""
 
     # (1) semantic success_condition the operator declared.
     declared = bool((flow.get("success_condition") or "").strip())
@@ -213,7 +302,10 @@ async def _verify(session: Any, flow: dict, session_name: str, state_path: str, 
     # was declared) AND the protected probe. Any missing signal => not authenticated.
     sem_ok = checks["success_condition"] if "success_condition" in checks else probe_ok
     authenticated = bool(cookies_ok and sem_ok and probe_ok)
-    return {"authenticated": authenticated, "checks": checks}
+    return {
+        "authenticated": authenticated, "checks": checks,
+        "state_text": state_text if authenticated else "",
+    }
 
 
 def _safe_mfa_timeout(raw: str | None, default: float = 90.0) -> float:
@@ -282,7 +374,6 @@ def _totp_code(seed: str, *, now: float | None = None, step: int = 30, digits: i
     the control plane from the data-collection form, never echoed to the agent), the code is derived
     deterministically, and the preflight fills + submits it exactly like the email-OTP path. Returns
     None on a malformed/absent seed (fail closed -> the agent prompts for it as before)."""
-    import base64
     import hashlib
     import hmac as _hmac
     import struct
@@ -324,8 +415,14 @@ async def _complete_totp(session: Any, flow: dict, session_name: str, role: str)
     return True, "TOTP MFA: code entered"
 
 
-async def preflight_role(session: Any, flow: dict, *, target_url: str) -> dict:
-    """Log in + verify ONE role. Returns a result dict (never raises)."""
+async def preflight_role(session: Any, flow: dict, *, target_url: str, external_state: str | None = None) -> dict:
+    """Log in + verify ONE role. Returns a result dict (never raises).
+
+    ``external_state`` (optional): a HOST-supplied, previously-saved ``storage_state`` blob for
+    THIS role, already freshness-checked by the caller (keying by tenant/target/role is the
+    caller's concern, not this module's). Tried first via the same fail-closed ``_verify`` as
+    everything else - an invalid/expired blob falls straight through to the normal login below,
+    never reported authenticated on its own say-so."""
     role = flow.get("role") or "user"
     slug = _slug(role)
     session_name = f"recon-{slug}"
@@ -337,6 +434,21 @@ async def preflight_role(session: Any, flow: dict, *, target_url: str) -> dict:
     if not (flow.get("login_url") or "").strip():
         result["reason"] = "no login_url - can't preflight; agent will handle auth"
         return result
+    if external_state and external_state.strip():
+        try:
+            if await _write_state_file(session, state_path, external_state):
+                load_ok, _ = await _run(session, "recon-browser", "--session-name", session_name,
+                                        "state", "load", state_path)
+                if load_ok:
+                    ver = await _verify(session, flow, session_name, state_path, target_url)
+                    if ver.get("authenticated"):
+                        result["checks"] = ver["checks"]
+                        result["authenticated"] = True
+                        result["storage_state"] = ver.get("state_text", "")
+                        result["reason"] = "resumed from host-persisted session (no re-login)"
+                        return result
+        except Exception:  # resume is best-effort; never block the full login
+            logger.exception("external-state resume failed for role %s", role)
     # username is the label half of the "<role>:<label>" cred key, surfaced on the flow.
     username = (flow.get("username") or flow.get("label") or "").strip()
     # For an email second factor, snapshot the mailbox (UIDNEXT, UIDVALIDITY) baseline right
@@ -382,8 +494,17 @@ async def preflight_role(session: Any, flow: dict, *, target_url: str) -> dict:
                         return result
         except Exception:  # noqa: BLE001 - resume is best-effort; never block the full login
             pass
+    login_url = (flow.get("login_url") or "").strip()
     ran, note = await _do_login(session, flow, slug, session_name, username, pre_submit=pre_submit)
     if not ran:
+        # The deterministic form-fill can fail outright on an OIDC target: the target's OWN login
+        # page is often just a redirect, not a standard form - check before reporting a plain
+        # failure, so the agent gets an actionable hand-off instead of a dead end.
+        oidc = await _check_oidc_handoff(session, session_name, login_url)
+        if oidc:
+            result.update(oidc)
+            result["reason"] = _oidc_handoff_reason(oidc["oidc_provider_url"], session_name)
+            return result
         result["reason"] = note
         return result
     if is_email_mfa:
@@ -400,12 +521,56 @@ async def preflight_role(session: Any, flow: dict, *, target_url: str) -> dict:
     ver = await _verify(session, flow, session_name, state_path, target_url)
     result["checks"] = ver["checks"]
     result["authenticated"] = ver["authenticated"]
-    result["reason"] = "verified" if ver["authenticated"] else f"login ran but verification failed: {ver['checks']}"
+    if ver["authenticated"]:
+        result["storage_state"] = ver.get("state_text", "")
+        result["reason"] = "verified"
+        return result
+    oidc = await _check_oidc_handoff(session, session_name, login_url)
+    if oidc:
+        result.update(oidc)
+        result["reason"] = _oidc_handoff_reason(oidc["oidc_provider_url"], session_name)
+    else:
+        result["reason"] = f"login ran but verification failed: {ver['checks']}"
     return result
 
 
-async def run_auth_preflight(session: Any, auth_flows: list[dict], *, target_url: str) -> list[dict]:
-    """Preflight every flow that has a login_url. Best-effort; returns per-role results."""
+async def reverify_role(session: Any, flow: dict, *, target_url: str) -> dict:
+    """Re-run the SAME fail-closed 3-part check for a role the agent just finished logging in to
+    directly - e.g. after completing an OIDC redirect/consent sequence that ``preflight_role``
+    flagged with ``needs_agent_oidc``. Never trust the agent's own claim of success without this:
+    it is the identical ``_verify`` used for a host-driven login, never a weaker check. Returns the
+    same result shape as ``preflight_role`` (never raises)."""
+    role = flow.get("role") or "user"
+    slug = _slug(role)
+    session_name = f"recon-{slug}"
+    state_path = f"{_STATE_DIR}/{slug}.json"
+    try:
+        ver = await _verify(session, flow, session_name, state_path, target_url)
+    except Exception:  # best-effort; a crashed re-check is just "not authenticated"
+        logger.exception("reverify_role crashed for role %s", role)
+        return {
+            "role": role, "session_name": session_name, "state_path": state_path,
+            "authenticated": False, "reason": "reverify error (host exception)", "checks": {},
+        }
+    result = {
+        "role": role, "session_name": session_name, "state_path": state_path,
+        "authenticated": ver["authenticated"], "checks": ver["checks"],
+        "reason": "verified" if ver["authenticated"] else f"verification failed: {ver['checks']}",
+    }
+    if ver["authenticated"]:
+        result["storage_state"] = ver.get("state_text", "")
+    return result
+
+
+async def run_auth_preflight(
+    session: Any, auth_flows: list[dict], *, target_url: str,
+    external_states: dict[str, str] | None = None,
+) -> list[dict]:
+    """Preflight every flow that has a login_url. Best-effort; returns per-role results.
+
+    ``external_states`` (optional): {role_name: storage_state_text} for a cross-run resume - keyed
+    by the ROLE NAME exactly as it appears on each flow dict (not the slug), already
+    freshness-checked by the caller. Passed straight through to ``preflight_role``."""
     if session is None or not auth_flows:
         return []
     # Fresh preflight must not inherit leftover cookies. Resume (opt-in) keeps
@@ -418,10 +583,12 @@ async def run_auth_preflight(session: Any, auth_flows: list[dict], *, target_url
     for flow in auth_flows:
         if not isinstance(flow, dict):
             continue
+        role = flow.get("role") or "user"
         try:
-            results.append(await preflight_role(session, flow, target_url=target_url))
-        except Exception:  # noqa: BLE001 - one role must never break the others / the scan
-            role = flow.get("role") or "user"
+            ext = (external_states or {}).get(role)
+            results.append(
+                await preflight_role(session, flow, target_url=target_url, external_state=ext))
+        except Exception:  # one role must never break the others / the scan
             logger.exception("auth preflight crashed for role %s", role)
             # Never let a crashed role DISAPPEAR - record it explicitly unauthenticated so the
             # agent is told, not left to assume it's authenticated.
@@ -439,7 +606,8 @@ def preflight_instruction(results: list[dict]) -> str:
     if not results:
         return ""
     ok = [r for r in results if r.get("authenticated")]
-    bad = [r for r in results if not r.get("authenticated")]
+    oidc = [r for r in results if not r.get("authenticated") and r.get("needs_agent_oidc")]
+    bad = [r for r in results if not r.get("authenticated") and not r.get("needs_agent_oidc")]
     lines = ["\n\n== HOST-ESTABLISHED AUTH (authoritative - the host already logged these in) =="]
     if ok:
         lines.append(
@@ -451,6 +619,22 @@ def preflight_instruction(results: list[dict]) -> str:
                 f"  - Role '{r['role']}': session '{r['session_name']}'. Prefix recon-browser with "
                 f"`--session-name {r['session_name']}` for ALL testing as this identity."
             )
+    if oidc:
+        lines.append(
+            "These roles redirect to an external identity provider. The host could not complete "
+            "the login deterministically - YOU must drive the redirect/consent sequence yourself, "
+            "in the SAME named session (do not open a new one), using recon-browser with "
+            "`--session-name <that session>`:"
+        )
+        lines.extend(
+            f"  - Role '{r['role']}': session '{r['session_name']}', provider at "
+            f"{r.get('oidc_provider_url', '?')}. If the provider asks for a TOTP/MFA code, "
+            f"compute and submit it exactly the same way you already do for this role's "
+            f"primary login - do not invent a new mechanism and do not ask the operator for "
+            f"the code. Once you land back on an authenticated page, the host re-verifies this "
+            f"role with the same check it uses everywhere else."
+            for r in oidc
+        )
     if bad:
         lines.append(
             "These roles could NOT be pre-authenticated by the host - log in yourself following the "
