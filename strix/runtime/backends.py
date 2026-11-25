@@ -68,6 +68,9 @@ async def _docker_backend(
     return client, session
 
 
+_REPORTER_TOKEN_MOUNT = "/etc/recon/target-health-token"
+
+
 def _gateway_name(scan_id: str) -> str:
     """Deterministic gateway container name so the agent's proxy env can point at it by name on the
     internal network BEFORE it is up (docker resolves the name once both join the network)."""
@@ -115,6 +118,29 @@ async def _contained_docker_backend(
         raise ValueError(f"gateway_spec_path {_gsp!r} is not owned by the worker user")
     if _stat.S_IMODE(_stat_result.st_mode) & 0o077:
         raise ValueError(f"gateway_spec_path {_gsp!r} must not be accessible by group or other")
+
+    # The gateway escalates target-health and RoE-violation trips to the control plane. Without
+    # both settings a trip would block the target but never stop the engagement, so refuse to
+    # start (fail-closed, no opt-out). Checked before any Docker resource exists.
+    reporter_url = os.environ.get("RECON_TARGET_HEALTH_REPORTER_URL", "").strip()
+    reporter_token_host = os.environ.get("RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE", "").strip()
+    missing = [
+        name
+        for name, value in (
+            ("RECON_TARGET_HEALTH_REPORTER_URL", reporter_url),
+            ("RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE", reporter_token_host),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError(
+            "contained docker backend requires the control-plane escalation reporter; "
+            f"missing {', '.join(missing)}"
+        )
+    if not os.path.isfile(reporter_token_host):
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {reporter_token_host!r} is not a readable file"
+        )
 
     dc = docker.from_env()
     net_name = "recon-net-" + (scan_id or "default")
@@ -203,6 +229,7 @@ async def _contained_docker_backend(
     volumes = {
         _gsp: {"bind": "/etc/recon/engagement.json", "mode": "ro"},
         ca_name: {"bind": "/ca", "mode": "rw"},
+        os.path.abspath(reporter_token_host): {"bind": _REPORTER_TOKEN_MOUNT, "mode": "ro"},
     }
     # Gateway capture (Plan Phase 4): when enabled, give the gateway a SESSION-DERIVED capability
     # token + scan id so it runs the redacted capture store + retrieval API and publishes the
@@ -213,6 +240,8 @@ async def _contained_docker_backend(
         # entrypoint resolves/binds the internal-net address before the
         # outbound NIC is attached, so egress-network peers cannot proxy.
         "RECON_PROXY_INTERNAL_ONLY": "1",
+        "RECON_TARGET_HEALTH_REPORTER_URL": reporter_url,
+        "RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE": _REPORTER_TOKEN_MOUNT,
     }
     capture_enabled = os.environ.get("RECON_GATEWAY_CAPTURE", "").strip().lower() in ("1", "true", "yes")
     if capture_enabled:
