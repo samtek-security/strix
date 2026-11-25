@@ -146,13 +146,32 @@ def is_sensitive_name(name: object) -> bool:
     return _normalize_name(name) in _SENSITIVE_NAMES
 
 
+def _scrub_literals(text: str) -> str:
+    """Replace every registered literal, in both its raw and JSON-escaped
+    forms.
+
+    A secret containing a quote, backslash, control character, or
+    non-ASCII character comes out differently once embedded in a serialized
+    JSON blob (e.g. an ``arguments``/``output`` string that failed to parse
+    as JSON, so there is no decoded value to redact instead - see
+    :func:`_redact_literal_json_string`). Searching only the raw form misses
+    that encoded occurrence entirely, leaving a fully reconstructable secret
+    on disk.
+    """
+    for secret in _literal_secrets:
+        if secret in text:
+            text = text.replace(secret, REDACTED)
+        escaped = json.dumps(secret)[1:-1]
+        if escaped != secret and escaped in text:
+            text = text.replace(escaped, REDACTED)
+    return text
+
+
 def redact_text(text: str) -> str:
     """Replace every registered literal, credential assignment, and secret shape."""
     if not text:
         return text
-    for secret in _literal_secrets:
-        if secret in text:
-            text = text.replace(secret, REDACTED)
+    text = _scrub_literals(text)
     text = _CRED_HEADER_LINE_RE.sub(lambda m: f"{m.group('k')}{m.group('sep')}{REDACTED}", text)
     text = _ASSIGNMENT_RE.sub(lambda m: f"{m.group('k')}{m.group('sep')}{REDACTED}", text)
     for pattern in _SECRET_PATTERNS:
@@ -160,7 +179,31 @@ def redact_text(text: str) -> str:
     return text
 
 
+def _dedupe_key(key: str, out: dict[Any, Any]) -> str:
+    """Return ``key`` unchanged, or a disambiguated variant if ``key`` is
+    already in ``out``.
+
+    Two different original keys can redact to the same placeholder (each
+    entirely a different registered secret, or each matching the same
+    shape pattern); overwriting one under the shared key would silently
+    drop its value, which is exactly the fidelity this redaction exists to
+    protect.
+    """
+    if key not in out:
+        return key
+    suffix = 2
+    candidate = f"{key}#{suffix}"
+    while candidate in out:
+        suffix += 1
+        candidate = f"{key}#{suffix}"
+    return candidate
+
+
 def _redact_value(value: Any, depth: int) -> Any:
+    """Recursively redact every string leaf and credential-named field in
+    ``value`` - used for arbitrary nested data with no fixed shape (unlike
+    :func:`enclave_safe`'s other fields, which know their own exact type).
+    """
     if isinstance(value, str):
         return redact_text(value)
     if value is None or isinstance(value, bool | int | float) or depth >= 8:
@@ -169,6 +212,8 @@ def _redact_value(value: Any, depth: int) -> Any:
         out: dict[Any, Any] = {}
         for key, item in cast("Mapping[Any, Any]", value).items():
             safe_key = redact_text(key) if isinstance(key, str) else key
+            if isinstance(safe_key, str):
+                safe_key = _dedupe_key(safe_key, out)
             if _normalize_name(key) in _SENSITIVE_NAMES:
                 out[safe_key] = REDACTED
             else:
@@ -228,6 +273,8 @@ def _redact_value_json_aware(value: Any, depth: int) -> Any:
         out: dict[Any, Any] = {}
         for key, item in cast("Mapping[Any, Any]", value).items():
             safe_key = redact_text(key) if isinstance(key, str) else key
+            if isinstance(safe_key, str):
+                safe_key = _dedupe_key(safe_key, out)
             if _normalize_name(key) in _SENSITIVE_NAMES:
                 out[safe_key] = REDACTED
             else:
@@ -269,10 +316,7 @@ def redact_literals_only(text: str) -> str:
     """
     if not text:
         return text
-    for secret in _literal_secrets:
-        if secret in text:
-            text = text.replace(secret, REDACTED)
-    return text
+    return _scrub_literals(text)
 
 
 _LITERAL_REDACTION_MAX_DEPTH = 64
@@ -326,6 +370,7 @@ def _redact_literals_in_structure(value: Any, depth: int) -> tuple[Any, bool]:
             if isinstance(key, str):
                 new_key = redact_literals_only(key)
                 changed = changed or new_key != key
+                new_key = _dedupe_key(new_key, out)
             new_item, item_changed = _redact_literals_in_structure(item, depth + 1)
             changed = changed or item_changed
             out[new_key] = new_item
@@ -357,6 +402,8 @@ def _redact_headers(headers: Mapping[str, str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, value in headers.items():
         safe_key = redact_text(key) if isinstance(key, str) else key
+        if isinstance(safe_key, str):
+            safe_key = _dedupe_key(safe_key, out)
         if _normalize_name(key) in _SENSITIVE_NAMES:
             out[safe_key] = REDACTED
         elif isinstance(value, str):

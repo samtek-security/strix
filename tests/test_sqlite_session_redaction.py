@@ -387,5 +387,110 @@ async def test_full_history_read_skipped_when_batch_resolves_itself(
     assert len(calls) == 1
 
 
+async def test_escaped_literal_is_redacted_in_malformed_json(tmp_path: Path) -> None:
+    """When the whole blob fails to parse as JSON (truncated, partial
+    output), a registered literal's JSON-escaped substring form must still
+    be found, not just its raw form - the escaped bytes alone are enough
+    to fully reconstruct the secret."""
+    secret = 'sec"ret\\value-0123456789'  # noqa: S105 - fixture token
+    redaction.register_secret(secret)
+    escaped_fragment = json.dumps(secret)[1:-1]  # drop the surrounding quotes
+    malformed = f'{{"token": "{escaped_fragment}'  # truncated, not valid JSON
+    session = _session(tmp_path)
+    await session.add_items(
+        [
+            _call("exec_command", "c19", cmd="env"),
+            _output("c19", malformed),
+        ]
+    )
+    stored = await session.get_items()
+    assert escaped_fragment not in stored[1]["output"]
+
+
+async def test_escaped_literal_is_redacted_in_shape_based_malformed_text(
+    tmp_path: Path,
+) -> None:
+    """The same escaped-form gap exists in the shape-based path's fallback
+    (redact_text), reached by a non-denylisted tool's malformed-JSON
+    output."""
+    secret = 'sec"ret\\value-0123456789'  # noqa: S105 - fixture token
+    redaction.register_secret(secret)
+    escaped_fragment = json.dumps(secret)[1:-1]
+    malformed = f'{{"token": "{escaped_fragment}'
+    session = _session(tmp_path)
+    await session.add_items(
+        [
+            _call("queue_finding", "c20", title="t"),
+            _output("c20", malformed),
+        ]
+    )
+    stored = await session.get_items()
+    assert escaped_fragment not in stored[1]["output"]
+
+
+async def test_colliding_keys_in_literal_only_pass_do_not_drop_a_value(
+    tmp_path: Path,
+) -> None:
+    """Two different registered secrets used as JSON keys both redact to
+    the same placeholder; the second must not silently overwrite the
+    first's value."""
+    secret_a = "recon-own-broker-token-aaaaaaaaaa"  # noqa: S105 - fixture token
+    secret_b = "recon-own-broker-token-bbbbbbbbbb"  # noqa: S105 - fixture token
+    redaction.register_secret(secret_a)
+    redaction.register_secret(secret_b)
+    session = _session(tmp_path)
+    await session.add_items(
+        [
+            _call("exec_command", "c21", cmd="env"),
+            _output("c21", json.dumps({secret_a: "value-for-a", secret_b: "value-for-b"})),
+        ]
+    )
+    stored = await session.get_items()
+    parsed = json.loads(stored[1]["output"])
+    assert sorted(parsed.values()) == ["value-for-a", "value-for-b"]
+
+
+async def test_colliding_keys_in_shape_based_pass_do_not_drop_a_value(
+    tmp_path: Path,
+) -> None:
+    """The same key-collision risk exists in the shape-based walker
+    (reached by a non-denylisted tool), one shape match per key."""
+    session = _session(tmp_path)
+    key_a = f"{_SECRET}-a"
+    key_b = f"{_SECRET}-b"
+    await session.add_items(
+        [
+            _call("queue_finding", "c22", title="t"),
+            _output("c22", json.dumps({key_a: "value-for-a", key_b: "value-for-b"})),
+        ]
+    )
+    stored = await session.get_items()
+    parsed = json.loads(stored[1]["output"])
+    assert sorted(parsed.values()) == ["value-for-a", "value-for-b"]
+
+
+async def test_proxy_index_and_sitemap_tools_are_not_shape_redacted(
+    tmp_path: Path,
+) -> None:
+    """list_requests/list_sitemap/view_sitemap_entry return target-reflecting
+    request/response fields (a token in a query string) the same way
+    view_request does."""
+    session = _session(tmp_path)
+    for tool, call_id in (
+        ("list_requests", "c23"),
+        ("list_sitemap", "c24"),
+        ("view_sitemap_entry", "c25"),
+    ):
+        await session.add_items(
+            [
+                _call(tool, call_id, scope_id="s1"),
+                _output(call_id, f"?token={_SECRET}"),
+            ]
+        )
+    stored = await session.get_items()
+    outputs = [item["output"] for item in stored if item.get("type") == "function_call_output"]
+    assert all(_SECRET in output for output in outputs)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

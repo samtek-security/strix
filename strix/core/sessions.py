@@ -44,6 +44,9 @@ _UNREDACTED_TOOL_NAMES = frozenset(
     {
         "view_request",
         "repeat_request",
+        "list_requests",
+        "list_sitemap",
+        "view_sitemap_entry",
         "call_mcp",
         "promote_finding",
         "exec_command",
