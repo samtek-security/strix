@@ -13,6 +13,8 @@ from weakref import WeakKeyDictionary
 from agents.items import ItemHelpers
 from agents.memory import SQLiteSession
 
+from strix.llm import redaction
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -23,6 +25,36 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# Tools whose call arguments or output reflect the target or an external
+# system verbatim: the exploitation workflow's Level-3 live-request proof, raw
+# HTTP captures from the proxy, fetched web pages/search results, and
+# arbitrary MCP results. A call to one of these never goes through
+# shape-based redaction, whatever it contains - a target's own leaked
+# credential is the finding, not noise to scrub, and shape-based matching
+# can't tell "Recon's own token" from "a target's token" when both happen to
+# be a JWT or a Bearer string. It still gets Recon's exact registered
+# literals scrubbed (redact_literals_in_structure): that match has no such
+# ambiguity, so there is nothing to weigh against leaving a genuine Recon
+# credential on disk. Scoped at the whole-call granularity (not per-field)
+# since splitting a single call's arguments into redact/don't-redact halves
+# is itself a correctness risk this isn't worth taking for the few
+# surrounding fields (title/description context) it would spare.
+_UNREDACTED_TOOL_NAMES = frozenset(
+    {
+        "view_request",
+        "repeat_request",
+        "list_requests",
+        "list_sitemap",
+        "view_sitemap_entry",
+        "call_mcp",
+        "promote_finding",
+        "exec_command",
+        "write_stdin",
+        "web_search",
+        "web_get_contents",
+    }
+)
 
 
 class _PooledConnectionSession(SQLiteSession):
@@ -39,6 +71,97 @@ class _PooledConnectionSession(SQLiteSession):
                 yield connection
             finally:
                 connection.close()
+
+    async def add_items(self, items: list[TResponseInputItem]) -> None:
+        await super().add_items(await self._redact_for_storage(items))
+
+    async def _redact_for_storage(
+        self, items: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        unredacted_call_ids = await self._unredacted_call_ids(items)
+        return [
+            cast(
+                "TResponseInputItem",
+                self._redact_item(cast("dict[str, Any]", item), unredacted_call_ids),
+            )
+            for item in items
+        ]
+
+    async def _unredacted_call_ids(self, new_items: list[Any]) -> set[str]:
+        """``call_id`` values whose originating call was an unredacted tool.
+
+        Checked against ``new_items`` first; the whole session history is
+        read only when an output's call isn't there, since a call and its
+        output can land in separate ``add_items`` batches (a resume replays
+        the call from a prior process) and getting this the wrong way -
+        treating an unredacted tool's output as unknown and redacting it -
+        is the one mistake this exists to prevent. Skipping the full-history
+        read whenever the batch already resolves itself (the common case: a
+        normal turn persists a call and its output together) keeps this
+        O(1) in the session's length instead of O(n) per ``add_items`` call.
+        """
+        batch_call_ids = {
+            item["call_id"]
+            for item in new_items
+            if isinstance(item, dict)
+            and item.get("type") == "function_call"
+            and isinstance(item.get("call_id"), str)
+        }
+        unredacted_call_ids = {
+            item["call_id"]
+            for item in new_items
+            if _is_unredacted_call(item) and isinstance(item.get("call_id"), str)
+        }
+        unresolved = {
+            item["call_id"]
+            for item in new_items
+            if isinstance(item, dict)
+            and item.get("type") == "function_call_output"
+            and isinstance(item.get("call_id"), str)
+            and item["call_id"] not in batch_call_ids
+        }
+        if not unresolved:
+            return unredacted_call_ids
+        # Explicit ``limit=None``: this lookup must see the whole history
+        # regardless of any session-settings default limit, or a call made
+        # far enough back could be missed and its output wrongly redacted.
+        existing: list[Any] = await self.get_items(limit=None)
+        unredacted_call_ids.update(
+            item["call_id"]
+            for item in existing
+            if _is_unredacted_call(item) and item.get("call_id") in unresolved
+        )
+        return unredacted_call_ids
+
+    def _redact_item(self, item: Any, unredacted_call_ids: set[str]) -> Any:
+        if not isinstance(item, dict):
+            return item
+        item_type = item.get("type")
+        if item_type == "function_call" and item.get("name") in _UNREDACTED_TOOL_NAMES:
+            return redaction.redact_literals_in_structure(item)
+        if item_type == "function_call_output" and item.get("call_id") in unredacted_call_ids:
+            return redaction.redact_literals_in_structure(item)
+        if item_type in ("function_call", "function_call_output"):
+            # A non-denylisted tool's own call/output is Recon/LLM-synthesized
+            # content (queue_finding, notes, todo, ...) - safe to scan for a
+            # shape-matched secret.
+            return redaction.redact_structure_json_aware(item)
+        # Anything else - a plain user/assistant message, an inter-agent
+        # mailbox relay, a seeded ``--instruction`` - may carry
+        # operator-supplied content the scan depends on verbatim. A test
+        # credential for an authenticated scan is exactly this shape: it
+        # must reach the model, not get shape-redacted away as if it were a
+        # leaked secret. Only Recon's own exact registered literals are safe
+        # to remove here.
+        return redaction.redact_literals_in_structure(item)
+
+
+def _is_unredacted_call(item: Any) -> bool:
+    return (
+        isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and item.get("name") in _UNREDACTED_TOOL_NAMES
+    )
 
 
 def open_agent_session(agent_id: str, path: Path) -> SQLiteSession:

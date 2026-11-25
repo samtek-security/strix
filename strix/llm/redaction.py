@@ -36,6 +36,8 @@ subscription-backend access token) is redacted even when it matches no shape.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
@@ -144,13 +146,32 @@ def is_sensitive_name(name: object) -> bool:
     return _normalize_name(name) in _SENSITIVE_NAMES
 
 
+def _scrub_literals(text: str) -> str:
+    """Replace every registered literal, in both its raw and JSON-escaped
+    forms.
+
+    A secret containing a quote, backslash, control character, or
+    non-ASCII character comes out differently once embedded in a serialized
+    JSON blob (e.g. an ``arguments``/``output`` string that failed to parse
+    as JSON, so there is no decoded value to redact instead - see
+    :func:`_redact_literal_json_string`). Searching only the raw form misses
+    that encoded occurrence entirely, leaving a fully reconstructable secret
+    on disk.
+    """
+    for secret in _literal_secrets:
+        if secret in text:
+            text = text.replace(secret, REDACTED)
+        escaped = json.dumps(secret)[1:-1]
+        if escaped != secret and escaped in text:
+            text = text.replace(escaped, REDACTED)
+    return text
+
+
 def redact_text(text: str) -> str:
     """Replace every registered literal, credential assignment, and secret shape."""
     if not text:
         return text
-    for secret in _literal_secrets:
-        if secret in text:
-            text = text.replace(secret, REDACTED)
+    text = _scrub_literals(text)
     text = _CRED_HEADER_LINE_RE.sub(lambda m: f"{m.group('k')}{m.group('sep')}{REDACTED}", text)
     text = _ASSIGNMENT_RE.sub(lambda m: f"{m.group('k')}{m.group('sep')}{REDACTED}", text)
     for pattern in _SECRET_PATTERNS:
@@ -158,7 +179,31 @@ def redact_text(text: str) -> str:
     return text
 
 
+def _dedupe_key(key: str, out: dict[Any, Any]) -> str:
+    """Return ``key`` unchanged, or a disambiguated variant if ``key`` is
+    already in ``out``.
+
+    Two different original keys can redact to the same placeholder (each
+    entirely a different registered secret, or each matching the same
+    shape pattern); overwriting one under the shared key would silently
+    drop its value, which is exactly the fidelity this redaction exists to
+    protect.
+    """
+    if key not in out:
+        return key
+    suffix = 2
+    candidate = f"{key}#{suffix}"
+    while candidate in out:
+        suffix += 1
+        candidate = f"{key}#{suffix}"
+    return candidate
+
+
 def _redact_value(value: Any, depth: int) -> Any:
+    """Recursively redact every string leaf and credential-named field in
+    ``value`` - used for arbitrary nested data with no fixed shape (unlike
+    :func:`enclave_safe`'s other fields, which know their own exact type).
+    """
     if isinstance(value, str):
         return redact_text(value)
     if value is None or isinstance(value, bool | int | float) or depth >= 8:
@@ -167,6 +212,8 @@ def _redact_value(value: Any, depth: int) -> Any:
         out: dict[Any, Any] = {}
         for key, item in cast("Mapping[Any, Any]", value).items():
             safe_key = redact_text(key) if isinstance(key, str) else key
+            if isinstance(safe_key, str):
+                safe_key = _dedupe_key(safe_key, out)
             if _normalize_name(key) in _SENSITIVE_NAMES:
                 out[safe_key] = REDACTED
             else:
@@ -189,10 +236,182 @@ def redact_structure(value: Any) -> Any:
     return _redact_value(value, 0)
 
 
+def _safe_json_loads(text: str) -> Any:
+    """Parse ``text`` as JSON, or ``None`` if it isn't - including inputs
+    CPython's own parser refuses (too deeply nested, an integer with too
+    many digits). Those are still just ordinary text to redact as a string,
+    not a reason to abort the write a secret may be waiting in.
+    """
+    with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError, RecursionError):
+        return json.loads(text)
+    return None
+
+
+def _redact_json_string_shape_aware(text: str, depth: int) -> str:
+    parsed = _safe_json_loads(text) if depth < 8 else None
+    if isinstance(parsed, dict | list):
+        return json.dumps(_redact_value_json_aware(parsed, depth + 1))
+    if isinstance(parsed, str):
+        # The decoded value, not the still-escaped source text: a secret
+        # containing a quote or backslash only matches shape patterns in its
+        # raw form, which the JSON encoding of this very string hid.
+        return json.dumps(redact_text(parsed))
+    return redact_text(text)
+
+
+def _redact_value_json_aware(value: Any, depth: int) -> Any:
+    if isinstance(value, str):
+        return _redact_json_string_shape_aware(value, depth)
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    # A compound value past the depth cutoff is never returned as-is: unlike
+    # a scalar, it could still hold a secret in an unvisited leaf, and
+    # "stop descending" must not mean "stop redacting."
+    if depth >= 8:
+        return REDACTED
+    if isinstance(value, Mapping):
+        out: dict[Any, Any] = {}
+        for key, item in cast("Mapping[Any, Any]", value).items():
+            safe_key = redact_text(key) if isinstance(key, str) else key
+            if isinstance(safe_key, str):
+                safe_key = _dedupe_key(safe_key, out)
+            if _normalize_name(key) in _SENSITIVE_NAMES:
+                out[safe_key] = REDACTED
+            else:
+                out[safe_key] = _redact_value_json_aware(item, depth + 1)
+        return out
+    if isinstance(value, Sequence | set | frozenset):
+        return [_redact_value_json_aware(item, depth + 1) for item in cast("Sequence[Any]", value)]
+    return value
+
+
+def redact_structure_json_aware(value: Any) -> Any:
+    """Like :func:`redact_structure`, but a string leaf that itself parses as
+    JSON is redacted as structured data and re-serialized, not scrubbed as
+    opaque text.
+
+    A persisted session item's ``arguments``/``output`` fields are often a
+    JSON-encoded blob, not already-parsed data. Running the plain-text
+    scrubbers over that blob risks corrupting its syntax: a credential-header
+    match in :data:`_CRED_HEADER_LINE_RE` consumes text "to end of line" by
+    design (a ``Cookie`` value can hold several ``;``-separated secrets), but
+    a single-line JSON blob has no internal line breaks, so that consumes
+    everything after the match - the rest of the object, not just one field.
+    Parsing first and redacting the structure avoids that.
+    """
+    return _redact_value_json_aware(value, 0)
+
+
+def redact_literals_only(text: str) -> str:
+    """Replace only the exact registered literals in ``text`` - nothing
+    shape-based, no credential-header or assignment matching.
+
+    Safe to run even over target-sourced content that must otherwise stay
+    untouched: an exact literal match is Recon's own registered credential by
+    construction, not a shape a target's own secret could coincidentally
+    share, so there is no ambiguity to weigh here the way there is for
+    :func:`redact_text`'s other three layers. A plain substring replace can't
+    corrupt surrounding JSON (unlike the shape-based layer): it never
+    consumes anything beyond the literal itself.
+    """
+    if not text:
+        return text
+    return _scrub_literals(text)
+
+
+_LITERAL_REDACTION_MAX_DEPTH = 64
+
+
+def _redact_literal_json_string(text: str, depth: int) -> tuple[str, bool]:
+    # Parse first when possible: a registered literal containing a quote,
+    # backslash, control character, or non-ASCII character comes out
+    # JSON-escaped once embedded in a serialized blob, so a plain substring
+    # search against the escaped text would never match the literal as
+    # registered and the secret would survive intact. Redacting the decoded
+    # value and re-serializing sidesteps that - but only when something
+    # actually changed: reserializing unconditionally would silently drop
+    # duplicate keys and renormalize number/non-ASCII formatting even when
+    # there was nothing to redact, corrupting target evidence that must
+    # survive byte-for-byte.
+    parsed = _safe_json_loads(text) if depth < _LITERAL_REDACTION_MAX_DEPTH else None
+    if isinstance(parsed, dict | list):
+        redacted, changed = _redact_literals_in_structure(parsed, depth + 1)
+        if changed:
+            return json.dumps(redacted), True
+        # The structural walk found nothing - but json.loads collapses a
+        # duplicate JSON object member to its last occurrence, so an
+        # earlier, shadowed member's secret was never visited and "nothing
+        # changed" cannot be trusted on its own. Verify the raw text
+        # directly before keeping it as-is.
+        scrubbed = _scrub_literals(text)
+        return (scrubbed, True) if scrubbed != text else (text, False)
+    if isinstance(parsed, str):
+        redacted_str = redact_literals_only(parsed)
+        return (json.dumps(redacted_str), True) if redacted_str != parsed else (text, False)
+    redacted_text = redact_literals_only(text)
+    return redacted_text, redacted_text != text
+
+
+def _redact_literals_in_structure(value: Any, depth: int) -> tuple[Any, bool]:
+    """Redact ``value`` for exact registered literals; returns ``(result,
+    changed)`` so a JSON-encoded string caller can keep its exact original
+    text when nothing was actually redacted inside it.
+    """
+    if isinstance(value, str):
+        return _redact_literal_json_string(value, depth)
+    # Unlike the shape-based cutoff, this never falls back to a blunt
+    # REDACTED past the limit: this function runs on raw-carrier tool data
+    # that must never be destroyed, only have an exact Recon literal removed.
+    # A cutoff still exists purely as a recursion-safety bound, so it is set
+    # far past any depth real HTTP/shell/MCP data plausibly nests at (a
+    # pathologically deep structure stops getting scanned, but is returned
+    # intact rather than redacted away).
+    if value is None or isinstance(value, bool | int | float):
+        return value, False
+    if depth >= _LITERAL_REDACTION_MAX_DEPTH:
+        return value, False
+    if isinstance(value, Mapping):
+        out: dict[Any, Any] = {}
+        changed = False
+        for key, item in cast("Mapping[Any, Any]", value).items():
+            new_key = key
+            if isinstance(key, str):
+                new_key = redact_literals_only(key)
+                changed = changed or new_key != key
+                new_key = _dedupe_key(new_key, out)
+            new_item, item_changed = _redact_literals_in_structure(item, depth + 1)
+            changed = changed or item_changed
+            out[new_key] = new_item
+        return out, changed
+    if isinstance(value, Sequence | set | frozenset):
+        results = [
+            _redact_literals_in_structure(item, depth + 1)
+            for item in cast("Sequence[Any]", value)
+        ]
+        return [r for r, _ in results], any(c for _, c in results)
+    return value, False
+
+
+def redact_literals_in_structure(value: Any) -> Any:
+    """Recursively replace exact registered literals through ``value``,
+    leaving shapes, header names, and all other content - including
+    target-sourced data - untouched. See :func:`redact_literals_only`.
+
+    When ``value`` is (or contains) a JSON-encoded string with no registered
+    literal anywhere inside it, that exact original text is returned
+    unchanged rather than a reformatted reserialization - duplicate keys,
+    number formatting, and non-ASCII escaping all survive byte-for-byte.
+    """
+    redacted, _ = _redact_literals_in_structure(value, 0)
+    return redacted
+
+
 def _redact_headers(headers: Mapping[str, str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, value in headers.items():
         safe_key = redact_text(key) if isinstance(key, str) else key
+        if isinstance(safe_key, str):
+            safe_key = _dedupe_key(safe_key, out)
         if _normalize_name(key) in _SENSITIVE_NAMES:
             out[safe_key] = REDACTED
         elif isinstance(value, str):
