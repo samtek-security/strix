@@ -227,8 +227,10 @@ class ReportState:
         self._llm_usage.zero_cost = auth_mode == "subscription"
         settings = load_settings()
         self._llm_usage.custom_base = is_custom_api_base(settings.llm.api_base)
-        # Without a dedicated dedupe model, dedupe runs on the main endpoint.
-        dedupe_base = settings.dedupe.api_base if settings.dedupe.model else settings.llm.api_base
+        # Dedupe uses its own base only with a dedicated model and base; any
+        # other case runs on the main endpoint.
+        own_base = settings.dedupe.api_base if settings.dedupe.model else None
+        dedupe_base = own_base or settings.llm.api_base
         self._llm_usage.dedupe_custom_base = is_custom_api_base(dedupe_base)
         self.run_record: dict[str, Any] = {
             "run_id": self.run_id,

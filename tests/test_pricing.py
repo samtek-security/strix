@@ -505,11 +505,22 @@ def test_dedupe_without_its_own_model_follows_the_main_base(
     assert _bases(monkeypatch, LLM_API_BASE="http://gateway.local/v1") == (True, True)
 
 
-def test_dedupe_with_its_own_model_uses_only_its_own_base(
+def test_dedupe_with_its_own_model_and_base_uses_its_own_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = {
+        "LLM_API_BASE": "http://gateway.local/v1",
+        "STRIX_DEDUPE_MODEL": "glm-5",
+        "DEDUPE_LLM_API_BASE": "https://api.z.ai/v1",
+    }
+    assert _bases(monkeypatch, **env) == (True, False)
+
+
+def test_dedupe_with_its_own_model_but_no_base_inherits_the_main_base(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     env = {"LLM_API_BASE": "http://gateway.local/v1", "STRIX_DEDUPE_MODEL": "glm-5"}
-    assert _bases(monkeypatch, **env) == (True, False)
+    assert _bases(monkeypatch, **env) == (True, True)
 
 
 def test_a_stray_dedupe_base_without_a_dedupe_model_is_ignored(
