@@ -381,7 +381,7 @@ def test_bound_evidence_preserves_custom_tool_call_evidence() -> None:
     ]
 
 
-def test_bound_evidence_drops_a_leading_orphaned_output() -> None:
+def test_bound_evidence_extends_past_the_cap_to_keep_a_split_pair() -> None:
     items = [
         {"role": "assistant", "content": "setting up"},
         {"type": "function_call", "call_id": "cut-off", "name": "http_request", "arguments": "{}"},
@@ -389,38 +389,63 @@ def test_bound_evidence_drops_a_leading_orphaned_output() -> None:
         {"role": "assistant", "content": "kept"},
     ]
 
-    # max_items=2 would naively keep [the output, the trailing message] and
-    # orphan the output from its call.
+    # A naive tail slice of max_items=2 would keep [the output, the trailing
+    # message] and orphan the output from its call. The call is well within
+    # _PAIR_EXTENSION_LIMIT, so it's pulled in instead of dropped - at the
+    # cost of the unrelated leading message, which is legitimately cut.
     payload, truncated = agents_graph_tools._bound_evidence(items, max_items=2)
 
     assert truncated is True
-    assert payload == [{"role": "assistant", "content": "kept"}]
+    assert payload == [
+        {"type": "function_call", "call_id": "cut-off", "name": "http_request", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "cut-off", "output": "200 OK"},
+        {"role": "assistant", "content": "kept"},
+    ]
 
 
-def test_bound_evidence_drops_an_orphaned_output_from_interleaved_parallel_calls() -> None:
+def test_bound_evidence_extends_to_keep_interleaved_parallel_calls_paired() -> None:
     # Parallel tool calls can persist as call A, call B, output A, output B -
     # not call A, output A, call B, output B. A naive "check only the first
     # kept item" filter misses output A here: it isn't first, call B is.
     items = [
         {
             "type": "function_call",
-            "call_id": "cut-off-a",
+            "call_id": "a",
             "name": "http_request",
             "arguments": "{}",
         },
-        {"type": "function_call", "call_id": "kept-b", "name": "http_request", "arguments": "{}"},
-        {"type": "function_call_output", "call_id": "cut-off-a", "output": "200 OK (a)"},
-        {"type": "function_call_output", "call_id": "kept-b", "output": "200 OK (b)"},
+        {"type": "function_call", "call_id": "b", "name": "http_request", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "a", "output": "200 OK (a)"},
+        {"type": "function_call_output", "call_id": "b", "output": "200 OK (b)"},
     ]
 
-    # max_items=3 keeps [call B, output A, output B]; output A's call is cut.
+    # A naive tail slice of max_items=3 would keep [call B, output A,
+    # output B] and orphan output A. Both calls are within
+    # _PAIR_EXTENSION_LIMIT, so both pairs survive intact instead.
     payload, truncated = agents_graph_tools._bound_evidence(items, max_items=3)
 
-    assert truncated is True
-    assert payload == [
-        {"type": "function_call", "call_id": "kept-b", "name": "http_request", "arguments": "{}"},
-        {"type": "function_call_output", "call_id": "kept-b", "output": "200 OK (b)"},
+    assert truncated is False
+    assert payload == items
+
+
+def test_bound_evidence_drops_an_output_whose_call_is_beyond_the_extension_limit() -> None:
+    # A turn wide enough that its call is further back than
+    # _PAIR_EXTENSION_LIMIT * max_items allows recovering - the safety net
+    # (_drop_orphaned_outputs) still applies rather than returning a
+    # dangling call_id with no tool name or arguments.
+    items: list[Any] = [
+        {"type": "function_call", "call_id": "too-far", "name": "http_request", "arguments": "{}"}
     ]
+    items += [{"role": "assistant", "content": f"filler {i}"} for i in range(10)]
+    items.append({"type": "function_call_output", "call_id": "too-far", "output": "200 OK"})
+
+    payload, truncated = agents_graph_tools._bound_evidence(items, max_items=2)
+
+    assert truncated is True
+    # The output itself is dropped (its call is out of reach) - what's left
+    # is whichever filler messages fell inside the extension limit.
+    assert all(item.get("type") != "function_call_output" for item in payload)
+    assert payload
 
 
 def test_fit_evidence_to_byte_cap_trims_the_largest_entry_first(

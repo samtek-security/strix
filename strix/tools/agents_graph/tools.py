@@ -338,13 +338,46 @@ def _drop_orphaned_outputs(items: list[Any]) -> list[Any]:
     ]
 
 
+_PAIR_EXTENSION_LIMIT = 3  # multiplier on max_items while still pairing calls to outputs
+
+
 def _bound_evidence(items: list[Any], *, max_items: int) -> tuple[list[dict[str, Any]], bool]:
     """Bound one agent's evidence by item count, keeping call/output pairs
     together. Byte-bounding the complete response happens separately, once
     every agent's evidence is assembled — see ``_fit_evidence_to_byte_cap``.
-    Returns the bounded payload and whether anything was cut."""
+    Returns the bounded payload and whether anything was cut.
+
+    A parallel-tool-call turn can persist as a whole block of calls followed
+    by a whole block of outputs, not call-output pairs one after another. A
+    plain tail slice of such a turn can land entirely inside the output
+    block, with every one of its calls just outside the cut - leaving
+    nothing but orphaned outputs, which a naive drop then empties out
+    completely even though the turn's evidence is real and substantial.
+    Walking backward and extending past ``max_items`` while a call is still
+    owed (bounded by ``_PAIR_EXTENSION_LIMIT`` so one pathologically wide
+    turn can't swallow unbounded history) keeps that evidence instead.
+    """
     total = len(items)
-    bounded = items[-max_items:] if total > max_items else list(items)
+    if total <= max_items:
+        return _session_items_payload(list(items)), False
+
+    hard_ceiling = max_items * _PAIR_EXTENSION_LIMIT
+    needed_call_ids: set[Any] = set()
+    kept_reversed: list[Any] = []
+    for item in reversed(items):
+        if len(kept_reversed) >= hard_ceiling:
+            break
+        if len(kept_reversed) >= max_items and not needed_call_ids:
+            break
+        kept_reversed.append(item)
+        if isinstance(item, dict):
+            item_type = item.get("type")
+            if item_type in _OUTPUT_ITEM_TYPES:
+                needed_call_ids.add(item.get("call_id"))
+            elif item_type in _CALL_ITEM_TYPES:
+                needed_call_ids.discard(item.get("call_id"))
+
+    bounded = list(reversed(kept_reversed))
     bounded = _drop_orphaned_outputs(bounded)
     truncated = len(bounded) < total
     return _session_items_payload(bounded), truncated

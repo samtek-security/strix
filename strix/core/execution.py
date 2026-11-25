@@ -341,9 +341,11 @@ async def _run_agent_loop(  # noqa: PLR0912
     reserve_stopped = coordinator.reserve_stopped
     if budget_stopped:
         await coordinator.set_status(agent_id, "stopped")
+        await coordinator.mark_turn_settled(agent_id)
         raise BudgetExceededError("scan budget reached")
     if reserve_stopped and context.get("parent_id") is not None:
         await coordinator.set_status(agent_id, "stopped")
+        await coordinator.mark_turn_settled(agent_id)
         raise SubagentBudgetReservedError("scan reached the sub-agent budget reserve")
 
     if reserve_stopped and start_parked and interactive and context.get("parent_id") is None:
@@ -611,10 +613,15 @@ async def _run_until_lifecycle(  # noqa: PLR0912
     while True:
         if coordinator.budget_stopped:
             await coordinator.set_status(agent_id, "stopped")
+            # Terminal from here - nothing more will be written for this
+            # agent, so a concurrent stop_agent should not wait out the full
+            # evidence timeout only to find this exact thing true anyway.
+            await coordinator.mark_turn_settled(agent_id)
             raise BudgetExceededError("scan budget reached")
 
         if coordinator.reserve_stopped and context.get("parent_id") is not None:
             await coordinator.set_status(agent_id, "stopped")
+            await coordinator.mark_turn_settled(agent_id)
             raise SubagentBudgetReservedError("scan reached the sub-agent budget reserve")
 
         try:

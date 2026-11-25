@@ -1017,6 +1017,33 @@ async def test_run_cycle_unsettles_at_entry_and_settles_only_on_true_exit(
 
 
 @pytest.mark.asyncio
+async def test_run_until_lifecycle_settles_on_a_global_budget_stop() -> None:
+    """The scan-wide budget stop raises immediately, with nothing more to
+    write - a concurrent stop_agent must not wait out the full evidence
+    timeout only to find exactly that true anyway."""
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    await coordinator.trigger_budget_stop()
+
+    with pytest.raises(execution.BudgetExceededError):
+        await execution._run_until_lifecycle(
+            MagicMock(),
+            coordinator,
+            "root",
+            initial_input="task",
+            run_config=MagicMock(),
+            context={},
+            max_turns=5,
+            session=None,
+            interactive=False,
+            event_sink=None,
+            hooks=None,
+        )
+
+    assert coordinator.runtimes["root"].turn_settled.is_set() is True
+
+
+@pytest.mark.asyncio
 async def test_run_agent_loop_seeds_identity_before_first_cycle(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
