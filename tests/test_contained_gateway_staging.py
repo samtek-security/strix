@@ -188,6 +188,7 @@ def test_stock_gateway_image_does_the_staging(
     fake_docker: _FakeDocker, files: tuple[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("RECON_EGRESS_GATEWAY_IMAGE", "recon/egress-gateway:stock")
+    monkeypatch.setenv("RECON_GATEWAY_UID", str(OTHER_UID))
     with pytest.raises(RuntimeError, match="not ready"):
         _start(files[0])
     assert fake_docker.helper_calls[0]["image"] == "recon/egress-gateway:stock"
@@ -416,3 +417,14 @@ def test_staging_helper_carries_ttl_and_run_labels(
     assert labels["recon.role"] == gateway_staging.HELPER_ROLE
     assert int(labels["recon.ttl_deadline"]) > int(labels["recon.created_at"])
     assert labels["recon.run_id"]
+
+
+def test_custom_gateway_image_needs_an_explicit_uid_before_any_resource(
+    fake_docker: _FakeDocker, files: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RECON_EGRESS_GATEWAY_IMAGE", "registry.example/custom-gateway:1")
+    monkeypatch.delenv("RECON_GATEWAY_UID", raising=False)
+    with pytest.raises(ValueError, match="RECON_GATEWAY_UID"):
+        _start(files[0])
+    assert fake_docker.networks_made == []
+    assert fake_docker.helper_calls == []

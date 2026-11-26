@@ -61,6 +61,18 @@ def gateway_uid() -> int:
     return uid
 
 
+def require_known_uid() -> None:
+    """A custom gateway image may run as any UID, so staging needs the UID stated outright."""
+    if (
+        os.environ.get("RECON_EGRESS_GATEWAY_IMAGE", "").strip()
+        and not os.environ.get("RECON_GATEWAY_UID", "").strip()
+    ):
+        raise ValueError(
+            "RECON_EGRESS_GATEWAY_IMAGE is set and the worker is not the gateway's user; set "
+            "RECON_GATEWAY_UID to the UID that image runs as so the staged files are readable"
+        )
+
+
 def needs_staging() -> bool:
     """True when the worker's files cannot be read by the gateway's user in place."""
     return os.geteuid() != gateway_uid()

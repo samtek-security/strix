@@ -242,6 +242,8 @@ async def _contained_docker_backend(
     # Checked before any Docker resource exists (fail-closed).
     reporter_url, reporter_token_host = _reporter_settings()
     stage_for_gateway = gateway_staging.needs_staging()  # validates RECON_GATEWAY_UID up front
+    if stage_for_gateway:
+        gateway_staging.require_known_uid()
 
     dc = docker.from_env()
     host_isolation.require_isolated_gateway_support(dc)
