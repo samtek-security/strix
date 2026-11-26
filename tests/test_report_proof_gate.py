@@ -135,7 +135,7 @@ async def test_poc_text_without_an_exchange_id_is_a_lead(report_state: ReportSta
     report = _filed(report_state)
     assert report["proof_status"] == "lead"
     assert report["proof_status_reason"].startswith(PROOF_FAILED_PREFIX)
-    assert "no proxy exchange id was cited" in report["proof_status_reason"]
+    assert "no exchange id was cited" in report["proof_status_reason"]
 
 
 @pytest.mark.asyncio
@@ -145,7 +145,7 @@ async def test_an_unknown_exchange_id_files_a_lead_and_drops_the_id(
     await _file(_Capture({_GOOD}), http_exchange_ids=[_OTHER])
     report = _filed(report_state)
     assert report["proof_status"] == "lead"
-    assert "failed the proxy check" in report["proof_status_reason"]
+    assert "not found in the exchange source" in report["proof_status_reason"]
     assert "http_exchange_ids" not in report or not report["http_exchange_ids"]
 
 
