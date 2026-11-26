@@ -72,3 +72,25 @@ async def test_unbound_evidence_is_a_lead() -> None:
     assert status == "lead"
     assert reason is not None
     assert "not bound" in reason
+
+
+@pytest.mark.asyncio
+async def test_source_comes_from_the_id_that_verified() -> None:
+    # Unknown numeric id first, then a gateway capture that verifies: the source is the capture's.
+    ids, status, _, source = await assess_proof(
+        _ctx(_Capture({_GOOD})), ["4242", _GOOD], require_all=False
+    )
+    assert (ids, status, source) == ([_GOOD], "exploited", "gateway_capture")
+
+
+@pytest.mark.asyncio
+async def test_require_all_verifies_every_cited_id() -> None:
+    third = "gw-0123456789ab-" + "c" * 32
+    _, status, reason, _ = await assess_proof(
+        _ctx(_Capture({_GOOD, _OTHER})), [_GOOD, _OTHER, third]
+    )
+    assert status == "lead" and reason is not None and reason.startswith(PROOF_FAILED_PREFIX)
+    ids, status, _, _ = await assess_proof(
+        _ctx(_Capture({_GOOD, _OTHER, third})), [_GOOD, _OTHER, third]
+    )
+    assert (ids, status) == ([_GOOD, _OTHER, third], "exploited")
