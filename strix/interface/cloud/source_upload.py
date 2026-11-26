@@ -20,7 +20,7 @@ import strix.interface.cloud.http as http  # noqa: PLR0402
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from typing import Protocol
+    from typing import IO, Protocol
 
     class _ScandirIterator(Iterator[os.DirEntry[str]], Protocol):
         def close(self) -> None: ...
@@ -31,6 +31,9 @@ MAX_FILE_BYTES = 25 * 1024 * 1024
 MAX_TOTAL_BYTES = 250 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 50 * 1024 * 1024
 MAX_CANDIDATE_PATHS = 200_000
+MAX_GIT_IGNORED_COUNT = 10_000
+_TRUNCATED_MARKER = "git_ignored_truncated"
+_RAW_RECORD_FACTOR = 10
 MAX_IGNORE_BYTES = 64 * 1024
 MAX_IGNORE_PATTERNS = 1_000
 MAX_IGNORE_PATTERN_CHARS = 1_024
@@ -151,6 +154,14 @@ class SourceManifest:
     def total_bytes(self) -> int:
         return sum(item.size for item in self.files)
 
+    @property
+    def excluded_truncated(self) -> bool:
+        return _TRUNCATED_MARKER in self.excluded
+
+    @property
+    def excluded_total(self) -> int:
+        return sum(count for reason, count in self.excluded.items() if reason != _TRUNCATED_MARKER)
+
     def as_dict(
         self,
         *,
@@ -162,7 +173,7 @@ class SourceManifest:
             "source": str(self.source),
             "file_count": len(self.files),
             "uncompressed_bytes": self.total_bytes,
-            "excluded_count": sum(self.excluded.values()),
+            "excluded_count": self.excluded_total,
             "excluded_by_reason": dict(sorted(self.excluded.items())),
             "include_hidden": self.include_hidden,
             "include_sensitive": self.include_sensitive,
@@ -356,6 +367,7 @@ def _candidate_paths(
     if git_root is not None:
         git = shutil.which("git")
         if git is not None:
+            _count_git_ignored(git, git_root, source, excluded)
             yield from _git_candidate_paths(git, git_root, source)
             return
     yield from _walk_candidate_paths(
@@ -364,6 +376,83 @@ def _candidate_paths(
         patterns=patterns,
         excluded=excluded,
     )
+
+
+def _count_git_ignored(git: str, git_root: Path, source: Path, excluded: Counter[str]) -> None:
+    """Account for untracked files Git's ignore rules hide from the candidate list.
+
+    Ignore rules, including the operator's global excludes, stay in force for the
+    upload. Counting them keeps the manifest honest about what was never examined.
+    An ignored directory counts once, and counting stops at a fixed cap.
+    """
+    relative_source = source.relative_to(git_root)
+    command = [
+        git,
+        "-C",
+        str(git_root),
+        "ls-files",
+        "-z",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+        "--",
+    ]
+    if relative_source != Path():
+        command.append(relative_source.as_posix())
+    try:
+        process = subprocess.Popen(  # noqa: S603  # nosec B603
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise http.CloudError(f"could not enumerate Git source files: {exc}") from exc
+    assert process.stdout is not None
+    count = 0
+    truncated = False
+    try:
+        count, truncated = _tally_ignored(process.stdout)
+        if truncated:
+            process.terminate()
+        if process.wait() != 0 and not truncated:
+            raise http.CloudError("Git could not enumerate ignored source paths.")
+    finally:
+        process.stdout.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    if count:
+        excluded["git_ignored"] += count
+    if truncated:
+        excluded[_TRUNCATED_MARKER] = 1
+
+
+def _tally_ignored(stream: IO[bytes]) -> tuple[int, bool]:
+    """Count ignored entries, stopping at the cap. Returns (count, truncated)."""
+    buffer = b""
+    count = 0
+    raw = 0
+    ignored_dir = b"\0"
+    while chunk := stream.read(64 * 1024):
+        buffer += chunk
+        records = buffer.split(b"\0")
+        buffer = records.pop()
+        for record in records:
+            raw += 1
+            if raw > MAX_GIT_IGNORED_COUNT * _RAW_RECORD_FACTOR:
+                return count, True
+            # A directory with its own .gitignore also lists its ignored children.
+            if record.startswith(ignored_dir):
+                continue
+            if count >= MAX_GIT_IGNORED_COUNT:
+                return count, True
+            count += 1
+            if record.endswith(b"/"):
+                ignored_dir = record
+    if buffer:
+        raise http.CloudError("Git returned a malformed ignored-file listing.")
+    return count, False
 
 
 def _git_candidate_paths(git: str, git_root: Path, source: Path) -> Iterator[Path]:
