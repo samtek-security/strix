@@ -74,6 +74,28 @@ def _sandbox_ttl_sec() -> int:
 sandbox_ttl_sec = _sandbox_ttl_sec
 
 
+def remove_volume_if_created(volume: Any) -> None:
+    """Remove ``volume`` only when the volume now at its name is the one this handle created.
+
+    Docker volumes have no ID and every attempt for a scan reuses one name, so a stale handle's
+    ``remove`` would delete a retry's replacement. The creation time recorded on the handle tells
+    them apart. A handle with no recorded time cannot be verified and is left alone.
+    """
+    created = (getattr(volume, "attrs", None) or {}).get("CreatedAt")
+    if not created:
+        logger.warning("not removing volume %s: no creation time to verify it by", volume.name)
+        return
+    try:
+        current = volume.client.volumes.get(volume.name)
+        current.reload()
+    except docker_errors.NotFound:
+        return
+    if current.attrs.get("CreatedAt") != created:
+        logger.warning("not removing volume %s: a newer volume now holds the name", volume.name)
+        return
+    current.remove(force=True)
+
+
 _SANDBOX_NETWORK_ENV = "STRIX_DOCKER_SANDBOX_NETWORK"
 
 
@@ -359,6 +381,11 @@ class StrixDockerSandboxClient(DockerSandboxClient):
                 {
                     "recon.sandbox": "true",
                     "recon.scan_id": str(getattr(self, "recon_scan_id", "") or ""),
+                    **(
+                        {"recon.engagement_id": str(self.recon_engagement_id)}
+                        if getattr(self, "recon_engagement_id", "")
+                        else {}
+                    ),
                     "recon.created_at": str(now),
                     "recon.ttl_deadline": str(now + _sandbox_ttl_sec()),
                     # Host path to the run's heartbeat file. The reaper keeps any container whose
@@ -482,7 +509,7 @@ class StrixDockerSandboxClient(DockerSandboxClient):
             ca_volume = getattr(self, "recon_gateway_ca_volume", None)
             if ca_volume is not None:
                 with contextlib.suppress(Exception):
-                    ca_volume.remove(force=True)
+                    remove_volume_if_created(ca_volume)
             stage_volume = getattr(self, "recon_gateway_stage_volume", None)
             if stage_volume is not None:
                 with contextlib.suppress(Exception):

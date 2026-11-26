@@ -444,6 +444,24 @@ def _gateway_capture_client(client: Any, session: Any, scan_id: str) -> Any:
     return capture
 
 
+def _engagement_kwargs(backend: Any, engagement_id: str) -> dict[str, str]:
+    """``engagement_id`` for a backend that takes it, nothing for one that does not.
+
+    A backend registered with an older explicit signature (the k8s backend before it learned the
+    argument) would raise ``TypeError`` if handed a keyword it never declared.
+    """
+    if not engagement_id:
+        return {}
+    try:
+        params = inspect.signature(backend).parameters
+    except (TypeError, ValueError):
+        return {}
+    takes_it = "engagement_id" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    return {"engagement_id": engagement_id} if takes_it else {}
+
+
 async def create_or_reuse(  # noqa: PLR0915
     scan_id: str,
     *,
@@ -457,6 +475,7 @@ async def create_or_reuse(  # noqa: PLR0915
     gateway_spec_path: str = "",
     gateway_spec_json: str = "",
     gateway_target_ports: tuple[int, ...] = (),
+    engagement_id: str = "",
 ) -> dict[str, Any]:
     """Return the existing session bundle for ``scan_id`` or create a new one.
 
@@ -504,6 +523,12 @@ async def create_or_reuse(  # noqa: PLR0915
                 f"scan {scan_id!r}: cached session has gateway policy fingerprint "
                 f"{cached_fp!r} but caller supplied {fingerprint!r}; "
                 "tear down the session before changing the gateway policy"
+            )
+        if cached.get("_engagement_id", "") != engagement_id:
+            raise RuntimeError(
+                f"scan {scan_id!r}: cached session belongs to engagement "
+                f"{cached.get('_engagement_id', '')!r} but caller supplied {engagement_id!r}; "
+                "tear down the session first"
             )
         logger.info("Reusing existing sandbox session for scan %s", scan_id)
         return cached
@@ -584,6 +609,7 @@ async def create_or_reuse(  # noqa: PLR0915
                 gateway_spec_path=gateway_spec_path,
                 gateway_spec_json=gateway_spec_json,
                 gateway_target_ports=normalized_ports,
+                **_engagement_kwargs(backend, engagement_id),
             )
         )
         try:
@@ -634,6 +660,8 @@ async def create_or_reuse(  # noqa: PLR0915
                 asyncio.create_task(_caido_when_up(), name=f"caido-bootstrap-{scan_id}")
             ),
             "_gateway_policy_fingerprint": fingerprint,
+            "_engagement_id": engagement_id,
+            "_heartbeat_path": heartbeat_path,
         }
         _SESSION_CACHE[scan_id] = bundle
         logger.info("Sandbox session for scan %s deferred and cached", scan_id)
@@ -667,6 +695,8 @@ async def create_or_reuse(  # noqa: PLR0915
         "session": session,
         "caido_client": caido_client,
         "_gateway_policy_fingerprint": fingerprint,
+        "_engagement_id": engagement_id,
+        "_heartbeat_path": heartbeat_path,
     }
     _SESSION_CACHE[scan_id] = bundle
     logger.info("Sandbox session for scan %s ready and cached", scan_id)
@@ -714,37 +744,45 @@ async def cleanup(scan_id: str) -> None:
         logger.debug("cleanup(%s): no cached session", scan_id)
         return
 
-    caido_client = bundle.get("caido_client")
-    if caido_client is not None:
-        try:
-            await caido_client.aclose()
-        except Exception:  # noqa: BLE001
-            logger.debug("cleanup(%s): caido_client.aclose() raised", scan_id, exc_info=True)
-
-    # Wipe persisted browser cookies before the sandbox is deleted so abort/TTL
-    # teardown does not leave /workspace/.recon-auth behind when the volume
-    # outlives the process. A deferred session still coming up has none yet.
-    session = bundle.get("session")
-    pending = isinstance(session, DeferredSandboxSession) and session.pending
-    if session is not None and not pending and callable(getattr(session, "exec", None)):
-        try:
-            await purge_auth_state(session)
-        except Exception:  # noqa: BLE001 - never fail cleanup
-            logger.debug("cleanup(%s): purge_auth_state raised", scan_id, exc_info=True)
-
-    client = bundle["client"]
+    # Stopped last: until the sandbox is gone the reaper must keep seeing a live owner, or a retry
+    # could reap, recreate and then have its new CA volume deleted by this teardown.
+    heartbeat = bundle.get("_heartbeat")
     try:
-        await client.delete(bundle["session"])
-        logger.info("Cleaned up sandbox session for scan %s", scan_id)
-    except Exception:
-        logger.exception(
-            "cleanup(%s): client.delete raised; container may need manual reaping",
-            scan_id,
-        )
+        caido_client = bundle.get("caido_client")
+        if caido_client is not None:
+            try:
+                await caido_client.aclose()
+            except Exception:  # noqa: BLE001
+                logger.debug("cleanup(%s): caido_client.aclose() raised", scan_id, exc_info=True)
 
-    docker_client = getattr(client, "docker_client", None)
-    if docker_client is not None:
+        # Wipe persisted browser cookies before the sandbox is deleted so abort/TTL
+        # teardown does not leave /workspace/.recon-auth behind when the volume
+        # outlives the process. A deferred session still coming up has none yet.
+        session = bundle.get("session")
+        pending = isinstance(session, DeferredSandboxSession) and session.pending
+        if session is not None and not pending and callable(getattr(session, "exec", None)):
+            try:
+                await purge_auth_state(session)
+            except Exception:  # noqa: BLE001 - never fail cleanup
+                logger.debug("cleanup(%s): purge_auth_state raised", scan_id, exc_info=True)
+
+        client = bundle["client"]
         try:
-            docker_client.close()
-        except Exception:  # noqa: BLE001
-            logger.debug("cleanup(%s): docker_client.close() raised", scan_id, exc_info=True)
+            await client.delete(bundle["session"])
+            logger.info("Cleaned up sandbox session for scan %s", scan_id)
+        except Exception:
+            logger.exception(
+                "cleanup(%s): client.delete raised; container may need manual reaping",
+                scan_id,
+            )
+
+        docker_client = getattr(client, "docker_client", None)
+        if docker_client is not None:
+            try:
+                docker_client.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("cleanup(%s): docker_client.close() raised", scan_id, exc_info=True)
+    finally:
+        if heartbeat is not None:
+            with contextlib.suppress(Exception):
+                await heartbeat.stop()
