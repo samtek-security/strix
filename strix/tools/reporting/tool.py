@@ -280,50 +280,21 @@ async def _assess_direct_report_proof(
 ) -> tuple[list[str] | None, dict[str, Any], str | None]:
     """Hold a directly filed report to the proof bar ``promote_finding`` applies.
 
-    Returns ``(ids, proof_fields, warning)``. The report is ``exploited`` only when at least
-    one cited exchange id verifies through the same check the exploitation queue uses;
-    anything else files as a ``lead`` with the reason recorded. Syntactically invalid ids
-    are still rejected by the caller before this runs.
+    Returns ``(ids, proof_fields, warning)``. The decision is ``assess_proof``, the same function
+    the exploitation queue calls: one verified id is enough here, anything else files as a lead
+    with the reason recorded. Syntactically invalid ids are rejected by the caller first.
     """
-    from strix.tools.exploitation.tool import (
-        NO_EXCHANGE_SOURCE_REASON,
-        PROOF_FAILED_PREFIX,
-        _capture_available,
-        _exchange_source,
-        _verify_proof,
-    )
+    from strix.tools.exploitation.tool import assess_proof
 
     cited, _ = _normalize_http_exchange_ids(raw_ids)
-    cited = cited or []
-    if not _capture_available(ctx):
-        return (
-            cited or None,
-            {"proof_status": "lead", "proof_status_reason": NO_EXCHANGE_SOURCE_REASON},
-            None,
-        )
-
-    verified: list[str] = []
-    kept: list[str] = []
-    failure: str | None = None
-    for exchange_id in cited or [None]:
-        ids, why = await _verify_proof(ctx, exchange_id, None)
-        if why is None:
-            verified.extend(ids or [])
-        else:
-            failure = failure or why
-            kept.extend(ids or [])
-    if verified:
-        return (
-            verified,
-            {"proof_status": "exploited", "proof_source": _exchange_source(verified[0])},
-            None,
-        )
-    warning = _HTTP_EXCHANGE_UNVERIFIED_WARNING if kept else None
-    return (
-        kept or None,
-        {"proof_status": "lead", "proof_status_reason": f"{PROOF_FAILED_PREFIX} {failure}"},
-        warning,
-    )
+    ids, status, reason, source = await assess_proof(ctx, list(cited or []), require_all=False)
+    fields: dict[str, Any] = {"proof_status": status}
+    if reason:
+        fields["proof_status_reason"] = reason
+    if source:
+        fields["proof_source"] = source
+    warning = _HTTP_EXCHANGE_UNVERIFIED_WARNING if status == "lead" and ids else None
+    return ids, fields, warning
 
 
 def _with_warning(result: dict[str, Any], warning: str | None) -> dict[str, Any]:

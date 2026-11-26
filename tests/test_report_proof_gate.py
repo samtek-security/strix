@@ -262,6 +262,11 @@ async def test_both_tools_reach_the_same_proof_status(
     finally:
         set_global_report_state(None)
 
-    assert direct["proof_status"] == promoted["proof_status"]
-    assert direct.get("proof_status_reason") == promoted.get("proof_status_reason")
-    assert direct.get("proof_source") == promoted.get("proof_source")
+    def decision(report: dict[str, Any]) -> tuple[Any, Any, Any]:
+        return (
+            report["proof_status"],
+            report.get("proof_status_reason"),
+            report.get("proof_source"),
+        )
+
+    assert decision(direct) == decision(promoted)
