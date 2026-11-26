@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -17,7 +18,7 @@ from agents.run_config import CallModelData, ModelInputData
 from agents.tool_context import ToolContext
 from openai.types.responses import ResponseOutputMessage, ResponseOutputRefusal, ResponseOutputText
 
-from strix.core import execution
+from strix.core import execution, runner
 from strix.core.agents import AgentCoordinator, WaitKind
 from strix.core.execution import (
     _notify_root_on_budget_reserve,
@@ -1820,3 +1821,16 @@ async def test_stop_reason_survives_snapshot_and_clears_on_reset() -> None:
     await older.restore(legacy)
     assert older.budget_stopped is True
     assert older.stop_reason is None
+
+
+def test_exit_reason_is_saved_to_the_run_artifacts(monkeypatch: pytest.MonkeyPatch) -> None:
+    saved: list[str | None] = []
+    state = SimpleNamespace(
+        scan_ended_exit_reason=None,
+        save_run_data=lambda: saved.append(state.scan_ended_exit_reason),
+    )
+    monkeypatch.setattr(runner, "get_global_report_state", lambda: state)
+    runner._note_exit_reason("elapsed_budget")
+    runner._note_exit_reason("budget_exceeded")  # the first reason stays
+    assert state.scan_ended_exit_reason == "elapsed_budget"
+    assert saved == ["elapsed_budget"]
