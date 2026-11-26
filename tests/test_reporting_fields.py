@@ -2815,3 +2815,29 @@ async def test_unparseable_origin_has_none_and_never_merges(
         **{**_PROOF_TARGET, "target": bad or "t"},
     )
     assert result["report_id"] != lead_id
+
+
+def test_code_location_keeps_the_repository_it_names() -> None:
+    """A location in a multi-repository run names the repository its path is relative to."""
+    out = reporting_tool._normalize_code_locations(
+        [
+            {"repo": " acme/api ", "file": "app/views.py", "start_line": 3, "end_line": 3},
+            {"file": "app/views.py", "start_line": 1, "end_line": 1},
+        ]
+    )
+    assert out is not None
+    assert out[0]["repo"] == "acme/api"
+    assert "repo" not in out[1]
+    assert reporting_tool._validate_code_locations(out) == []
+
+
+def test_code_location_rejects_a_repository_that_is_not_a_plain_name() -> None:
+    for bad in ("../api", "acme/api/x", "https://github.com/acme/api", "a b", "acme/"):
+        errors = reporting_tool._validate_code_locations(
+            [{"repo": bad, "file": "a.py", "start_line": 1, "end_line": 1}]
+        )
+        assert any("repo must be" in e for e in errors), bad
+    ok = reporting_tool._validate_code_locations(
+        [{"repo": "api", "file": "a.py", "start_line": 1, "end_line": 1}]
+    )
+    assert ok == []

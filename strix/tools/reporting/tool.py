@@ -42,6 +42,7 @@ _CVSS_VALID = {
 
 
 _CODE_LOCATION_FIELDS = (
+    "repo",
     "file",
     "start_line",
     "end_line",
@@ -50,6 +51,13 @@ _CODE_LOCATION_FIELDS = (
     "fix_before",
     "fix_after",
 )
+
+
+_REPO_NAME = re.compile(r"^[A-Za-z0-9._-]{1,100}(?:/[A-Za-z0-9._-]{1,100})?$")
+
+
+def _valid_repo_name(repo: str) -> bool:
+    return bool(_REPO_NAME.match(repo)) and all(seg.strip(".") for seg in repo.split("/"))
 
 
 def _validate_file_path(path: str) -> str | None:
@@ -99,6 +107,12 @@ def _validate_code_locations(locations: list[dict[str, Any]]) -> list[str]:
         path_err = _validate_file_path(loc.get("file", ""))
         if path_err:
             errors.append(f"code_locations[{i}]: {path_err}")
+        repo = loc.get("repo")
+        if repo is not None and not _valid_repo_name(repo):
+            errors.append(
+                f"code_locations[{i}]: repo must be 'owner/name' (or a bare repository name), "
+                f"got '{repo}'"
+            )
         start = loc.get("start_line")
         if not isinstance(start, int) or start < 1:
             errors.append(f"code_locations[{i}]: start_line must be a positive integer")
@@ -1503,6 +1517,11 @@ async def create_vulnerability_report(
               direct editing).
 
             **Per-location fields**:
+            - ``repo`` (optional): the repository ``file`` is relative to, as
+              ``owner/name``. Give it whenever the engagement has more than
+              one repository: two repositories can hold the same path, and a
+              location that names none is only trusted when exactly one
+              repository holds that file and line range.
             - ``file`` (REQUIRED): path **relative** to repo root. No
               leading slash, no ``..``, no ``/workspace/`` prefix.
               Right: ``"src/db/queries.ts"``. Wrong:
