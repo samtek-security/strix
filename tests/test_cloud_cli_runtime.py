@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Focused regressions for managed-cloud CLI rendering and runtime safety."""
 
 from __future__ import annotations
@@ -1113,10 +1114,12 @@ def test_one_time_api_token_has_save_now_warning(
 def test_root_help_advertises_cloud_and_completions(
     monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["strix", "--help"])
+    monkeypatch.setattr(sys, "argv", ["recon", "--help"])
     with pytest.raises(SystemExit) as raised:
         interface_main()
     assert raised.value.code == 0
     output = capsys.readouterr().out
-    assert "strix cloud" in output
-    assert "strix completions" in output
+    assert "recon cloud" in output
+    assert "recon completions" in output
+    assert "strix cloud" not in output
+    assert "strix completions" not in output

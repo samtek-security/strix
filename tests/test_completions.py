@@ -1,6 +1,9 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 from __future__ import annotations
 
 from typing import Any
+
+import pytest
 
 from strix.interface.completions import completion_candidates, run_completions
 
@@ -146,6 +149,32 @@ def test_completion_scripts_cover_supported_shells(capsys: Any) -> None:
         assert run_completions([shell]) == 0
         output = capsys.readouterr().out
         assert "completions --candidates" in output
+
+
+@pytest.mark.parametrize(
+    ("shell", "registration"),
+    [
+        ("zsh", "compdef _recon recon"),
+        ("bash", "complete -F _recon_completion recon"),
+        ("fish", "complete -c recon -f"),
+    ],
+)
+def test_completion_scripts_register_recon_not_strix(
+    shell: str, registration: str, capsys: Any
+) -> None:
+    assert run_completions([shell]) == 0
+    script = capsys.readouterr().out
+    assert registration in script
+    if shell != "zsh":
+        assert "recon completions --candidates" in script
+    assert "strix" not in script
+
+
+def test_completion_usage_names_recon(capsys: Any) -> None:
+    assert run_completions(["--help"]) == 0
+    usage = capsys.readouterr().out
+    assert "recon completions" in usage
+    assert "strix" not in usage
 
 
 def test_bash_completion_preserves_candidates_with_spaces(capsys: Any) -> None:

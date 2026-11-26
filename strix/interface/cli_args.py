@@ -1,5 +1,5 @@
 # Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
-"""Command-line argument parsing for the ``strix`` scan entrypoint."""
+"""Command-line argument parsing for the ``recon`` scan entrypoint."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 from strix.config import apply_config_override
 from strix.config.settings import DEFAULT_MAX_TURNS
 from strix.core.paths import RUNS_DIR_NAME, run_dir_for, runtime_state_dir
+from strix.interface.cli_name import CLI_NAME
 from strix.interface.scan_setup import attach_workspace_mount, build_targets_info
 from strix.interface.update_check import self_update
 from strix.interface.utils import (
@@ -61,54 +62,54 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Strix Multi-Agent Cybersecurity Penetration Testing Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
 Examples:
   # Web application penetration test
-  strix --target https://example.com
+  {CLI_NAME} --target https://example.com
 
   # GitHub repository analysis
-  strix --target https://github.com/user/repo
-  strix --target git@github.com:user/repo.git
+  {CLI_NAME} --target https://github.com/user/repo
+  {CLI_NAME} --target git@github.com:user/repo.git
 
   # Local code analysis
-  strix --target ./my-project
+  {CLI_NAME} --target ./my-project
 
   # API spec test (OpenAPI/Swagger file or Postman collection export)
-  strix --target ./openapi.yaml --target https://api.example.com
-  strix --target ./collection.postman_collection.json
+  {CLI_NAME} --target ./openapi.yaml --target https://api.example.com
+  {CLI_NAME} --target ./collection.postman_collection.json
 
   # Postman collection pulled live by id (needs POSTMAN_API_KEY); optional environment
-  strix --target postman://<collection-uuid> --target https://api.example.com
-  strix --target "postman://<collection-uuid>?env=<environment-uuid>"
+  {CLI_NAME} --target postman://<collection-uuid> --target https://api.example.com
+  {CLI_NAME} --target "postman://<collection-uuid>?env=<environment-uuid>"
 
   # Domain penetration test
-  strix --target example.com
+  {CLI_NAME} --target example.com
 
   # IP address penetration test
-  strix --target 192.168.1.42
+  {CLI_NAME} --target 192.168.1.42
 
   # Multiple targets (e.g., white-box testing with source and deployed app)
-  strix --target https://github.com/user/repo --target https://example.com
-  strix --target ./my-project --target https://staging.example.com --target https://prod.example.com
+  {CLI_NAME} --target https://github.com/user/repo --target https://example.com
+  {CLI_NAME} --target ./my-project --target https://staging.example.com --target https://prod.example.com
 
   # Targets from a file, one target per non-empty, non-comment line
-  strix --target-list ./targets.txt
+  {CLI_NAME} --target-list ./targets.txt
 
   # Custom instructions (inline)
-  strix --target example.com --instruction "Focus on authentication vulnerabilities"
+  {CLI_NAME} --target example.com --instruction "Focus on authentication vulnerabilities"
 
   # Custom instructions (from file)
-  strix --target example.com --instruction-file ./instructions.txt
-  strix --target https://app.com --instruction-file /path/to/detailed_instructions.md
+  {CLI_NAME} --target example.com --instruction-file ./instructions.txt
+  {CLI_NAME} --target https://app.com --instruction-file /path/to/detailed_instructions.md
 
   # Extra files placed in the sandbox workspace
-  strix --target ./my-project --workspace-file ./wordlist.txt
-  strix --target https://app.com --workspace-file ./openapi.yaml:specs/openapi.yaml
+  {CLI_NAME} --target ./my-project --workspace-file ./wordlist.txt
+  {CLI_NAME} --target https://app.com --workspace-file ./openapi.yaml:specs/openapi.yaml
 
 Strix Cloud:
-  strix cloud login
-  strix cloud scans start --source . --yes --wait
-  strix cloud                      # list every cloud resource
+  {CLI_NAME} cloud login
+  {CLI_NAME} cloud scans start --source . --yes --wait
+  {CLI_NAME} cloud                      # list every cloud resource
 
   Run a pentest in Strix Cloud     https://app.strix.ai
   Try Strix Enterprise             https://strix.ai/demo
@@ -119,13 +120,13 @@ Strix Cloud:
         "-v",
         "--version",
         action="version",
-        version=f"strix {get_version()}",
+        version=f"{CLI_NAME} {get_version()}",
     )
 
     parser.add_argument(
         "--update",
         action="store_true",
-        help="Update strix to the latest version and exit. Self-updates the "
+        help=f"Update {CLI_NAME} to the latest version and exit. Self-updates the "
         "standalone binary install; for pip/pipx/uv installs, prints the "
         "matching upgrade command instead.",
     )

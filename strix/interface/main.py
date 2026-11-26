@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """
 Strix Agent Interface
 """
@@ -25,6 +26,7 @@ from strix.interface.cli_args import (
     resume_run_list_message,
     terminal_attached,
 )
+from strix.interface.cli_name import CLI_NAME
 from strix.interface.environment import (
     check_docker_installed,
     pull_docker_image,
@@ -61,10 +63,10 @@ logger = logging.getLogger(__name__)
 
 _ROOT_SUBCOMMAND_HELP = """
 Additional commands:
-  strix cloud ...          Use the managed Strix platform
-  strix auth ...           Manage model-subscription sign-in
-  strix view [RUN]         View a completed or running scan
-  strix completions SHELL  Generate zsh, bash, or fish tab completion
+  {cli} cloud ...          Use the managed Strix platform
+  {cli} auth ...           Manage model-subscription sign-in
+  {cli} view [RUN]         View a completed or running scan
+  {cli} completions SHELL  Generate zsh, bash, or fish tab completion
 """
 
 
@@ -103,7 +105,7 @@ def _subscription_error_hint(exc: BaseException) -> str | None:
     ):
         return (
             "Your ChatGPT sign-in has expired or was revoked. Sign in again:\n"
-            "  strix auth login chatgpt"
+            f"  {CLI_NAME} auth login chatgpt"
         )
     return None
 
@@ -229,7 +231,7 @@ def display_completion_message(args: argparse.Namespace, results_path: Path) -> 
     view_text.append("\n")
     view_text.append("View", style="dim")
     view_text.append("    ")
-    view_text.append(f"strix view {args.run_name}", style="#22c55e")
+    view_text.append(f"{CLI_NAME} view {args.run_name}", style="#22c55e")
     panel_parts.extend(["\n", view_text])
 
     if not scan_completed:
@@ -237,7 +239,7 @@ def display_completion_message(args: argparse.Namespace, results_path: Path) -> 
         resume_text.append("\n")
         resume_text.append("Resume", style="dim")
         resume_text.append("  ")
-        resume_text.append(f"strix --resume {args.run_name}", style="#22c55e")
+        resume_text.append(f"{CLI_NAME} --resume {args.run_name}", style="#22c55e")
         panel_parts.extend(["\n", resume_text])
 
     panel_content = Text.assemble(*panel_parts)
@@ -438,7 +440,7 @@ def main() -> None:
         try:
             parse_arguments()
         except SystemExit as exc:
-            Console().print(_ROOT_SUBCOMMAND_HELP.strip(), markup=False)
+            Console().print(_ROOT_SUBCOMMAND_HELP.format(cli=CLI_NAME).strip(), markup=False)
             raise SystemExit(exc.code) from None
 
     # `strix view [<run>]` is a viewer-only subcommand, dispatched before the

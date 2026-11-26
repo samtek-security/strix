@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 from __future__ import annotations
 
 import stat
@@ -24,9 +25,9 @@ def _write_executable(path: Path, content: str) -> None:
 
 
 def _create_release_archive(tmp_path: Path) -> Path:
-    binary_name = f"strix-{RELEASE_VERSION}-{RELEASE_TARGET}"
+    binary_name = f"recon-{RELEASE_VERSION}-{RELEASE_TARGET}"
     binary_path = tmp_path / binary_name
-    _write_executable(binary_path, f"#!/bin/sh\nprintf 'strix {RELEASE_VERSION}\\n'\n")
+    _write_executable(binary_path, f"#!/bin/sh\nprintf 'recon {RELEASE_VERSION}\\n'\n")
 
     archive_path = tmp_path / f"{binary_name}.tar.gz"
     with tarfile.open(archive_path, "w:gz") as archive:
@@ -123,17 +124,17 @@ def test_installer_downloads_and_runs_linux_arm64_release(tmp_path: Path) -> Non
     result = _run_installer(repository_root, environment)
 
     assert result.returncode == 0, result.stderr
-    expected_filename = f"strix-{RELEASE_VERSION}-{RELEASE_TARGET}.tar.gz"
+    expected_filename = f"recon-{RELEASE_VERSION}-{RELEASE_TARGET}.tar.gz"
     assert expected_filename in curl_log_path.read_text(encoding="utf-8")
 
-    installed_binary = home_path / ".strix/bin/strix"
+    installed_binary = home_path / ".strix/bin/recon"
     installed_result = subprocess.run(  # noqa: S603
         [str(installed_binary), "--version"],
         capture_output=True,
         text=True,
         check=True,
     )
-    assert installed_result.stdout.strip() == f"strix {RELEASE_VERSION}"
+    assert installed_result.stdout.strip() == f"recon {RELEASE_VERSION}"
 
 
 def test_installer_rejects_unsupported_architecture(tmp_path: Path) -> None:

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 
 set -euo pipefail
 
-APP=strix
+APP=recon
 REPO="usestrix/strix"
 STRIX_IMAGE="ghcr.io/usestrix/strix-sandbox:1.4.0"
 
@@ -103,16 +104,16 @@ check_existing_installation() {
     local found_paths=()
     while IFS= read -r -d '' path; do
         found_paths+=("$path")
-    done < <(which -a strix 2>/dev/null | tr '\n' '\0' || true)
+    done < <(which -a recon 2>/dev/null | tr '\n' '\0' || true)
 
     if [ ${#found_paths[@]} -gt 0 ]; then
         for path in "${found_paths[@]}"; do
-            if [[ ! -e "$path" ]] || [[ "$path" == "$INSTALL_DIR/strix"* ]]; then
+            if [[ ! -e "$path" ]] || [[ "$path" == "$INSTALL_DIR/recon"* ]]; then
                 continue
             fi
 
             if [[ -n "$path" ]]; then
-                echo -e "${MUTED}Found existing strix at: ${NC}$path"
+                echo -e "${MUTED}Found existing recon at: ${NC}$path"
 
                 if [[ "$path" == *".local/bin"* ]]; then
                     echo -e "${MUTED}Removing old pipx installation...${NC}"
@@ -132,8 +133,8 @@ check_existing_installation() {
 check_version() {
     check_existing_installation
 
-    if [[ -x "$INSTALL_DIR/strix" ]]; then
-        installed_version=$("$INSTALL_DIR/strix" --version 2>/dev/null | awk '{print $2}' || echo "")
+    if [[ -x "$INSTALL_DIR/recon" ]]; then
+        installed_version=$("$INSTALL_DIR/recon" --version 2>/dev/null | awk '{print $2}' || echo "")
         if [[ "$installed_version" == "$specific_version" ]]; then
             print_message info "${GREEN}✓ Strix ${NC}$specific_version${GREEN} already installed${NC}"
             SKIP_DOWNLOAD=true
@@ -161,11 +162,11 @@ download_and_install() {
     echo -e "${MUTED}Extracting...${NC}"
     if [ "$os" = "windows" ]; then
         unzip -q "$filename"
-        mv "strix-${specific_version}-${target}.exe" "$INSTALL_DIR/strix.exe"
+        mv "recon-${specific_version}-${target}.exe" "$INSTALL_DIR/recon.exe"
     else
         tar -xzf "$filename"
-        mv "strix-${specific_version}-${target}" "$INSTALL_DIR/strix"
-        chmod 755 "$INSTALL_DIR/strix"
+        mv "recon-${specific_version}-${target}" "$INSTALL_DIR/recon"
+        chmod 755 "$INSTALL_DIR/recon"
     fi
 
     cd - > /dev/null
@@ -213,9 +214,9 @@ add_to_path() {
     if grep -Fxq "$command" "$config_file" 2>/dev/null; then
         print_message info "${MUTED}PATH already configured in ${NC}$config_file"
     elif [[ -w $config_file ]]; then
-        echo -e "\n# strix" >> "$config_file"
+        echo -e "\n# recon" >> "$config_file"
         echo "$command" >> "$config_file"
-        print_message info "${MUTED}Successfully added ${NC}strix ${MUTED}to \$PATH in ${NC}$config_file"
+        print_message info "${MUTED}Successfully added ${NC}recon ${MUTED}to \$PATH in ${NC}$config_file"
     else
         print_message warning "Manually add the directory to $config_file (or similar):"
         print_message info "  $command"
@@ -292,24 +293,24 @@ setup_path() {
 verify_installation() {
     export PATH="$INSTALL_DIR:$PATH"
 
-    local which_strix=$(which strix 2>/dev/null || echo "")
+    local which_recon=$(which recon 2>/dev/null || echo "")
 
-    if [[ "$which_strix" != "$INSTALL_DIR/strix" && "$which_strix" != "$INSTALL_DIR/strix.exe" ]]; then
-        if [[ -n "$which_strix" ]]; then
-            echo -e "${YELLOW}⚠ Found conflicting strix at: ${NC}$which_strix"
+    if [[ "$which_recon" != "$INSTALL_DIR/recon" && "$which_recon" != "$INSTALL_DIR/recon.exe" ]]; then
+        if [[ -n "$which_recon" ]]; then
+            echo -e "${YELLOW}⚠ Found conflicting recon at: ${NC}$which_recon"
             echo -e "${MUTED}Attempting to remove...${NC}"
 
-            if rm -f "$which_strix" 2>/dev/null; then
+            if rm -f "$which_recon" 2>/dev/null; then
                 echo -e "${GREEN}✓ Removed conflicting installation${NC}"
             else
                 echo -e "${YELLOW}Could not remove automatically.${NC}"
-                echo -e "${MUTED}Please remove manually: ${NC}rm $which_strix"
+                echo -e "${MUTED}Please remove manually: ${NC}rm $which_recon"
             fi
         fi
     fi
 
-    if [[ -x "$INSTALL_DIR/strix" ]]; then
-        local version=$("$INSTALL_DIR/strix" --version 2>/dev/null | awk '{print $2}' || echo "unknown")
+    if [[ -x "$INSTALL_DIR/recon" ]]; then
+        local version=$("$INSTALL_DIR/recon" --version 2>/dev/null | awk '{print $2}' || echo "unknown")
         echo -e "${GREEN}✓ Strix ${NC}$version${GREEN} ready${NC}"
     fi
 }
@@ -340,7 +341,7 @@ echo -e "     ${MUTED}export LLM_API_KEY='your-api-key'${NC}"
 echo -e "     ${MUTED}export STRIX_LLM='openai/gpt-5.4'${NC}"
 echo ""
 echo -e "  ${CYAN}2.${NC} Run a penetration test:"
-echo -e "     ${MUTED}strix --target https://example.com${NC}"
+echo -e "     ${MUTED}recon --target https://example.com${NC}"
 echo ""
 echo -e "${MUTED}For more information visit ${NC}https://strix.ai"
 echo -e "${MUTED}Supported models ${NC}https://docs.strix.ai/llm-providers/overview"

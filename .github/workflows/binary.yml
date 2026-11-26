@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 name: Binary
 
 on:
@@ -48,10 +49,10 @@ jobs:
       - uses: ./.github/actions/setup-python-env
       - run: make tui-build
       - run: uv run --frozen pyinstaller recon.spec --noconfirm
-      - run: dist/strix --version
+      - run: dist/recon --version
       - name: Binary bundles the TUI sidecar and the provider dependencies
         run: |
-          uv run --frozen pyi-archive_viewer -l -r dist/strix > archive.txt
+          uv run --frozen pyi-archive_viewer -l -r dist/recon > archive.txt
           grep -E "strix/bin/strix-tui" archive.txt >/dev/null
           grep -E "'google\.auth\.transport\.requests'" archive.txt >/dev/null
           grep -E "'boto3\.session'" archive.txt >/dev/null
@@ -64,9 +65,9 @@ jobs:
           AWS_REGION: us-east-1
         run: |
           mkdir -p /tmp/target && echo 'print("hi")' > /tmp/target/app.py
-          STRIX_LLM=vertex_ai/gemini-2.5-pro dist/strix -n -t /tmp/target --scan-mode quick > vertex.log 2>&1 || true
+          STRIX_LLM=vertex_ai/gemini-2.5-pro dist/recon -n -t /tmp/target --scan-mode quick > vertex.log 2>&1 || true
           grep -q "DefaultCredentialsError" vertex.log
           if grep -q "No module named" vertex.log; then exit 1; fi
-          STRIX_LLM=bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0 dist/strix -n -t /tmp/target --scan-mode quick > bedrock.log 2>&1 || true
+          STRIX_LLM=bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0 dist/recon -n -t /tmp/target --scan-mode quick > bedrock.log 2>&1 || true
           grep -q "Unable to locate credentials" bedrock.log
           if grep -q "No module named" bedrock.log; then exit 1; fi
