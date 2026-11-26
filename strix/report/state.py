@@ -99,6 +99,23 @@ UPDATABLE_REPORT_FIELDS = frozenset(
     }
 )
 
+# The only fields a stronger duplicate may move onto the report it matched.
+MERGEABLE_PROOF_FIELDS = frozenset(
+    {
+        "proof_status",
+        "proof_status_reason",
+        "proof_source",
+        "http_exchange_ids",
+        "evidence",
+        "poc_description",
+        "poc_script_code",
+        "confidence",
+        "confidence_rationale",
+        "counterevidence",
+        "assumptions",
+    }
+)
+
 _LOWERCASE_REPORT_FIELDS = frozenset({"severity", "confidence", "fix_effort"})
 
 # Fields that only describe another field. A revision may raise the rating or
@@ -371,6 +388,7 @@ class ReportState:
         proof_status_reason: str | None = None,
         proof_source: str | None = None,
         queue_item_id: str | None = None,
+        suspected_duplicate_of: str | None = None,
         agent_id: str | None = None,
         agent_name: str | None = None,
     ) -> str:
@@ -442,6 +460,8 @@ class ReportState:
             report["proof_source"] = proof_source
         if queue_item_id:
             report["queue_item_id"] = queue_item_id
+        if suspected_duplicate_of:
+            report["suspected_duplicate_of"] = suspected_duplicate_of
         if agent_id:
             report["agent_id"] = agent_id
         if agent_name:
@@ -571,6 +591,96 @@ class ReportState:
             ", ".join(entry["fields"]) or "no field replaced",
         )
 
+        self.save_run_data()
+        return report
+
+    def merge_proof_into_report(
+        self,
+        report_id: str,
+        proof: dict[str, Any],
+        *,
+        merged_from_queue_item: str | None = None,
+        merged_by_agent_id: str | None = None,
+        merged_by_agent_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Move a stronger proof onto the report it duplicates, keeping its id.
+
+        Only the keys in ``MERGEABLE_PROOF_FIELDS`` move; the description, rating
+        and every other field stay as the matched report has them. The history
+        entry records the matched report id, the queue item the proof came from
+        and the status before and after. Returns ``None`` for an unknown id.
+        """
+        report = next((r for r in self.vulnerability_reports if r.get("id") == report_id), None)
+        if report is None:
+            logger.warning("cannot merge proof into unknown vulnerability report %s", report_id)
+            return None
+
+        changed = {
+            key: value
+            for key, value in proof.items()
+            if key in MERGEABLE_PROOF_FIELDS
+            and value not in (None, "", [], {})
+            and report.get(key) != value
+        }
+        if not changed:
+            return None
+
+        entry: dict[str, Any] = {
+            "timestamp": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "kind": "proof_merge",
+            "fields": sorted(changed),
+            "report_id": report_id,
+            "previous_proof_status": report.get("proof_status"),
+            "proof_status": changed.get("proof_status", report.get("proof_status")),
+        }
+        supplied = {k for k, v in proof.items() if v not in (None, "", [], {})}
+        replaced = {
+            key: report[key] for key in changed if report.get(key) not in (None, "", [], {})
+        }
+        if (
+            "proof_status" in changed
+            and "proof_status_reason" not in changed
+            and report.get("proof_status_reason")
+        ):
+            replaced["proof_status_reason"] = report["proof_status_reason"]
+        if (
+            ("confidence" in changed or "proof_status" in changed)
+            and "confidence_rationale" not in supplied
+            and report.get("confidence_rationale")
+        ):
+            replaced["confidence_rationale"] = report["confidence_rationale"]
+        if replaced:
+            entry["replaced"] = replaced
+        if merged_from_queue_item:
+            entry["merged_from_queue_item"] = merged_from_queue_item
+        if merged_by_agent_id:
+            entry["agent_id"] = merged_by_agent_id
+        if merged_by_agent_name:
+            entry["agent_name"] = merged_by_agent_name
+
+        raw_history = report.get("update_history")
+        history: list[dict[str, Any]] = (
+            [e for e in raw_history if isinstance(e, dict)] if isinstance(raw_history, list) else []
+        )
+        history.append(entry)
+
+        revised = {**report, **changed, "update_history": history}
+        if (
+            "confidence" in changed or "proof_status" in changed
+        ) and "confidence_rationale" not in supplied:
+            revised.pop("confidence_rationale", None)
+        if "proof_status" in changed and "proof_status_reason" not in changed:
+            # The old reason explained why the earlier status fell short.
+            revised.pop("proof_status_reason", None)
+        revised["updated_at"] = entry["timestamp"]
+
+        if self.vulnerability_updated_callback:
+            self.vulnerability_updated_callback(revised)
+        report.clear()
+        report.update(revised)
+        self._saved_vuln_ids.discard(report_id)
+
+        logger.info("Merged stronger proof into vulnerability report %s", report_id)
         self.save_run_data()
         return report
 

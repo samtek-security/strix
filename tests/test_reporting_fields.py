@@ -14,8 +14,10 @@ from strix.report.dedupe import (
     _prepare_report_for_comparison,
     check_duplicate,
 )
+from strix.report.origin import origin_of
 from strix.report.state import ReportRollbackError, ReportState, set_global_report_state
 from strix.report.writer import write_run_record
+from strix.tools.exploitation.tool import _report_for_item
 from strix.tools.finish.tool import finish_scan
 from strix.tools.reporting import tool as reporting_tool
 from strix.tools.reporting.tool import (
@@ -2408,3 +2410,408 @@ async def test_delete_tool_carries_the_caller_identity(report_state: ReportState
     assert history[0]["agent_id"] == "aaaa1111"
     assert history[0]["agent_name"] == "Recon Agent"
     assert "update_vulnerability_report" in delete_vulnerability_report.description
+
+
+_PROOF_TARGET = {
+    "target": "https://app.example.com",
+    "endpoint": "/rest/user/login",
+    "method": "POST",
+    "cwe": "CWE-89",
+}
+
+
+async def _file_lead(report_state: ReportState, **overrides: object) -> str:
+    result = await _create_with(
+        report_state,
+        **{
+            "title": "SQL injection in login",
+            "proof_status": "lead",
+            "proof_status_reason": "no exchange captured",
+            "evidence": "lead notes",
+            **_PROOF_TARGET,
+            **overrides,
+        },
+    )
+    assert result["success"] is True
+    return str(result["report_id"])
+
+
+def _duplicate_of(report_id: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake(_candidate: dict[str, Any], _existing: list[dict[str, Any]]) -> dict[str, Any]:
+        return {"is_duplicate": True, "duplicate_id": report_id, "confidence": 0.9, "reason": "m"}
+
+    monkeypatch.setattr("strix.report.dedupe.check_duplicate", _fake)
+
+
+@pytest.mark.parametrize("caller", ["direct", "promotion"])
+async def test_stronger_proof_merges_into_matched_report(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch, caller: str
+) -> None:
+    lead_id = await _file_lead(report_state)
+    _duplicate_of(lead_id, monkeypatch)
+    extra: dict[str, object] = {"queue_item_id": "q-1"} if caller == "promotion" else {}
+    result = await _create_with(
+        report_state,
+        title="Different wording",
+        description="new description must not land",
+        proof_status="exploited",
+        proof_status_reason="control differs from trigger",
+        proof_source="gateway",
+        http_exchange_ids=["gw-run-" + "a" * 32],
+        evidence="validated exchange",
+        **_PROOF_TARGET,
+        **extra,
+    )
+    assert result["success"] is True
+    assert result["report_id"] == lead_id
+    assert len(report_state.vulnerability_reports) == 1
+    report = report_state.vulnerability_reports[0]
+    assert report["id"] == lead_id
+    assert report["proof_status"] == "exploited"
+    assert report["proof_source"] == "gateway"
+    assert report["evidence"] == "validated exchange"
+    assert report["http_exchange_ids"] == ["gw-run-" + "a" * 32]
+    assert report["description"] == "d"
+    assert report["title"] == "SQL injection in login"
+    entry = report["update_history"][-1]
+    assert entry["kind"] == "proof_merge"
+    assert entry["report_id"] == lead_id
+    assert entry["previous_proof_status"] == "lead"
+    assert entry["proof_status"] == "exploited"
+    assert entry.get("merged_from_queue_item") == extra.get("queue_item_id")
+
+
+@pytest.mark.parametrize("candidate_status", ["lead", "exploited", None])
+@pytest.mark.parametrize("caller", ["direct", "promotion"])
+async def test_weaker_or_equal_duplicate_changes_nothing(
+    report_state: ReportState,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_status: str | None,
+    caller: str,
+) -> None:
+    first = await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason="verified",
+        **_PROOF_TARGET,
+    )
+    report_id = str(first["report_id"])
+    _duplicate_of(report_id, monkeypatch)
+    before = json.dumps(report_state.vulnerability_reports, sort_keys=True)
+    extra: dict[str, object] = {"queue_item_id": "q-2"} if caller == "promotion" else {}
+    result = await _create_with(
+        report_state, proof_status=candidate_status, evidence="other", **_PROOF_TARGET, **extra
+    )
+    assert result["success"] is False
+    assert result["duplicate_of"] == report_id
+    assert json.dumps(report_state.vulnerability_reports, sort_keys=True) == before
+
+
+async def test_model_matched_pair_with_different_endpoint_does_not_merge(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(report_state)
+    _duplicate_of(lead_id, monkeypatch)
+    result = await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason="verified",
+        **{**_PROOF_TARGET, "endpoint": "/rest/user/register"},
+    )
+    assert result["success"] is True
+    assert result["report_id"] != lead_id
+    original, filed = report_state.vulnerability_reports
+    assert original["proof_status"] == "lead"
+    assert "update_history" not in original
+    assert filed["proof_status"] == "exploited"
+    assert filed["suspected_duplicate_of"] == lead_id
+
+
+async def test_missing_identity_field_fails_closed(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(report_state, cwe=None)
+    _duplicate_of(lead_id, monkeypatch)
+    result = await _create_with(
+        report_state, proof_status="exploited", proof_status_reason="v", **_PROOF_TARGET
+    )
+    assert result["success"] is True
+    assert result["report_id"] != lead_id
+    assert report_state.vulnerability_reports[1]["suspected_duplicate_of"] == lead_id
+
+
+async def test_endpoint_case_difference_does_not_merge(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(report_state, endpoint="/Admin")
+    _duplicate_of(lead_id, monkeypatch)
+    result = await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason="v",
+        **{**_PROOF_TARGET, "endpoint": "/admin"},
+    )
+    assert result["report_id"] != lead_id
+    assert report_state.vulnerability_reports[0]["proof_status"] == "lead"
+
+
+async def test_defaulted_non_url_target_does_not_merge_into_url_target(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(report_state)
+    _duplicate_of(lead_id, monkeypatch)
+    result = await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason="v",
+        queue_item_id="q-9",
+        **{**_PROOF_TARGET, "target": "/rest/user/login"},
+    )
+    assert result["report_id"] != lead_id
+    assert report_state.vulnerability_reports[1]["suspected_duplicate_of"] == lead_id
+
+
+async def test_different_host_does_not_merge(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(report_state)
+    _duplicate_of(lead_id, monkeypatch)
+    result = await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason="v",
+        **{**_PROOF_TARGET, "target": "https://other.example.com"},
+    )
+    assert result["report_id"] != lead_id
+
+
+async def test_merge_replaces_poc_and_clears_stale_failure_reason(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(report_state, proof_status_reason="proof_check_failed")
+    _duplicate_of(lead_id, monkeypatch)
+    await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason=None,
+        poc_description="working steps",
+        poc_script_code="curl -d verified",
+        **_PROOF_TARGET,
+    )
+    report = report_state.vulnerability_reports[0]
+    assert report["poc_script_code"] == "curl -d verified"
+    assert report["poc_description"] == "working steps"
+    assert "proof_status_reason" not in report
+
+
+async def test_merge_is_recoverable_by_queue_item(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(report_state)
+    _duplicate_of(lead_id, monkeypatch)
+    await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason="v",
+        queue_item_id="q-7",
+        **_PROOF_TARGET,
+    )
+    found = _report_for_item("q-7")
+    assert found is not None
+    assert found["id"] == lead_id
+
+
+async def test_two_defaulted_path_targets_do_not_merge(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(report_state, target="/rest/user/login")
+    _duplicate_of(lead_id, monkeypatch)
+    result = await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason="v",
+        **{**_PROOF_TARGET, "target": "/rest/user/login"},
+    )
+    assert result["report_id"] != lead_id
+
+
+async def test_malformed_url_target_files_as_new(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(report_state)
+    _duplicate_of(lead_id, monkeypatch)
+    result = await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason="v",
+        **{**_PROOF_TARGET, "target": "https://[::1"},
+    )
+    assert result["success"] is True
+    assert result["report_id"] != lead_id
+
+
+async def test_statusless_report_proof_is_replaced_and_kept_in_history(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_ids = ["gw-run-" + "b" * 32]
+    first = await _create_with(report_state, http_exchange_ids=old_ids, **_PROOF_TARGET)
+    report_id = str(first["report_id"])
+    _duplicate_of(report_id, monkeypatch)
+    result = await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason="v",
+        http_exchange_ids=["gw-run-" + "c" * 32],
+        **_PROOF_TARGET,
+    )
+    assert result["report_id"] == report_id
+    report = report_state.vulnerability_reports[0]
+    assert report["proof_status"] == "exploited"
+    assert report["update_history"][-1]["replaced"]["http_exchange_ids"] == old_ids
+
+
+async def test_default_port_origins_match_and_old_reason_is_recorded(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(
+        report_state,
+        proof_status_reason="proof_check_failed",
+        confidence="medium",
+        confidence_rationale="not executed",
+        counterevidence="exploitation unconfirmed",
+    )
+    _duplicate_of(lead_id, monkeypatch)
+    result = await _create_with(
+        report_state,
+        proof_status="exploited",
+        confidence="high",
+        counterevidence="confirmed by the validated exchange",
+        **{**_PROOF_TARGET, "target": "https://app.example.com:443"},
+    )
+    assert result["report_id"] == lead_id
+    report = report_state.vulnerability_reports[0]
+    assert report["confidence"] == "high"
+    assert report["counterevidence"] == "confirmed by the validated exchange"
+    replaced = report["update_history"][-1]["replaced"]
+    assert replaced["proof_status_reason"] == "proof_check_failed"
+
+
+async def test_confidence_rise_clears_stale_rationale(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(
+        report_state, confidence="medium", confidence_rationale="not executed"
+    )
+    _duplicate_of(lead_id, monkeypatch)
+    await _create_with(report_state, proof_status="exploited", confidence="high", **_PROOF_TARGET)
+    report = report_state.vulnerability_reports[0]
+    assert report["confidence"] == "high"
+    assert "confidence_rationale" not in report
+    assert report["update_history"][-1]["replaced"]["confidence_rationale"] == "not executed"
+
+
+async def test_merge_carries_assumptions_and_clears_rationale_at_equal_confidence(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(
+        report_state, assumptions="requires admin access", confidence_rationale="not executed"
+    )
+    _duplicate_of(lead_id, monkeypatch)
+    await _create_with(
+        report_state,
+        proof_status="exploited",
+        assumptions="no authentication needed",
+        **_PROOF_TARGET,
+    )
+    report = report_state.vulnerability_reports[0]
+    assert report["assumptions"] == "no authentication needed"
+    assert "confidence_rationale" not in report
+
+
+async def test_equivalent_ipv6_origins_merge(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(report_state, target="https://[2001:db8::1]")
+    _duplicate_of(lead_id, monkeypatch)
+    result = await _create_with(
+        report_state,
+        proof_status="exploited",
+        **{**_PROOF_TARGET, "target": "https://[2001:0db8:0:0:0:0:0:1]"},
+    )
+    assert result["report_id"] == lead_id
+
+
+async def test_repeated_rationale_is_kept_at_medium_confidence(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(
+        report_state, confidence="medium", confidence_rationale="partial execution"
+    )
+    _duplicate_of(lead_id, monkeypatch)
+    await _create_with(
+        report_state,
+        proof_status="exploited",
+        confidence="medium",
+        confidence_rationale="partial execution",
+        **_PROOF_TARGET,
+    )
+    assert report_state.vulnerability_reports[0]["confidence_rationale"] == "partial execution"
+
+
+_SAME_ORIGIN = [
+    ("https://example.com", "https://example.com:443/path"),
+    ("http://example.com", "http://EXAMPLE.com.:80/x"),
+    ("https://[2001:db8::1]", "https://[2001:0db8:0:0:0:0:0:1]:443"),
+    ("https://a_b.example.com", "https://A_B.example.com"),
+    ("https://example.com/caf\u00e9?q=\u00e9", "https://example.com/caf%C3%A9"),
+]
+_DIFFERENT_ORIGIN = [
+    ("https://example.com", "http://example.com"),
+    ("https://example.com", "https://example.com:8443"),
+    ("https://example.com", "https://other.example.com"),
+    ("https://example.com", "https://evil.com"),
+]
+_UNPARSEABLE = [
+    "",
+    "/rest/user/login",
+    "ftp://example.com/",
+    "https://:443/p",
+    "https://user@example.com/p",
+    "https://user@/p",
+    "https://example.com:bad/p",
+    "https://example.com:99999/p",
+    "https://[::1",
+    "https://exa mple.com/p",
+    "https://example..com/p",
+    "https://example.com\\@evil.com/p",
+    "https://[fe80::1%25eth0]/p",
+    "https://\u00e9xample.com/p",
+    "https://exam!ple.com/p",
+]
+
+
+@pytest.mark.parametrize(("a", "b"), _SAME_ORIGIN)
+def test_origin_same(a: str, b: str) -> None:
+    assert origin_of(a) is not None
+    assert origin_of(a) == origin_of(b)
+
+
+@pytest.mark.parametrize(("a", "b"), _DIFFERENT_ORIGIN)
+def test_origin_different(a: str, b: str) -> None:
+    assert origin_of(a) != origin_of(b)
+
+
+@pytest.mark.parametrize("bad", _UNPARSEABLE)
+async def test_unparseable_origin_has_none_and_never_merges(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    assert origin_of(bad) is None
+    lead_id = await _file_lead(report_state, target=bad or "t")
+    _duplicate_of(lead_id, monkeypatch)
+    result = await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason="v",
+        **{**_PROOF_TARGET, "target": bad or "t"},
+    )
+    assert result["report_id"] != lead_id

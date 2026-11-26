@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from agents import RunContextWrapper, function_tool
 
+from strix.report.origin import origin_of
 from strix.tools.nullish import clean_optional
 from strix.tools.proxy.tools import existing_request_ids
 
@@ -813,7 +814,79 @@ def _do_delete(
     }
 
 
-async def _do_create(
+def _proof_is_stronger(candidate_status: str | None, matched: dict[str, Any]) -> bool:
+    """Only a verified proof beats a report that is not already verified."""
+    # A report filed directly carries no status, and its exchange ids may be unchecked
+    # (a proxy timeout keeps them). The merge history keeps what the proof replaced.
+    return candidate_status == "exploited" and matched.get("proof_status") != "exploited"
+
+
+def _same_identity(candidate: dict[str, Any], cwe: str | None, matched: dict[str, Any]) -> bool:
+    """Deterministic identity check that gates a proof merge.
+
+    The duplicate judgment is a model call, so a merge also needs the same endpoint,
+    method and weakness class, and the same target. Paths keep their case, since
+    they can be case-sensitive. Both targets must be URLs with the same origin, so a
+    promotion that omits its target (and defaults it to the endpoint) files as new
+    instead of merging across hosts. A field missing on either side
+    fails closed.
+    """
+    endpoint = str(candidate.get("endpoint") or "").strip()
+    method = str(candidate.get("method") or "").strip().upper()
+    weakness = str(cwe or "").strip().upper()
+    if not (endpoint and method and weakness):
+        return False
+    if (
+        endpoint != str(matched.get("endpoint") or "").strip()
+        or method != str(matched.get("method") or "").strip().upper()
+        or weakness != str(matched.get("cwe") or "").strip().upper()
+    ):
+        return False
+    mine = origin_of(candidate.get("target"))
+    return mine is not None and mine == origin_of(matched.get("target"))
+
+
+def _merge_stronger_proof(
+    report_state: Any,
+    existing: list[dict[str, Any]],
+    duplicate_id: str,
+    report_fields: dict[str, Any],
+    *,
+    proof: dict[str, Any],
+    queue_item_id: str | None,
+    agent_id: str | None,
+    agent_name: str | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Resolve a model-matched duplicate that carries a stronger proof.
+
+    Returns ``(result, None)`` after merging the proof into the matched report,
+    ``(None, id)`` when the identity differs so the caller files the report as new
+    and links the suspect, and ``(None, None)`` when the duplicate stays rejected.
+    """
+    matched = next((r for r in existing if r.get("id") == duplicate_id), None)
+    if matched is None or not _proof_is_stronger(proof.get("proof_status"), matched):
+        return None, None
+    if not _same_identity(report_fields, report_fields.get("cwe"), matched):
+        return None, duplicate_id
+    merged = report_state.merge_proof_into_report(
+        duplicate_id,
+        proof,
+        merged_from_queue_item=queue_item_id,
+        merged_by_agent_id=agent_id,
+        merged_by_agent_name=agent_name,
+    )
+    if merged is None:
+        return None, None
+    return {
+        "success": True,
+        "message": f"Stronger proof merged into existing report '{duplicate_id}'",
+        "report_id": duplicate_id,
+        "merged_into": duplicate_id,
+        "severity": merged.get("severity"),
+    }, None
+
+
+async def _do_create(  # noqa: PLR0911
     *,
     title: str,
     description: str,
@@ -958,7 +1031,33 @@ async def _do_create(
         }
 
         dedupe = await check_duplicate(candidate, existing)
+        suspected_duplicate_of: str | None = None
         if dedupe.get("is_duplicate"):
+            merged_result, suspected_duplicate_of = _merge_stronger_proof(
+                report_state,
+                existing,
+                str(dedupe.get("duplicate_id") or ""),
+                report_fields,
+                proof={
+                    "proof_status": proof_status,
+                    "proof_status_reason": proof_status_reason,
+                    "proof_source": proof_source,
+                    "http_exchange_ids": normalized_http_exchange_ids,
+                    "evidence": evidence,
+                    "poc_description": poc_description,
+                    "poc_script_code": poc_script_code,
+                    "confidence": confidence,
+                    "confidence_rationale": confidence_rationale,
+                    "counterevidence": counterevidence,
+                    "assumptions": assumptions,
+                },
+                queue_item_id=queue_item_id,
+                agent_id=agent_id if isinstance(agent_id, str) else None,
+                agent_name=agent_name if isinstance(agent_name, str) else None,
+            )
+            if merged_result is not None:
+                return merged_result
+        if dedupe.get("is_duplicate") and suspected_duplicate_of is None:
             duplicate_id = str(dedupe.get("duplicate_id") or "")
             duplicate_title = next(
                 (r.get("title", "Unknown") for r in existing if r.get("id") == duplicate_id),
@@ -982,6 +1081,7 @@ async def _do_create(
             proof_status_reason=proof_status_reason,
             proof_source=proof_source,
             queue_item_id=queue_item_id,
+            suspected_duplicate_of=suspected_duplicate_of,
             agent_id=agent_id if isinstance(agent_id, str) else None,
             agent_name=agent_name if isinstance(agent_name, str) else None,
         )
