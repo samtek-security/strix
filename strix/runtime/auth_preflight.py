@@ -749,6 +749,11 @@ async def reverify_role(session: Any, flow: dict, *, target_url: str) -> dict:
     it is the identical ``_verify`` used for a host-driven login, never a weaker check. Returns the
     same result shape as ``preflight_role`` (never raises)."""
     role = flow.get("role") or "user"
+    if not isinstance(role, str):
+        return {
+            "role": str(role), "session_name": "", "state_path": "", "authenticated": False,
+            "checks": {}, "reason": "malformed auth flow: role must be a string",
+        }
     slug = _slug(role)
     session_name = f"recon-{slug}"
     state_path = f"{_STATE_DIR}/{slug}.json"
@@ -805,7 +810,9 @@ async def run_auth_preflight(
     for flow in auth_flows:
         if isinstance(flow, dict) and isinstance(flow.get("role") or "user", str):
             name = flow.get("role") or "user"
-            members.setdefault(_slug(name), []).append(name)
+            names = members.setdefault(_slug(name), [])
+            if name not in names:  # the same role name twice is one identity, not a collision
+                names.append(name)
     for flow in auth_flows:
         if not isinstance(flow, dict):
             continue
