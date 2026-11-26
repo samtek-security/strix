@@ -407,13 +407,23 @@ async def _verify(session: Any, flow: dict, session_name: str, state_path: str, 
     # saved_state. Look BEFORE any probe navigates away, and fail everything if so.
     on_page, current = await _run(
         session, "recon-browser", "--session-name", session_name, "get", "url")
-    if not on_page or _is_known_provider_url(current, flow):
+    out_of_scope = False
+    if on_page and isinstance(flow.get("scope_hosts"), (list, tuple)):
+        # The signed scope is known: a landing page outside it (an attacker-controlled callback
+        # that mimics url_contains/element_present and sets a cookie) can never prove a session,
+        # even when the target URL itself is public and passes the protected probe.
+        try:
+            landing = (urlsplit(current or "").hostname or "").lower()
+        except ValueError:
+            landing = ""
+        out_of_scope = not _in_signed_scope(landing, flow)
+    if not on_page or out_of_scope or _is_known_provider_url(current, flow):
         # Fail closed: if the page cannot even be read, we cannot tell that this is not still the
         # provider, and every later check could pass on it.
         return {
             "authenticated": False, "state_text": "",
             "checks": {
-                "on_identity_provider": bool(on_page), "saved_state": False,
+                "on_identity_provider": bool(on_page) and not out_of_scope, "saved_state": False,
                 "protected_probe": False,
             },
         }
