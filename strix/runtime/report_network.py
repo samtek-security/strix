@@ -10,9 +10,10 @@ The network is internal: it has no route out, so joining it never changes the ga
 route or bypasses the configured egress network. An internal bridge still exposes the host's own
 address on it (see host_isolation.py), which is the one address the gateway needs.
 
-The network is created on first use and reused afterwards. An existing network that is not an
-internal bridge, has a different subnet or host address, or has a non-gateway container attached
-is refused, so a start never reports over a network the host rule does not describe.
+The network is created on first use and reused afterwards. An existing network is refused, so a
+start never reports over a network the host rule does not describe, when it lacks this module's
+ownership label, is not an internal bridge, has a different subnet or host address, or has a
+container attached that is not an egress gateway.
 """
 
 from __future__ import annotations
@@ -59,6 +60,13 @@ def verify(dc: Any, attrs: dict[str, Any], name: str, subnet: str) -> None:
         raise RuntimeError(
             f"gateway report network {name!r} uses driver {attrs.get('Driver')!r}, not bridge; "
             "refusing to start"
+        )
+    labels = attrs.get("Labels") or {}
+    if any(labels.get(key) != value for key, value in ROLE_LABEL.items()):
+        raise RuntimeError(
+            f"gateway report network {name!r} was not created for gateway reporting (it lacks "
+            f"the {next(iter(ROLE_LABEL))}={next(iter(ROLE_LABEL.values()))} label); refusing "
+            "to reuse it"
         )
     if attrs.get("Internal") is not True:
         raise RuntimeError(

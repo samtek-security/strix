@@ -33,6 +33,7 @@ def _attrs(
     driver: str = "bridge",
     internal: bool = True,
     gateway: str | None = "10.250.250.1",
+    labels: dict[str, str] | None = None,
     containers: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     configs = [
@@ -42,6 +43,7 @@ def _attrs(
         "Name": NAME,
         "Driver": driver,
         "Internal": internal,
+        "Labels": {"recon.role": "gateway-report-network"} if labels is None else labels,
         "IPAM": {"Config": configs},
         "Containers": containers or {},
     }
@@ -154,6 +156,13 @@ def test_refuses_a_network_whose_host_address_is_not_the_first_address(
 ) -> None:
     dc = _dc(_network(gateway=gateway))
     with pytest.raises(RuntimeError, match=r"host address .*, expected 10\.250\.250\.1"):
+        report_network.ensure_network(dc, NAME, SUBNET)
+
+
+@pytest.mark.parametrize("labels", [{}, {"recon.role": "agent-gateway-network"}, {"other": "x"}])
+def test_refuses_a_network_without_the_ownership_label(labels: dict[str, str]) -> None:
+    dc = _dc(_network(labels=labels))
+    with pytest.raises(RuntimeError, match="was not created for gateway reporting"):
         report_network.ensure_network(dc, NAME, SUBNET)
 
 
