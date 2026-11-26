@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 import atexit
 import contextlib
 import logging
@@ -14,6 +15,7 @@ from rich.text import Text
 
 from strix.config import load_settings
 from strix.config.settings import DEFAULT_MAX_TURNS
+from strix.core.paths import RUNS_DIR_NAME
 from strix.core.runner import run_strix_scan
 from strix.report.state import ReportState, set_global_report_state
 from strix.runtime import session_manager
@@ -58,7 +60,7 @@ async def run_cli(args: Any) -> None:  # noqa: PLR0915
     results_text = Text()
     results_text.append("Output", style="dim")
     results_text.append("  ")
-    results_text.append(f"strix_runs/{args.run_name}", style="#60a5fa")
+    results_text.append(f"{RUNS_DIR_NAME}/{args.run_name}", style="#60a5fa")
 
     note_text = Text()
     note_text.append("\n\n", style="dim")

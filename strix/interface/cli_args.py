@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Command-line argument parsing for the ``strix`` scan entrypoint."""
 
 from __future__ import annotations
@@ -306,7 +307,7 @@ Strix Cloud:
         const="",
         metavar="RUN_NAME",
         help=(
-            "Resume a prior scan by its run name (the dir under ./strix_runs/). "
+            "Resume a prior scan by its run name (the dir under ./recon_runs/). "
             "Picks up the root + every non-terminal subagent's full LLM history "
             "and agent topology. Skips fresh run-name generation. Without a "
             "name, opens a picker of the prior runs."
