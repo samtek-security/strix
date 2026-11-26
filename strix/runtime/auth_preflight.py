@@ -464,7 +464,9 @@ async def _read_state(session: Any, session_name: str, state_path: str) -> str:
     return cat if ok else ""
 
 
-async def _verify(session: Any, flow: dict[str, Any], session_name: str, state_path: str, target_url: str) -> dict[str, Any]:
+async def _verify(
+    session: Any, flow: dict[str, Any], session_name: str, state_path: str, target_url: str,
+) -> dict[str, Any]:
     """Three-part fail-closed verification. Returns a checks dict + overall `authenticated`."""
     checks: dict[str, Any] = {}
 
@@ -559,7 +561,8 @@ def _safe_mfa_timeout(raw: str | None, default: float = 90.0) -> float:
 
 
 async def _complete_email_mfa(
-    session: Any, flow: dict[str, Any], session_name: str, since_epoch: float, target_url: str, baseline: Any,
+    session: Any, flow: dict[str, Any], session_name: str, since_epoch: float,
+    target_url: str, baseline: Any,
 ) -> tuple[bool, str]:
     """Complete an email second factor after the form login triggered it.
 
@@ -631,7 +634,9 @@ def _totp_code(seed: str, *, now: float | None = None, step: int = 30, digits: i
     return str(code).zfill(digits)
 
 
-async def _complete_totp(session: Any, flow: dict[str, Any], session_name: str, role: str) -> tuple[bool, str]:
+async def _complete_totp(
+    session: Any, flow: dict[str, Any], session_name: str, role: str,
+) -> tuple[bool, str]:
     """Complete a TOTP second factor deterministically, HOST-SIDE. The seed is brokered via
     RECON_TOTP_<ROLE> (the control plane sets it from the data-collection form; it never crosses to the
     agent and is never logged). The code is derived via _totp_code (RFC 6238, stdlib) and filled +
@@ -970,7 +975,8 @@ def _plan_flows(auth_flows: list[Any]) -> tuple[dict[str, dict[str, Any]], dict[
 
 
 def _pre_login_verdict(
-    flow: dict[str, Any], role: Any, chosen: dict[str, dict[str, Any]], members: dict[str, list[str]],
+    flow: dict[str, Any], role: Any, chosen: dict[str, dict[str, Any]],
+    members: dict[str, list[str]],
 ) -> tuple[bool, dict[str, Any] | None]:
     """(skip, refusal) for one flow before it may log in. ``skip`` drops a duplicate flow for a
     role (the broker holds ONE credential per role and every flow for a role shares one browser
