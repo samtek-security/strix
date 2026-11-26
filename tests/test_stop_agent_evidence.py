@@ -12,10 +12,12 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 from agents.tool_context import ToolContext
 
+from strix.core import execution
 from strix.core.agents import AgentCoordinator
 from strix.tools.agents_graph import tools as agents_graph_tools
 from strix.tools.agents_graph.tools import stop_agent
@@ -630,6 +632,51 @@ async def test_stop_agent_result_stays_under_a_small_configured_byte_cap(
     assert result["success"] is True
     entry = result["stopped_agents"][0]
     assert entry["evidence_truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_unstarted_child_runner_is_not_final(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A stop between registration and the runner's first write must not read
+    the empty session as final."""
+    started = asyncio.Event()
+
+    async def blocked_loop(**_kwargs: Any) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(execution, "run_agent_loop", blocked_loop)
+    coordinator = await _graph()
+    await coordinator.register("late", "Late", parent_id="root")
+    sessions: list[Any] = []
+    await execution._start_child_runner(
+        parent_ctx={},
+        coordinator=coordinator,
+        agents_db_path=tmp_path / "agents.db",
+        sessions_to_close=sessions,
+        run_config=MagicMock(),
+        max_turns=5,
+        interactive=False,
+        child_agent=MagicMock(),
+        child_id="late",
+        name="late",
+        parent_id="root",
+        task="t",
+        skills=[],
+        initial_input=[],
+    )
+    try:
+        assert coordinator.runtimes["late"].turn_settled.is_set() is False
+        await coordinator.request_stop("late")
+        assert await coordinator.writes_are_final("late") is False
+    finally:
+        task = coordinator.runtimes["late"].task
+        assert task is not None
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for session in sessions:
+            session.close()
 
 
 # --- evidence_writes_final / evidence_complete ------------------------------------
