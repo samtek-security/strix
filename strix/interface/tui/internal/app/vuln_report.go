@@ -105,6 +105,27 @@ func vulnerabilityMarkdownReport(v map[string]any) string {
 	section("Impact", render.StringValue(v["impact"]))
 	section("Technical Analysis", render.StringValue(v["technical_analysis"]))
 	section("Evidence", render.StringValue(v["evidence"]))
+	if capture, ok := v["evidence_capture"].(map[string]any); ok {
+		fenced := func(label, body string) {
+			if strings.TrimSpace(body) == "" {
+				return
+			}
+			fence := "```"
+			for strings.Contains(body, fence) {
+				fence += "`"
+			}
+			section(label, fence+"http\n"+strings.TrimSpace(body)+"\n"+fence)
+		}
+		fenced("Evidence Request", render.StringValue(capture["request"]))
+		fenced("Evidence Response", render.StringValue(capture["response"]))
+		if shots, ok := capture["screenshots"].([]any); ok {
+			refs := make([]string, 0, len(shots))
+			for _, s := range shots {
+				refs = append(refs, "- "+render.StringValue(s))
+			}
+			fenced("Evidence Screenshots", strings.Join(refs, "\n"))
+		}
+	}
 
 	pocDescription := render.StringValue(v["poc_description"])
 	pocScript := render.StringValue(v["poc_script_code"])

@@ -592,6 +592,18 @@ def _finding_flowables(
     poc_script = _strip_code_fence(vuln.get("poc_script_code"))
     story.extend(_field_block(styles, "PoC script", poc_script, code=True))
     story.extend(_field_block(styles, "Evidence", vuln.get("evidence"), code=True))
+    capture = vuln.get("evidence_capture")
+    if isinstance(capture, dict):
+        shots = capture.get("screenshots")
+        for label, body in (
+            ("Evidence request", capture.get("request")),
+            ("Evidence response", capture.get("response")),
+            (
+                "Evidence screenshots",
+                "\n".join(map(str, shots)) if isinstance(shots, list) else None,
+            ),
+        ):
+            story.extend(_field_block(styles, label, body, code=True))
 
     remediation = vuln.get("remediation_steps")
     if isinstance(remediation, list):

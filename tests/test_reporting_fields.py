@@ -2408,3 +2408,17 @@ async def test_delete_tool_carries_the_caller_identity(report_state: ReportState
     assert history[0]["agent_id"] == "aaaa1111"
     assert history[0]["agent_name"] == "Recon Agent"
     assert "update_vulnerability_report" in delete_vulnerability_report.description
+
+
+def test_replacing_evidence_drops_the_stale_capture(report_state: ReportState) -> None:
+    report_id = report_state.add_vulnerability_report(
+        title="Finding",
+        severity="high",
+        http_exchange_ids=["1042"],
+        evidence="old note",
+        evidence_capture={"request": "GET /", "response": "ok", "screenshots": []},
+    )
+    revised = report_state.update_vulnerability_report(report_id, {"evidence": "new note"})
+    assert revised is not None
+    assert revised["evidence"] == "new note"
+    assert "evidence_capture" not in revised

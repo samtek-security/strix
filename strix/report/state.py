@@ -112,6 +112,7 @@ _DEPENDENT_REPORT_FIELDS: dict[str, tuple[str, ...]] = {
     "severity": ("severity_change_conditions",),
     "cvss": ("cvss_breakdown",),
     "code_locations": ("fix_verification",),
+    "evidence": ("evidence_capture",),
 }
 
 
@@ -349,6 +350,7 @@ class ReportState:
         poc_script_code: str | None = None,
         remediation_steps: str | None = None,
         evidence: str | None = None,
+        evidence_capture: dict[str, Any] | None = None,
         assumptions: str | None = None,
         counterevidence: str | None = None,
         confidence: str | None = None,
@@ -399,6 +401,8 @@ class ReportState:
             report["remediation_steps"] = remediation_steps.strip()
         if evidence:
             report["evidence"] = evidence.strip()
+        if evidence_capture:
+            report["evidence_capture"] = evidence_capture
         if assumptions:
             report["assumptions"] = assumptions.strip()
         if counterevidence:
