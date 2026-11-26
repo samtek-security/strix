@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Local-source approval, upload, and scan-launch lifecycle."""
 
 from __future__ import annotations

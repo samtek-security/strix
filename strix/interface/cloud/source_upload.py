@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Privacy-conscious local source packaging for managed scans."""
 
 from __future__ import annotations
