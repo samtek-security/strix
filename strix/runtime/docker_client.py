@@ -223,6 +223,7 @@ class StrixDockerSandboxClient(DockerSandboxClient):
     recon_gateway_container: Any | None = None
     recon_internal_network: Any | None = None
     recon_gateway_ca_volume: Any | None = None
+    recon_gateway_stage_volume: Any | None = None
 
     async def _create_container(  # noqa: PLR0912, PLR0915
         self,
@@ -482,6 +483,10 @@ class StrixDockerSandboxClient(DockerSandboxClient):
             if ca_volume is not None:
                 with contextlib.suppress(Exception):
                     ca_volume.remove(force=True)
+            stage_volume = getattr(self, "recon_gateway_stage_volume", None)
+            if stage_volume is not None:
+                with contextlib.suppress(Exception):
+                    stage_volume.remove(force=True)
             network = getattr(self, "recon_internal_network", None)
             if network is not None:
                 with contextlib.suppress(Exception):
