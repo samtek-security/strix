@@ -82,7 +82,9 @@ def _gateway_name(scan_id: str) -> str:
     return "recon-egress-" + (scan_id or "default")
 
 
-_REPORTER_HOST_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?")
+# One DNS label is 1-63 letters, digits or inner hyphens; labels are joined by single dots.
+_REPORTER_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_REPORTER_HOST_RE = re.compile(rf"{_REPORTER_LABEL}(?:\.{_REPORTER_LABEL})*")
 _REPORTER_IPV6_RE = re.compile(r"[0-9A-Fa-f:.]+")
 _REPORTER_PATH_RE = re.compile(r"(?:/[A-Za-z0-9._~-]+)*/?")
 
@@ -112,7 +114,7 @@ def _canonical_reporter_url(raw: str) -> str:
     if not bad:
         ipv6 = ":" in host
         host_ok = _REPORTER_IPV6_RE if ipv6 else _REPORTER_HOST_RE
-        bad = not host_ok.fullmatch(host)
+        bad = len(host) > 253 or not host_ok.fullmatch(host)
     if bad:
         raise ValueError(
             f"RECON_TARGET_HEALTH_REPORTER_URL {raw!r} must be http(s)://host[:port][/path] "
