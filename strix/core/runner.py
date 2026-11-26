@@ -62,6 +62,7 @@ from strix.core.inputs import (
 )
 from strix.core.interception import (
     APPROVAL_GATEWAY_KEY,
+    ASK_DEADLINE_AT_KEY,
     ASK_TIMEOUT_SECONDS_KEY,
     INTERCEPTION_RULES_KEY,
 )
@@ -416,6 +417,7 @@ async def _run_scan(
     interception_rules: Sequence[InterceptionRule] | None = None,
     approval_gateway: ApprovalGateway | None = None,
     ask_timeout_seconds: float | None = None,
+    ask_deadline_at: float | None = None,
 ) -> RunResultBase | None:
     """Shared scan body for :func:`run_strix_scan` and :func:`run_recon_scan`.
 
@@ -836,6 +838,7 @@ async def _run_scan(
             INTERCEPTION_RULES_KEY: list(interception_rules or ()),
             APPROVAL_GATEWAY_KEY: approval_gateway,
             ASK_TIMEOUT_SECONDS_KEY: ask_timeout_seconds,
+            ASK_DEADLINE_AT_KEY: ask_deadline_at,
         }
 
         root_session = open_agent_session(root_id, agents_db)
@@ -1167,6 +1170,7 @@ async def run_strix_scan(
     interception_rules: Sequence[InterceptionRule] | None = None,
     approval_gateway: ApprovalGateway | None = None,
     ask_timeout_seconds: float | None = None,
+    ask_deadline_at: float | None = None,
 ) -> RunResultBase | None:
     """Run or resume one Strix scan against a sandbox.
 
@@ -1212,6 +1216,7 @@ async def run_strix_scan(
         interception_rules=interception_rules,
         approval_gateway=approval_gateway,
         ask_timeout_seconds=ask_timeout_seconds,
+        ask_deadline_at=ask_deadline_at,
     )
 
 
@@ -1250,6 +1255,7 @@ async def run_recon_scan(
     interception_rules: Sequence[InterceptionRule] | None = None,
     approval_gateway: ApprovalGateway | None = None,
     ask_timeout_seconds: float | None = None,
+    ask_deadline_at: float | None = None,
 ) -> RunResultBase | None:
     """Recon's scan entrypoint: :func:`run_strix_scan` plus trusted egress + coverage.
 
@@ -1316,4 +1322,5 @@ async def run_recon_scan(
         interception_rules=interception_rules,
         approval_gateway=approval_gateway,
         ask_timeout_seconds=ask_timeout_seconds,
+        ask_deadline_at=ask_deadline_at,
     )

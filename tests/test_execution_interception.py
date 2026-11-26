@@ -16,6 +16,7 @@ from strix.core.execution import (
 )
 from strix.core.interception import (
     APPROVAL_GATEWAY_KEY,
+    ASK_DEADLINE_AT_KEY,
     ASK_TIMEOUT_SECONDS_KEY,
     INTERCEPTION_RULES_KEY,
     InterceptionDecision,
@@ -229,7 +230,7 @@ async def test_resume_matches_the_same_rule_the_wrapper_matched() -> None:
     string. A differently spaced/ordered encoding must still reach the gateway."""
     gateway = _ScriptedGateway(["approved"])
     rule = InterceptionRule(
-        id="ask-rm", field="tool_input", pattern='"cmd":"rm -rf', action="ask", description="risky"
+        id="ask-rm", field="tool_input", pattern='"cmd": "rm -rf', action="ask", description="risky"
     )
     context = {
         INTERCEPTION_RULES_KEY: [rule],
@@ -260,3 +261,55 @@ async def test_native_custom_tool_input_is_read_from_the_input_field() -> None:
     assert len(state.rejected) == 1
     assert "ask-patch" in (state.rejected[0][1] or "")
     assert gateway.requests[0]["rule_id"] == "ask-patch"
+
+
+@pytest.mark.asyncio
+async def test_each_ask_measures_the_deadline_when_it_asks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two interruptions in one stream: the clock moves past the deadline between
+    them, so the first may wait and the second must deny at once, with no request."""
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr("strix.core.execution.time.time", lambda: clock["now"])
+    gateway = _ScriptedGateway(["approved"])
+    context = {
+        INTERCEPTION_RULES_KEY: [_ask_rule()],
+        APPROVAL_GATEWAY_KEY: gateway,
+        ASK_TIMEOUT_SECONDS_KEY: 300.0,
+        ASK_DEADLINE_AT_KEY: 1_100.0,  # 100 s left for the first ask
+    }
+    first, second = _item(arguments='{"cmd":"a"}'), _item(arguments='{"cmd":"b"}')
+
+    real_poll = gateway.poll
+
+    async def poll_then_move_clock(approval_id: str) -> str:
+        status = await real_poll(approval_id)
+        clock["now"] = 1_200.0  # the engagement's budget is now spent
+        return status
+
+    gateway.poll = poll_then_move_clock  # type: ignore[method-assign]
+    stream = _FakeInterruptedStream(interruptions=[first, second])
+
+    state = await _resolve_interruptions(stream, context=context, report=None)
+
+    assert state.approved == [first]
+    assert [item for item, _ in state.rejected] == [second]
+    assert len(gateway.requests) == 1, "the second ask must not open an approval"
+    assert gateway.requests[0]["ttl_seconds"] == pytest.approx(100.0)
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_already_passed_denies_without_asking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("strix.core.execution.time.time", lambda: 5_000.0)
+    gateway = _ScriptedGateway(["approved"])
+    context = {
+        INTERCEPTION_RULES_KEY: [_ask_rule()],
+        APPROVAL_GATEWAY_KEY: gateway,
+        ASK_DEADLINE_AT_KEY: 4_000.0,
+    }
+    item = _item()
+    state = await _resolve_interruptions(
+        _FakeInterruptedStream(interruptions=[item]), context=context, report=None
+    )
+    assert state.approved == [] and [i for i, _ in state.rejected] == [item]
+    assert gateway.requests == []

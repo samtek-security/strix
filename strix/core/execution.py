@@ -37,6 +37,7 @@ from strix.core.inputs import child_initial_input
 from strix.core.interception import (
     ApprovalGateway,
     InterceptionDecision,
+    ask_deadline_at_from_context,
     ask_timeout_from_context,
     canonical_tool_input,
     evaluate,
@@ -390,9 +391,15 @@ async def _resolve_interruptions(
     """
     state = stream.to_state()
     gateway = gateway_from_context(context)
-    timeout = ask_timeout_from_context(context)
+    configured_timeout = ask_timeout_from_context(context)
+    deadline_at = ask_deadline_at_from_context(context)
     rules = rules_from_context(context)
     for item in stream.interruptions:
+        # What is left is recomputed for every ask: a late or concurrent ask must
+        # not reuse a duration measured when the run started.
+        timeout = configured_timeout
+        if deadline_at is not None:
+            timeout = min(timeout, deadline_at - time.time())
         tool_name = item.tool_name or ""
         input_text = _interruption_input_text(item)
         decision = evaluate(rules, tool_name, input_text)

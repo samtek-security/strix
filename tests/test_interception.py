@@ -108,6 +108,7 @@ def test_one_input_form_whichever_path_produced_it() -> None:
     raw_spaced = '{ "b": 1,\n  "cmd": "rm -rf /tmp/\\u00e9" }'
     raw_other_order = '{"cmd":"rm -rf /tmp/\\u00e9","b":1}'
     canonical = interception.canonical_tool_input(parsed)
+    assert canonical == '{"b": 1, "cmd": "rm -rf /tmp/é"}'  # the form patterns were written for
     assert interception.canonical_tool_input(raw_spaced) == canonical
     assert interception.canonical_tool_input(raw_other_order) == canonical
 
@@ -118,7 +119,19 @@ def test_non_json_input_is_left_alone() -> None:
 
 
 def test_a_tool_input_rule_matches_every_encoding_of_the_same_call() -> None:
-    rules = [_rule("ask-rm", field="tool_input", pattern='"cmd":"rm -rf', action="ask")]
+    rules = [_rule("ask-rm", field="tool_input", pattern='"cmd": "rm -rf', action="ask")]
     for raw in ('{"cmd": "rm -rf /x"}', '{ "cmd":"rm -rf /x" }', {"cmd": "rm -rf /x"}):
         decision = evaluate(rules, "exec_command", raw)  # type: ignore[arg-type]
         assert decision is not None and decision.action == "ask", raw
+
+
+def test_a_lone_surrogate_does_not_make_the_canonical_form_unencodable() -> None:
+    canonical = interception.canonical_tool_input('{"x": "\\ud800"}')
+    canonical.encode("utf-8")  # must not raise
+    assert "ud800" in canonical
+
+
+def test_deadline_helper_defaults_to_none() -> None:
+    assert interception.ask_deadline_at_from_context(None) is None
+    assert interception.ask_deadline_at_from_context({"ask_deadline_at": None}) is None
+    assert interception.ask_deadline_at_from_context({"ask_deadline_at": 1234.5}) == 1234.5

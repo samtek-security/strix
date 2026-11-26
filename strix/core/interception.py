@@ -80,7 +80,16 @@ def canonical_tool_input(value: object) -> str:
             return value
     elif not isinstance(value, (dict, list)):
         return str(value)
-    return json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    # Sorted keys, default separators: the form the tool wrapper always matched
+    # against, so a pattern written for it (`"command": "rm -rf`) keeps matching.
+    text = json.dumps(parsed, ensure_ascii=False, sort_keys=True)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        # A JSON-escaped lone surrogate decodes to text that cannot be encoded
+        # (the dedup key and the broker body both encode it). Re-escape it.
+        text = json.dumps(parsed, ensure_ascii=True, sort_keys=True)
+    return text
 
 
 def _rule_matches(rule: InterceptionRule, tool_name: str, tool_input_text: str) -> bool:
@@ -140,6 +149,10 @@ class ApprovalGateway(Protocol):
 INTERCEPTION_RULES_KEY = "interception_rules"
 APPROVAL_GATEWAY_KEY = "approval_gateway"
 ASK_TIMEOUT_SECONDS_KEY = "ask_timeout_seconds"
+# Absolute epoch second past which no ask may still be waiting (the engagement's
+# elapsed-budget deadline less a closeout margin). Read per ask, not once per run:
+# an ask late in a run, or several concurrent ones, must each see what is left now.
+ASK_DEADLINE_AT_KEY = "ask_deadline_at"
 
 DEFAULT_ASK_TIMEOUT_SECONDS = 300.0
 
@@ -168,3 +181,12 @@ def ask_timeout_from_context(context: dict[str, object] | None) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return DEFAULT_ASK_TIMEOUT_SECONDS
     return max(0.0, float(value))
+
+
+def ask_deadline_at_from_context(context: dict[str, object] | None) -> float | None:
+    if not context:
+        return None
+    value = context.get(ASK_DEADLINE_AT_KEY)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
