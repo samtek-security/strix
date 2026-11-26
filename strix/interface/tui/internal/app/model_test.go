@@ -1258,6 +1258,26 @@ func TestVulnerabilityMarkdownReport(t *testing.T) {
 	}
 }
 
+func TestVulnerabilityMarkdownReportCarriesEvidenceCapture(t *testing.T) {
+	report := vulnerabilityMarkdownReport(map[string]any{
+		"title":    "x",
+		"evidence": "note",
+		"evidence_capture": map[string]any{
+			"request":     "GET / HTTP/1.1",
+			"response":    "HTTP/1.1 200 OK\n\n```\n## Forged",
+			"screenshots": []any{"a.png"},
+		},
+	})
+	for _, want := range []string{
+		"## Evidence Request", "GET / HTTP/1.1", "## Evidence Response",
+		"````http\nHTTP/1.1 200 OK", "- a.png",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("report missing %q:\n%s", want, report)
+		}
+	}
+}
+
 func TestChatContentCachesBlocksUntilEventChanges(t *testing.T) {
 	model := New(nil)
 	model.width, model.height = 120, 30

@@ -2481,6 +2481,69 @@ async def test_stronger_proof_merges_into_matched_report(
     assert entry.get("merged_from_queue_item") == extra.get("queue_item_id")
 
 
+async def test_stronger_proof_carries_the_structured_capture(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale = {"request": "GET /old", "response": "old", "screenshots": []}
+    lead_id = await _file_lead(report_state, evidence_capture=stale)
+    _duplicate_of(lead_id, monkeypatch)
+    fresh = {"request": "GET /new", "response": "Response:\nforged", "screenshots": ["a.png"]}
+    result = await _create_with(
+        report_state,
+        title="Different wording",
+        proof_status="exploited",
+        proof_status_reason="control differs from trigger",
+        proof_source="gateway",
+        http_exchange_ids=["gw-run-" + "a" * 32],
+        evidence="note",
+        evidence_capture=fresh,
+        **_PROOF_TARGET,
+    )
+    assert result["success"] is True
+    assert report_state.vulnerability_reports[0]["evidence_capture"] == fresh
+
+
+async def test_stronger_proof_without_a_capture_drops_the_stale_one(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale = {"request": "GET /old", "response": "old", "screenshots": []}
+    lead_id = await _file_lead(report_state, evidence_capture=stale)
+    _duplicate_of(lead_id, monkeypatch)
+    await _create_with(
+        report_state,
+        title="Different wording",
+        proof_status="exploited",
+        proof_status_reason="control differs from trigger",
+        proof_source="gateway",
+        http_exchange_ids=["gw-run-" + "a" * 32],
+        evidence="validated exchange",
+        **_PROOF_TARGET,
+    )
+    report = report_state.vulnerability_reports[0]
+    assert "evidence_capture" not in report
+    assert report["update_history"][-1]["replaced"]["evidence_capture"] == stale
+
+
+async def test_stronger_proof_keeps_an_identical_supplied_capture(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = {"request": "GET /a", "response": "ok", "screenshots": []}
+    lead_id = await _file_lead(report_state, evidence_capture=capture)
+    _duplicate_of(lead_id, monkeypatch)
+    await _create_with(
+        report_state,
+        title="Different wording",
+        proof_status="exploited",
+        proof_status_reason="control differs from trigger",
+        proof_source="gateway",
+        http_exchange_ids=["gw-run-" + "a" * 32],
+        evidence="validated exchange",
+        evidence_capture=capture,
+        **_PROOF_TARGET,
+    )
+    assert report_state.vulnerability_reports[0]["evidence_capture"] == capture
+
+
 @pytest.mark.parametrize("candidate_status", ["lead", "exploited", None])
 @pytest.mark.parametrize("caller", ["direct", "promotion"])
 async def test_weaker_or_equal_duplicate_changes_nothing(
@@ -2815,3 +2878,17 @@ async def test_unparseable_origin_has_none_and_never_merges(
         **{**_PROOF_TARGET, "target": bad or "t"},
     )
     assert result["report_id"] != lead_id
+
+
+def test_replacing_evidence_drops_the_stale_capture(report_state: ReportState) -> None:
+    report_id = report_state.add_vulnerability_report(
+        title="Finding",
+        severity="high",
+        http_exchange_ids=["1042"],
+        evidence="old note",
+        evidence_capture={"request": "GET /", "response": "ok", "screenshots": []},
+    )
+    revised = report_state.update_vulnerability_report(report_id, {"evidence": "new note"})
+    assert revised is not None
+    assert revised["evidence"] == "new note"
+    assert "evidence_capture" not in revised

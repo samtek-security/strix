@@ -107,6 +107,7 @@ MERGEABLE_PROOF_FIELDS = frozenset(
         "proof_source",
         "http_exchange_ids",
         "evidence",
+        "evidence_capture",
         "poc_description",
         "poc_script_code",
         "confidence",
@@ -129,6 +130,7 @@ _DEPENDENT_REPORT_FIELDS: dict[str, tuple[str, ...]] = {
     "severity": ("severity_change_conditions",),
     "cvss": ("cvss_breakdown",),
     "code_locations": ("fix_verification",),
+    "evidence": ("evidence_capture",),
 }
 
 
@@ -366,6 +368,7 @@ class ReportState:
         poc_script_code: str | None = None,
         remediation_steps: str | None = None,
         evidence: str | None = None,
+        evidence_capture: dict[str, Any] | None = None,
         assumptions: str | None = None,
         counterevidence: str | None = None,
         confidence: str | None = None,
@@ -419,6 +422,8 @@ class ReportState:
             report["remediation_steps"] = remediation_steps.strip()
         if evidence:
             report["evidence"] = evidence.strip()
+        if evidence_capture:
+            report["evidence_capture"] = evidence_capture
         if assumptions:
             report["assumptions"] = assumptions.strip()
         if counterevidence:
@@ -655,6 +660,12 @@ class ReportState:
             and report.get("confidence_rationale")
         ):
             replaced["confidence_rationale"] = report["confidence_rationale"]
+        if (
+            "evidence" in changed
+            and "evidence_capture" not in supplied
+            and report.get("evidence_capture")
+        ):
+            replaced["evidence_capture"] = report["evidence_capture"]
         if replaced:
             entry["replaced"] = replaced
         if merged_from_queue_item:
@@ -675,6 +686,8 @@ class ReportState:
             "confidence" in changed or "proof_status" in changed
         ) and "confidence_rationale" not in supplied:
             revised.pop("confidence_rationale", None)
+        if "evidence" in changed and "evidence_capture" not in supplied:
+            revised.pop("evidence_capture", None)
         if "proof_status" in changed and "proof_status_reason" not in changed:
             # The old reason explained why the earlier status fell short.
             revised.pop("proof_status_reason", None)

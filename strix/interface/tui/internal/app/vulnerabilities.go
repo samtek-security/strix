@@ -368,6 +368,17 @@ func vulnerabilityBody(v map[string]any) string {
 	section("Impact", render.StringValue(v["impact"]))
 	section("Technical Analysis", render.StringValue(v["technical_analysis"]))
 	section("Evidence", render.StringValue(v["evidence"]))
+	if capture, ok := v["evidence_capture"].(map[string]any); ok {
+		section("Evidence Request", render.StringValue(capture["request"]))
+		section("Evidence Response", render.StringValue(capture["response"]))
+		if shots, ok := capture["screenshots"].([]any); ok {
+			refs := make([]string, 0, len(shots))
+			for _, s := range shots {
+				refs = append(refs, "- "+render.StringValue(s))
+			}
+			section("Evidence Screenshots", strings.Join(refs, "\n"))
+		}
+	}
 	section("PoC Description", render.StringValue(v["poc_description"]))
 	if poc := render.StringValue(v["poc_script_code"]); poc != "" {
 		pocLang, pocCode := render.ParseFencedCode(poc)

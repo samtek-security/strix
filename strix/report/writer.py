@@ -67,37 +67,41 @@ def safe_fence(content: str) -> str:
     return "`" * max(3, longest + 1)
 
 
-_EVIDENCE_RESPONSE = "\n\nResponse:\n"
-_EVIDENCE_SHOTS = re.compile(r"\n\nScreenshots:\n((?:- [^\n]+\n?)+)\Z")
-
-
-def render_evidence_lines(evidence: str) -> list[str]:
+def render_evidence_lines(report: dict[str, Any]) -> list[str]:
     """Markdown lines for a report's evidence.
 
-    A promoted report stores captured HTTP as one labeled string. That text is controlled by the
-    target, so each part renders only inside a fenced block that its own content cannot close
-    (``safe_fence``), never as live Markdown or HTML. Any other evidence string passes through as
-    before.
+    A promoted report keeps the captured request, response and screenshot references in
+    separate fields. That text is controlled by the target, so each part renders only inside a
+    fenced block that its own content cannot close (``safe_fence``), never as live Markdown or
+    HTML. The free-text ``evidence`` string is shown as stored and is never split into parts.
     """
-    text = evidence.strip()
-    if not text.startswith("Request:\n") or _EVIDENCE_RESPONSE not in text:
-        return [evidence]
-    shots = ""
-    m = _EVIDENCE_SHOTS.search(text)
-    if m:
-        shots, text = m.group(1).strip(), text[: m.start()]
-    request, _, response = text[len("Request:\n") :].partition(_EVIDENCE_RESPONSE)
     lines: list[str] = []
+    text = str(report.get("evidence") or "")
+    if text.strip():
+        if text.lstrip().startswith("Request:\n") and "\n\nResponse:\n" in text:
+            # Old single-string capture: target-controlled and opaque, so fence it whole.
+            fence = safe_fence(text)
+            lines += [f"{fence}text", text.strip(), fence]
+        else:
+            lines.append(text)
+    capture = report.get("evidence_capture")
+    if not isinstance(capture, dict):
+        return lines
+    shots = capture.get("screenshots")
     parts = (
-        ("Request", request, "http"),
-        ("Response", response, "http"),
-        ("Screenshots", shots, "text"),
+        ("Request", str(capture.get("request") or ""), "http"),
+        ("Response", str(capture.get("response") or ""), "http"),
+        (
+            "Screenshots",
+            "\n".join(f"- {r}" for r in shots) if isinstance(shots, list) else "",
+            "text",
+        ),
     )
     for label, body, lang in parts:
         if not body.strip():
             continue
         fence = safe_fence(body)
-        lines += [f"**{label}**", "", f"{fence}{lang}", body.strip(), fence, ""]
+        lines += ["", f"**{label}**", "", f"{fence}{lang}", body.strip(), fence]
     return lines
 
 
@@ -308,9 +312,10 @@ def render_vulnerability_md(report: dict[str, Any]) -> str:  # noqa: PLR0912, PL
     lines.append(report.get("description") or "No description provided.")
     lines.append("")
 
-    if report.get("evidence"):
+    evidence_lines = render_evidence_lines(report)
+    if evidence_lines:
         lines.append("## Evidence\n")
-        lines.extend(render_evidence_lines(str(report["evidence"])))
+        lines.extend(evidence_lines)
         lines.append("")
 
     if report.get("impact"):

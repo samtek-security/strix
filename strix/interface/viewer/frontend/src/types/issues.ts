@@ -117,6 +117,7 @@ export interface Vulnerability {
   remediation_steps: string | null;
   fix_pr_body: string | null;
   evidence: string | null;
+  evidence_capture: EvidenceCapture | null;
   assumptions: string | null;
   fix_effort: FixEffort | null;
   cvss_breakdown: CVSSBreakdown | null;
@@ -194,4 +195,10 @@ export function formatCvssLabel(cvss: number | null): string {
   if (cvss >= 7.0) return "High";
   if (cvss >= 4.0) return "Medium";
   return "Low";
+}
+
+export interface EvidenceCapture {
+  request: string;
+  response: string;
+  screenshots: string[];
 }
