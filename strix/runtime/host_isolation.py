@@ -24,12 +24,16 @@ MIN_DOCKER_VERSION = (28, 0, 0)
 # RECON_HOST_PROBE_PORTS adds the ports a given host really listens on.
 DEFAULT_PROBE_PORTS = (22, 4000, 4001, 7233, 5434)
 
+# Only a timeout or an unreachable error shows that nothing holds the address. A refusal is an RST
+# from a host stack, which proves the address is there even when the probed port is closed.
 _PROBE_SCRIPT = (
     "import errno,socket,sys\n"
     "try:\n"
     " socket.create_connection((sys.argv[1],int(sys.argv[2])),timeout=3).close()\n"
     " print('REACHABLE')\n"
-    "except (ConnectionRefusedError,TimeoutError):\n"
+    "except ConnectionRefusedError:\n"
+    " print('REFUSED')\n"
+    "except TimeoutError:\n"
     " print('CLOSED')\n"
     "except OSError as e:\n"
     " print('CLOSED' if e.errno in (errno.ENETUNREACH,errno.EHOSTUNREACH) else 'ERROR')\n"
@@ -134,12 +138,12 @@ def check_host_unreachable(container: Any, attrs: dict[str, Any]) -> None:
         for port in probe_ports():
             code, out = container.exec_run(["python3", "-c", _PROBE_SCRIPT, address, str(port)])
             text = out.decode(errors="replace").strip() if isinstance(out, bytes) else str(out)
-            if code != 0 or text not in ("REACHABLE", "CLOSED"):
+            if code != 0 or text not in ("REACHABLE", "REFUSED", "CLOSED"):
                 raise RuntimeError(
                     f"host exposure probe {address}:{port} could not run (exit {code}); "
                     "refusing to start"
                 )
-            if text == "REACHABLE":
+            if text in ("REACHABLE", "REFUSED"):
                 reached.append(f"{address}:{port}")
     if reached:
         raise RuntimeError(

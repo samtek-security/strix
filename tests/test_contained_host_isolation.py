@@ -193,7 +193,7 @@ def test_probe_script_sees_open_and_closed_ports_in_both_families(
     port = listener.getsockname()[1]
     assert _probe_locally(address, port) == "REACHABLE"
     listener.close()
-    assert _probe_locally(address, port) == "CLOSED"
+    assert _probe_locally(address, port) == "REFUSED"
 
 
 def test_probe_script_reports_a_bad_address_as_an_error() -> None:
@@ -313,3 +313,18 @@ def test_no_probe_address_passes_only_for_an_isolated_network() -> None:
     attrs["Options"] = {}
     with pytest.raises(RuntimeError, match="not isolated"):
         host_isolation.check_host_unreachable(container, attrs)
+
+
+def test_a_refusal_means_the_address_answers_and_aborts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    client = MagicMock()
+    with pytest.raises(RuntimeError, match=r"reaches the host at 10\.250\.97\.1:4000"):
+        _run(
+            monkeypatch,
+            tmp_path,
+            net=_network(),
+            probe=_probe({"10.250.97.1:4000": b"REFUSED"}),
+            client=client,
+        )
+    client.networks.get.assert_not_called()
