@@ -131,6 +131,24 @@ def test_a_lone_surrogate_does_not_make_the_canonical_form_unencodable() -> None
     assert "ud800" in canonical
 
 
+def test_escaping_a_lone_surrogate_keeps_other_non_ascii_text_matchable() -> None:
+    canonical = interception.canonical_tool_input('{"cmd": "echo 秘密", "note": "\\ud800"}')
+    canonical.encode("utf-8")
+    assert "秘密" in canonical and "ud800" in canonical
+
+
+def test_recorded_inputs_are_scoped_to_the_agent_that_evaluated_them() -> None:
+    shared: dict = {}
+    parent = {"agent_id": "a", "k": shared}
+    child = {"agent_id": "b"}
+    interception.remember_evaluated(parent, "call-1", "alpha", verbatim=True)
+    # A child context shares the parent's map and may reuse the same call id.
+    child[interception.EVALUATED_CALLS_KEY] = parent[interception.EVALUATED_CALLS_KEY]
+    interception.remember_evaluated(child, "call-1", "beta", verbatim=False)
+    assert interception.evaluated_for(parent, "call-1") == ("alpha", True)
+    assert interception.evaluated_for(child, "call-1") == ("beta", False)
+
+
 def test_deadline_helper_defaults_to_none() -> None:
     assert interception.ask_deadline_at_from_context(None) is None
     assert interception.ask_deadline_at_from_context({"ask_deadline_at": None}) is None

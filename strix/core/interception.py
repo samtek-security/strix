@@ -18,7 +18,7 @@ import logging
 import re
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 
 if TYPE_CHECKING:
@@ -62,6 +62,9 @@ def _compiled(pattern: str) -> re.Pattern[str] | None:
         return None
 
 
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
 def canonical_tool_input(value: object) -> str:
     """One text form of a tool call's input, whichever path produced it.
 
@@ -89,8 +92,9 @@ def canonical_tool_input(value: object) -> str:
         text.encode("utf-8")
     except UnicodeEncodeError:
         # A JSON-escaped lone surrogate decodes to text that cannot be encoded
-        # (the dedup key and the broker body both encode it). Re-escape it.
-        text = json.dumps(parsed, ensure_ascii=True, sort_keys=True)
+        # (the dedup key and the broker body both encode it). Escape only those,
+        # so non-ASCII text a rule matches stays as written.
+        text = _LONE_SURROGATE.sub(lambda m: f"\\u{ord(m.group()):04x}", text)
     return text
 
 
@@ -103,6 +107,12 @@ def canonical_tool_input(value: object) -> str:
 EVALUATED_CALLS_KEY = "strix_interception_evaluated_calls"
 
 
+def _evaluated_key(context: dict[str, Any], call_id: str) -> tuple[str, str]:
+    # Child contexts are shallow copies that share this map, and tool-call ids are
+    # only unique within one agent's responses, so the agent is part of the key.
+    return (str(context.get("agent_id") or ""), call_id)
+
+
 def remember_evaluated(context: object, call_id: str, text: str, *, verbatim: bool) -> None:
     """Record the exact text a rule matched for a call that is about to pause.
 
@@ -112,13 +122,16 @@ def remember_evaluated(context: object, call_id: str, text: str, *, verbatim: bo
     evaluated, however the tool normalised or unwrapped its arguments first.
     """
     if isinstance(context, dict) and call_id:
-        context.setdefault(EVALUATED_CALLS_KEY, {})[call_id] = (text, verbatim)
+        context.setdefault(EVALUATED_CALLS_KEY, {})[_evaluated_key(context, call_id)] = (
+            text,
+            verbatim,
+        )
 
 
 def evaluated_for(context: object, call_id: object) -> tuple[str, bool] | None:
     if not isinstance(context, dict) or not isinstance(call_id, str) or not call_id:
         return None
-    found = (context.get(EVALUATED_CALLS_KEY) or {}).get(call_id)
+    found = (context.get(EVALUATED_CALLS_KEY) or {}).get(_evaluated_key(context, call_id))
     return found if isinstance(found, tuple) else None
 
 
