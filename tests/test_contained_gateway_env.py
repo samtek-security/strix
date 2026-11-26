@@ -50,13 +50,14 @@ def _gateway_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> dict
         asyncio.run(
             backends._contained_docker_backend(
                 image="agent:1",
-                manifest=SimpleNamespace(),  # type: ignore[arg-type]
+                manifest=SimpleNamespace(),
                 exposed_ports=(),
                 scan_id=scan_id,
                 gateway_spec_path=str(spec),
             )
         )
-    return client.containers.run.call_args.kwargs["environment"]
+    env: dict[str, str] = client.containers.run.call_args.kwargs["environment"]
+    return env
 
 
 def test_gateway_container_gets_both_host_lists(
