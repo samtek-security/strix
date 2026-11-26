@@ -407,11 +407,14 @@ async def _verify(session: Any, flow: dict, session_name: str, state_path: str, 
     # saved_state. Look BEFORE any probe navigates away, and fail everything if so.
     on_page, current = await _run(
         session, "recon-browser", "--session-name", session_name, "get", "url")
-    if on_page and _is_known_provider_url(current, flow):
+    if not on_page or _is_known_provider_url(current, flow):
+        # Fail closed: if the page cannot even be read, we cannot tell that this is not still the
+        # provider, and every later check could pass on it.
         return {
             "authenticated": False, "state_text": "",
             "checks": {
-                "on_identity_provider": True, "saved_state": False, "protected_probe": False,
+                "on_identity_provider": bool(on_page), "saved_state": False,
+                "protected_probe": False,
             },
         }
 
@@ -852,6 +855,7 @@ async def run_auth_preflight(
     # Ensure the durable state dir exists in the container.
     await _run(session, "mkdir", "-p", _STATE_DIR)
     results = []
+    done_roles: set[str] = set()
     # Roles whose names slug to the same session name also share a brokered credential env var
     # and a browser session, so logging the first in would already leave it racing the others'
     # credential. Find every colliding role UP FRONT and refuse ALL of them before any login.
@@ -866,6 +870,13 @@ async def run_auth_preflight(
         if not isinstance(flow, dict):
             continue
         role = _role_of(flow)
+        if isinstance(role, str) and role in done_roles:
+            # The broker holds ONE credential per role and every flow for a role shares one
+            # browser session, so a second flow for the same role is the same identity. Running
+            # it would overwrite the first's session and yield contradictory results for one
+            # role: collapse to the first flow.
+            logger.warning("auth preflight: ignoring a duplicate flow for role %r", role)
+            continue
         if not isinstance(role, str):
             # A malformed flow is recorded on its own; it must not abort the other roles.
             results.append({
@@ -886,6 +897,7 @@ async def run_auth_preflight(
                           f"rename one of them",
             })
             continue
+        done_roles.add(role)
         try:
             ext = (external_states or {}).get(role)
             results.append(
