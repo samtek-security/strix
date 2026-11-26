@@ -105,7 +105,7 @@ def stage(
     volume = None
     try:
         volume = dc.volumes.create(name=name, labels=volume_labels(boundary_labels, run_id))
-        dc.containers.run(
+        helper = dc.containers.run(
             image,
             entrypoint=["/bin/sh", "-c"],
             command=[_STAGE_SCRIPT, "stage", str(uid)],
@@ -115,8 +115,10 @@ def stage(
             cap_add=list(_HELPER_CAPS),
             security_opt=["no-new-privileges"],
             read_only=True,
-            remove=True,
-            detach=False,
+            # Removed by the daemon when it exits, so a crashed worker cannot leave a stopped
+            # helper holding the volume.
+            auto_remove=True,
+            detach=True,
             labels={**boundary_labels, "recon.role": "gateway-staging-helper"},
             volumes={
                 str(spec_path): {"bind": f"/src/{SPEC_NAME}", "mode": "ro"},
@@ -124,6 +126,9 @@ def stage(
                 name: {"bind": "/stage", "mode": "rw"},
             },
         )
+        status = helper.wait(condition="removed").get("StatusCode")
+        if status != 0:
+            raise RuntimeError(f"staging helper exited with status {status}")  # noqa: TRY301
     except BaseException as exc:
         if volume is not None:
             with contextlib.suppress(Exception):

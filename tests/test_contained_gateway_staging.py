@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -68,6 +70,7 @@ class _FakeDocker:
         self.stale: list[_Volume] = []
         self.list_filters: list[dict[str, Any]] = []
         self.helper_error: Exception | None = None
+        self.helper_status = 0
         self.version = lambda: {"Version": "29.9.2"}
         self.networks = SimpleNamespace(create=self._net)
         self.volumes = SimpleNamespace(create=self._vol, list=self._list)
@@ -92,7 +95,7 @@ class _FakeDocker:
             self.helper_calls.append({"image": _image, **kw})
             if self.helper_error is not None:
                 raise self.helper_error
-            return b""
+            return SimpleNamespace(wait=lambda **_kw: {"StatusCode": self.helper_status})
         self.gateway_calls.append(kw)
         return SimpleNamespace(
             remove=lambda **_: None, exec_run=lambda _cmd: (0, b""), name=kw.get("name")
@@ -149,6 +152,8 @@ def test_staged_launch_gives_the_gateway_its_own_read_only_copies(
     assert set(helper["cap_add"]) == {"CHOWN", "DAC_OVERRIDE", "FOWNER"}
     assert helper["security_opt"] == ["no-new-privileges"]
     assert helper["read_only"] is True
+    assert helper["auto_remove"] is True
+    assert helper["detach"] is True
     assert helper["command"][-1] == str(OTHER_UID)
     script = helper["command"][0]
     assert "umask 0277" in script
@@ -216,13 +221,45 @@ def test_stale_staging_volumes_of_this_engagement_are_swept_on_the_next_launch(
 def test_staging_failure_fails_closed_before_the_gateway_exists(
     fake_docker: _FakeDocker, files: tuple[str, str]
 ) -> None:
-    fake_docker.helper_error = docker.errors.ContainerError("c", 1, "sh", "img", b"boom")
+    fake_docker.helper_status = 1
     with pytest.raises(RuntimeError, match="could not stage"):
         _start(files[0])
 
     assert fake_docker.gateway_calls == []
     assert all(v.removed for v in fake_docker.volumes_made)
     assert all(n.removed for n in fake_docker.networks_made)
+
+
+def test_helper_start_error_fails_closed_too(
+    fake_docker: _FakeDocker, files: tuple[str, str]
+) -> None:
+    fake_docker.helper_error = docker.errors.APIError("daemon down")
+    with pytest.raises(RuntimeError, match="could not stage"):
+        _start(files[0])
+    assert fake_docker.gateway_calls == []
+    assert all(v.removed for v in fake_docker.volumes_made)
+
+
+def test_capture_setup_error_leaves_no_staged_volume(
+    fake_docker: _FakeDocker, files: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken_token(_secret: str, _scan_id: str) -> str:
+        raise RuntimeError("token generation failed")
+
+    package = types.ModuleType("recon_engine.backends.capture_token")
+    package.capture_capability_token = broken_token  # type: ignore[attr-defined]
+    for name in ("recon_engine", "recon_engine.backends"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "recon_engine.backends.capture_token", package)
+    monkeypatch.setenv("RECON_GATEWAY_CAPTURE", "1")
+    monkeypatch.setenv("RECON_SESSION_SECRET", "s" * 32)
+
+    with pytest.raises(RuntimeError, match="token generation failed"):
+        _start(files[0])
+
+    assert fake_docker.helper_calls == []
+    assert fake_docker.gateway_calls == []
+    assert not any(v.name.startswith("recon-gwstage-") for v in fake_docker.volumes_made)
 
 
 def test_worker_side_checks_are_not_loosened(

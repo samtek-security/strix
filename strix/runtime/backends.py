@@ -346,29 +346,7 @@ async def _contained_docker_backend(
     }
     volumes = {ca_name: {"bind": "/ca", "mode": "rw"}}
     token_mount = _REPORTER_TOKEN_MOUNT
-    spec_env: dict[str, str] = {}
-    if gateway_staging.needs_staging():
-        # The worker's files are closed to every other UID, so the gateway cannot read them in
-        # place. Copy them into a per-launch volume owned by the gateway's UID (mode 0400).
-        try:
-            with _suppress():
-                gateway_staging.sweep_stale(dc, boundary_labels)
-            stage_volume = gateway_staging.stage(
-                dc,
-                image=gw_image,
-                boundary_labels=boundary_labels,
-                spec_path=_gsp,
-                token_path=reporter_token_host,
-            )
-        except BaseException:
-            _cleanup_boundary()
-            raise
-        volumes[stage_volume.name] = {"bind": gateway_staging.STAGE_MOUNT, "mode": "ro"}
-        token_mount = f"{gateway_staging.STAGE_MOUNT}/{gateway_staging.TOKEN_NAME}"
-        spec_env = {
-            "RECON_ENGAGEMENT_SPEC": f"{gateway_staging.STAGE_MOUNT}/{gateway_staging.SPEC_NAME}"
-        }
-    else:
+    if not gateway_staging.needs_staging():
         volumes[_gsp] = {"bind": "/etc/recon/engagement.json", "mode": "ro"}
         volumes[str(reporter_token_host)] = {"bind": _REPORTER_TOKEN_MOUNT, "mode": "ro"}
     # Gateway capture (Plan Phase 4): when enabled, give the gateway a SESSION-DERIVED capability
@@ -382,7 +360,6 @@ async def _contained_docker_backend(
         "RECON_PROXY_INTERNAL_ONLY": "1",
         "RECON_TARGET_HEALTH_REPORTER_URL": reporter_url,
         "RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE": token_mount,
-        **spec_env,
     }
     capture_enabled = os.environ.get("RECON_GATEWAY_CAPTURE", "").strip().lower() in ("1", "true", "yes")
     if capture_enabled:
@@ -407,6 +384,29 @@ async def _contained_docker_backend(
         )
         gateway_env["RECON_SCAN_ID"] = scan_id or ""
         gateway_env["RECON_CAPTURE_CONTROL_HOST"] = "127.0.0.1"
+    if gateway_staging.needs_staging():
+        # The worker's files are closed to every other UID, so the gateway cannot read them in
+        # place. Copy them into a per-launch volume owned by the gateway's UID (mode 0400). This
+        # runs after every other check that can raise, so nothing staged outlives a failure.
+        try:
+            with _suppress():
+                gateway_staging.sweep_stale(dc, boundary_labels)
+            stage_volume = gateway_staging.stage(
+                dc,
+                image=gw_image,
+                boundary_labels=boundary_labels,
+                spec_path=_gsp,
+                token_path=reporter_token_host,
+            )
+        except BaseException:
+            _cleanup_boundary()
+            raise
+        volumes[stage_volume.name] = {"bind": gateway_staging.STAGE_MOUNT, "mode": "ro"}
+        token_mount = f"{gateway_staging.STAGE_MOUNT}/{gateway_staging.TOKEN_NAME}"
+        gateway_env["RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE"] = token_mount
+        gateway_env["RECON_ENGAGEMENT_SPEC"] = (
+            f"{gateway_staging.STAGE_MOUNT}/{gateway_staging.SPEC_NAME}"
+        )
     try:
         gw = dc.containers.run(
             gw_image,

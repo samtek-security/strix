@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """The gateway reports over its own Docker network, so the host can allow one subnet."""
 
 from __future__ import annotations
@@ -10,7 +11,12 @@ from unittest.mock import MagicMock
 import docker
 import pytest
 
-from strix.runtime import backends, docker_client, host_isolation, report_network
+from strix.runtime import backends, docker_client, gateway_staging, host_isolation, report_network
+
+
+@pytest.fixture(autouse=True)
+def _mount_in_place(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gateway_staging, "needs_staging", lambda: False)
 
 
 pytestmark = pytest.mark.real_report_network
