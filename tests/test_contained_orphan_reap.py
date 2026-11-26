@@ -915,3 +915,85 @@ def test_a_resource_already_removed_by_the_old_teardown_is_not_a_failure(
     )  # must not raise
     for res in (gw, vol, net):
         res.remove.assert_called_once()
+
+
+async def test_a_rejected_call_leaves_the_active_owners_liveness_callback_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    real_create = session_manager.create_or_reuse  # _wire_runner stubs the module attribute
+    _wire_runner(monkeypatch, tmp_path)
+    monkeypatch.setattr(session_manager, "create_or_reuse", real_create)
+    monkeypatch.setattr(
+        session_manager, "_compute_gateway_policy_fingerprint", lambda *_a, **_k: "fp"
+    )
+    owner_check = lambda: True  # noqa: E731
+    beat = runner._SandboxHeartbeat(tmp_path / ".heartbeat-a", interval=0.01)
+    beat.alive = owner_check
+    beat.start("hb-owner")
+    monkeypatch.setitem(
+        session_manager._SESSION_CACHE,
+        "scan-rj",
+        {
+            "_gateway_policy_fingerprint": "fp",
+            "_engagement_id": "eng-a",
+            "_heartbeat": beat,
+            "_heartbeat_path": str(beat.path),
+        },
+    )
+    try:
+        with pytest.raises(RuntimeError, match="belongs to engagement"):
+            await runner._run_scan(
+                scan_config={"targets": [], "scan_mode": "deep"},
+                scan_id="scan-rj",
+                image="img",
+                coordinator=runner.AgentCoordinator(),
+                engagement_id="eng-b",
+                heartbeat_alive=lambda: False,  # the rejected caller's check
+            )
+        assert beat.alive is owner_check, "a rejected call replaced the owner's liveness check"
+        assert not beat.stopped, "a rejected call must not stop the owner's heartbeat"
+    finally:
+        await beat.stop()
+
+
+async def test_an_accepted_call_installs_its_liveness_callback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    _wire_runner(monkeypatch, tmp_path)
+    cache: dict[str, Any] = {}
+    monkeypatch.setattr(session_manager, "_SESSION_CACHE", cache)
+
+    async def _create_or_reuse(scan_id: str, **_kw: Any) -> dict[str, Any]:
+        return cache.setdefault(
+            scan_id, {"client": object(), "session": object(), "caido_client": None}
+        )
+
+    async def _root(**_kwargs: Any) -> None:
+        return None
+
+    check = lambda: True  # noqa: E731
+    monkeypatch.setattr(session_manager, "create_or_reuse", _create_or_reuse)
+    monkeypatch.setattr(runner, "run_agent_loop", _root)
+    seen: list[Any] = []
+    real_start = runner._SandboxHeartbeat.start
+
+    def _start(self: Any, name: str) -> None:
+        seen.append(self.alive)  # nothing is installed yet while the sandbox comes up
+        real_start(self, name)
+
+    monkeypatch.setattr(runner._SandboxHeartbeat, "start", _start)
+    await runner._run_scan(
+        scan_config={"targets": [], "scan_mode": "deep"},
+        scan_id="scan-ok",
+        image="img",
+        coordinator=runner.AgentCoordinator(),
+        cleanup_on_exit=False,
+        heartbeat_alive=check,
+    )
+    beat = cache["scan-ok"]["_heartbeat"]
+    try:
+        assert seen == [None]
+        # The phase has ended and retained the sandbox, so it beats unconditionally between phases.
+        assert beat.alive is None
+    finally:
+        await beat.stop()

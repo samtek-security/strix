@@ -303,8 +303,8 @@ def _reap_orphaned_boundary(
     # Docker's name filter is a substring match, so resolve exact names client-side.
     networks = [n for n in dc.networks.list(names=[net_name]) if n.name == net_name]
     if len(networks) > 1:
-        # Docker allows duplicate names. Which one belongs to a live attempt cannot be told from here,
-        # and removing the first would leave the retry failing on the rest, so touch nothing.
+        # Docker allows duplicate names. Which one belongs to a live attempt cannot be told from
+        # here, and removing the first would leave the retry failing on the rest: touch nothing.
         logger.warning(
             "Not reaping scan %s: %d networks are named %r", scan_id, len(networks), net_name
         )
@@ -443,8 +443,8 @@ async def _contained_docker_backend(
     report_net_name, report_net_subnet = report_network.settings()
     report_net = report_network.ensure_network(dc, report_net_name, report_net_subnet)
     net_name = "recon-net-" + (scan_id or "default")
-    # Volumes have no ID and the daemon resolves them by name, so a name every attempt shares would let
-    # a stale handle delete a retry's volume. One name per attempt makes the name the identity.
+    # Volumes have no ID and the daemon resolves them by name, so a name every attempt shares
+    # would let a stale handle delete a retry's volume. One name per attempt is the identity.
     ca_name = f"recon-ca-{scan_id or 'default'}-{uuid.uuid4().hex[:8]}"
     gw_name = _gateway_name(scan_id)
     boundary_labels = {
@@ -456,7 +456,7 @@ async def _contained_docker_backend(
         boundary_labels["recon.engagement_id"] = engagement_id
 
     # 0. A crashed worker leaves its network, gateway and CA volume behind. Reap this engagement's
-    #    leftovers (exact label match) so the retry starts from a fresh boundary, never a reused one.
+    #    leftovers (exact label match) so the retry starts from a fresh boundary, never a reuse.
     _reap_orphaned_boundary(
         dc,
         scan_id=scan_id,

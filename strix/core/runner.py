@@ -298,7 +298,7 @@ async def _heartbeat_writer(
     interval: float = _HEARTBEAT_INTERVAL_SEC,
     alive: Callable[[], bool] | None = None,
 ) -> None:
-    """Touch ``path`` every ``interval`` seconds while ``alive`` (when given) says the run is live."""
+    """Touch ``path`` every ``interval`` seconds while ``alive`` (when given) says the run lives."""
     while True:
         if alive is None or alive():
             _touch_heartbeat(path)
@@ -309,7 +309,7 @@ class _SandboxHeartbeat:
     """The heartbeat of one scan's sandbox, owned by the session cache until cleanup.
 
     ``alive`` is the active phase's liveness check (the engine's progress watchdog). While it says
-    the run has stalled the file stops advancing, so a retry elsewhere can reap the boundary. Between
+    the run has stalled the file stops advancing, so a retry elsewhere can reap it. Between
     phases ``alive`` is None and the writer keeps going, so a retained sandbox stays protected.
     """
 
@@ -577,7 +577,9 @@ async def _run_scan(
             if cached.get("_heartbeat_path")
             else _attempt_heartbeat_path(run_dir)
         )
-    heartbeat.alive = heartbeat_alive
+    # The active owner's liveness check stays in place until create_or_reuse has accepted this call:
+    # a call it rejects (another engagement, a changed gateway policy) must not swap the callback of
+    # the run that really owns the cached sandbox.
     if started_heartbeat:
         heartbeat.start(f"heartbeat-{scan_id}")
     try:
@@ -601,6 +603,7 @@ async def _run_scan(
         if started_heartbeat:
             _stop_heartbeat_after_discards(heartbeat)
         raise
+    heartbeat.alive = heartbeat_alive
     bundle["_heartbeat"] = heartbeat
     report("Waiting for the first model response")
     logger.info("Sandbox ready for scan %s", scan_id)
