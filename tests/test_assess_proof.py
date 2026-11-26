@@ -143,3 +143,30 @@ async def test_assess_proof_itself_refuses_a_capture_that_does_not_verify(
     )
     assert status == "lead" and source is None and ids == [_GOOD]
     assert reason is not None and "integrity" in reason
+
+
+class _Mixed(_Capture):
+    """Two captures: the first fails its hash check, the second verifies."""
+
+    async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+        del part
+        ok = request_id == _OTHER
+        return SimpleNamespace(
+            request=SimpleNamespace(raw="GET / HTTP/1.1"),
+            response=SimpleNamespace(raw="HTTP/1.1 200 OK"),
+            integrity_sha256="e" * 64,
+            integrity_verified=ok,
+            captured_at="2026-11-26T10:00:00Z",
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_direct_report_needs_one_capture_that_verifies() -> None:
+    ctx = _ctx(_Mixed({_GOOD, _OTHER}))
+    _, status, _, source, sha, _ = await assess_proof_with_integrity(
+        ctx, [_GOOD, _OTHER], require_all=False
+    )
+    assert (status, source, sha) == ("exploited", "gateway_capture", "e" * 64)
+    # the promotion gate wants every cited capture to verify
+    _, status, reason, _, _, _ = await assess_proof_with_integrity(ctx, [_GOOD, _OTHER])
+    assert status == "lead" and reason is not None and "integrity" in reason

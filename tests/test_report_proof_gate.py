@@ -56,6 +56,9 @@ class _Capture:
             request=types.SimpleNamespace(raw=b"GET /a?id=1%27 HTTP/1.1\r\n\r\n"),
             response=types.SimpleNamespace(raw=b"HTTP/1.1 500\r\n\r\nSQL syntax error"),
             part=part,
+            integrity_sha256="f" * 64,
+            integrity_verified=True,
+            captured_at="2026-11-26T10:00:00Z",
         )
 
 
