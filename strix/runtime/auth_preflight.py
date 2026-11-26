@@ -877,7 +877,17 @@ async def run_auth_preflight(
     # Ensure the durable state dir exists in the container.
     await _run(session, "mkdir", "-p", _STATE_DIR)
     results = []
-    done_roles: set[str] = set()
+    # One flow per exact role name: the first that CAN log in (has a login_url), else the first.
+    # A header/api-key flow listed ahead of the browser flow for the same role must not cause the
+    # usable browser flow to be skipped.
+    chosen: dict[str, dict] = {}
+    for flow in auth_flows:
+        if isinstance(flow, dict) and isinstance(_role_of(flow), str):
+            name = _role_of(flow)
+            current = chosen.get(name)
+            if current is None or (not (current.get("login_url") or "").strip()
+                                   and (flow.get("login_url") or "").strip()):
+                chosen[name] = flow
     # Roles whose names slug to the same session name also share a brokered credential env var
     # and a browser session, so logging the first in would already leave it racing the others'
     # credential. Find every colliding role UP FRONT and refuse ALL of them before any login.
@@ -892,7 +902,7 @@ async def run_auth_preflight(
         if not isinstance(flow, dict):
             continue
         role = _role_of(flow)
-        if isinstance(role, str) and role in done_roles:
+        if isinstance(role, str) and chosen.get(role) is not flow:
             # The broker holds ONE credential per role and every flow for a role shares one
             # browser session, so a second flow for the same role is the same identity. Running
             # it would overwrite the first's session and yield contradictory results for one
@@ -919,7 +929,6 @@ async def run_auth_preflight(
                           f"rename one of them",
             })
             continue
-        done_roles.add(role)
         try:
             ext = (external_states or {}).get(role)
             results.append(
