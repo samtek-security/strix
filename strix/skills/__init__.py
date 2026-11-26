@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 import logging
 import re
 from collections import Counter
@@ -14,6 +15,15 @@ from strix.utils.resource_paths import get_strix_resource_path
 logger = logging.getLogger(__name__)
 
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(?P<body>.*?)\n---\s*\n", re.DOTALL)
+# The NOTICE attribution stays in the source files but must not reach the model. Only this
+# exact first line is dropped: other HTML comments can be payload examples.
+_ATTRIBUTION_BANNER = (
+    "<!-- Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). "
+    "See NOTICE. -->"
+)
+_ATTRIBUTION_BANNER_PATTERN = re.compile(
+    rf"\A[ \t]*{re.escape(_ATTRIBUTION_BANNER)}[ \t]*(?:\r?\n|\Z)"
+)
 # Only skills with `template: jinja` in their frontmatter are rendered; the rest hold
 # literal `{{ }}` payloads.
 _SKILL_TEMPLATES = Environment(
@@ -166,11 +176,15 @@ def _bare_skill_files(skill_name: str) -> list[Path]:
     return candidates
 
 
+def _strip_attribution_banner(body: str) -> str:
+    return _ATTRIBUTION_BANNER_PATTERN.sub("", body, count=1).lstrip()
+
+
 def _parse_skill_content(content: str, source: Path | None = None) -> tuple[dict[str, str], str]:
     """Parse skill frontmatter once and return metadata plus markdown body."""
     frontmatter = _FRONTMATTER_PATTERN.match(content)
     if frontmatter is None:
-        return {}, content.lstrip()
+        return {}, _strip_attribution_banner(content.lstrip())
 
     try:
         parsed: object = yaml.safe_load(frontmatter.group("body"))
@@ -179,10 +193,10 @@ def _parse_skill_content(content: str, source: Path | None = None) -> tuple[dict
         parsed = None
     if not _is_frontmatter_mapping(parsed):
         logger.warning("Skill frontmatter is not a mapping: %s", source or "<content>")
-        return {}, content[frontmatter.end() :].lstrip()
+        return {}, _strip_attribution_banner(content[frontmatter.end() :].lstrip())
 
     metadata = {str(key): "" if value is None else str(value) for key, value in parsed.items()}
-    return metadata, content[frontmatter.end() :].lstrip()
+    return metadata, _strip_attribution_banner(content[frontmatter.end() :].lstrip())
 
 
 def _read_skill_metadata(file_path: Path) -> dict[str, str]:
