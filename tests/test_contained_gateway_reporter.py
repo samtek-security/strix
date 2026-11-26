@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """The contained docker gateway must carry the control-plane escalation reporter."""
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from typing import Any
 import docker
 import pytest
 
-from strix.runtime import backends, host_isolation
+from strix.runtime import backends, gateway_staging, host_isolation
 
 
 URL = "http://control-plane.test:4001"
@@ -73,6 +74,8 @@ def fake_docker(monkeypatch: pytest.MonkeyPatch) -> _FakeDocker:
     monkeypatch.setattr(docker, "from_env", lambda: fake)
     # Stop right after the gateway container is created; the agent is out of scope here.
     monkeypatch.setattr(backends, "_wait_gateway_ready", lambda *_a, **_k: False)
+    # These tests cover the in-place mount; staging has its own file.
+    monkeypatch.setattr(gateway_staging, "needs_staging", lambda *_a, **_k: False)
     for name in (
         "RECON_TARGET_HEALTH_REPORTER_URL",
         "RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE",

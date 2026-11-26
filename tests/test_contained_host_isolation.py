@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """The contained backend isolates its network from the host and proves it first."""
 
 from __future__ import annotations
@@ -13,7 +14,12 @@ from unittest.mock import MagicMock
 import docker
 import pytest
 
-from strix.runtime import backends, host_isolation
+from strix.runtime import backends, gateway_staging, host_isolation
+
+
+@pytest.fixture(autouse=True)
+def _mount_in_place(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gateway_staging, "needs_staging", lambda *_a, **_k: False)
 
 
 SCAN = "scan-1"

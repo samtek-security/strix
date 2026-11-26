@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """The contained Docker backend forwards the gateway's L7 host lists to its container."""
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from unittest.mock import MagicMock
 import docker
 import pytest
 
-from strix.runtime import backends
+from strix.runtime import backends, gateway_staging
 
 
 class _StopError(Exception):
@@ -46,6 +47,7 @@ def _gateway_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> dict
     client.volumes.create.return_value = volume
     client.containers.run.side_effect = _StopError
     monkeypatch.setattr(docker, "from_env", lambda: client)
+    monkeypatch.setattr(gateway_staging, "needs_staging", lambda *_a, **_k: False)
     monkeypatch.delenv("RECON_GATEWAY_CAPTURE", raising=False)
     # The backend refuses to start without the control-plane escalation reporter.
     token = tmp_path / "reporter-token"

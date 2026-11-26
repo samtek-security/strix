@@ -15,7 +15,7 @@ from stat import S_IMODE, S_ISREG
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from strix.runtime import host_isolation, report_network
+from strix.runtime import gateway_staging, host_isolation, report_network
 
 
 if TYPE_CHECKING:
@@ -244,6 +244,10 @@ async def _contained_docker_backend(
 
     dc = docker.from_env()
     host_isolation.require_isolated_gateway_support(dc)
+    # Resolved before any engagement resource exists, so a bad UID leaves nothing behind.
+    gw_image = os.environ.get("RECON_EGRESS_GATEWAY_IMAGE", "recon/egress-gateway:latest")
+    gateway_uid = gateway_staging.resolve_uid(dc, gw_image)
+    stage_for_gateway = gateway_staging.needs_staging(gateway_uid)
     # The gateway reports trips to the control plane over its own network, so the host can allow
     # the API port from that subnet alone. Verified before any engagement resource exists.
     report_net_name, report_net_subnet = report_network.settings()
@@ -251,7 +255,6 @@ async def _contained_docker_backend(
     net_name = "recon-net-" + (scan_id or "default")
     ca_name = "recon-ca-" + (scan_id or "default")
     gw_name = _gateway_name(scan_id)
-    gw_image = os.environ.get("RECON_EGRESS_GATEWAY_IMAGE", "recon/egress-gateway:latest")
     boundary_labels = {
         "recon.sandbox": "true",
         "recon.scan_id": scan_id or "",
@@ -320,10 +323,15 @@ async def _contained_docker_backend(
             f"gateway CA volume {ca_name!r} failed ownership checks; refusing to start gateway"
         )
 
+    stage_volume: Any | None = None
+
     def _cleanup_boundary(gateway: Any | None = None) -> None:
         if gateway is not None:
             with _suppress():
                 gateway.remove(force=True)
+        if stage_volume is not None:
+            with _suppress():
+                stage_volume.remove(force=True)
         with _suppress():
             ca_volume.remove(force=True)
         with _suppress():
@@ -339,11 +347,11 @@ async def _contained_docker_backend(
         "recon.ttl_deadline": str(now + _sandbox_ttl_sec()),
         "recon.heartbeat_path": heartbeat_path or "",
     }
-    volumes = {
-        _gsp: {"bind": "/etc/recon/engagement.json", "mode": "ro"},
-        ca_name: {"bind": "/ca", "mode": "rw"},
-        str(reporter_token_host): {"bind": _REPORTER_TOKEN_MOUNT, "mode": "ro"},
-    }
+    volumes = {ca_name: {"bind": "/ca", "mode": "rw"}}
+    token_mount = _REPORTER_TOKEN_MOUNT
+    if not stage_for_gateway:
+        volumes[_gsp] = {"bind": "/etc/recon/engagement.json", "mode": "ro"}
+        volumes[str(reporter_token_host)] = {"bind": _REPORTER_TOKEN_MOUNT, "mode": "ro"}
     # Gateway capture (Plan Phase 4): when enabled, give the gateway a SESSION-DERIVED capability
     # token + scan id so it runs the redacted capture store + retrieval API and publishes the
     # /ca/recon-capture-ready marker the agent-path readiness gate checks before sending traffic.
@@ -354,7 +362,7 @@ async def _contained_docker_backend(
         # outbound NIC is attached, so egress-network peers cannot proxy.
         "RECON_PROXY_INTERNAL_ONLY": "1",
         "RECON_TARGET_HEALTH_REPORTER_URL": reporter_url,
-        "RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE": _REPORTER_TOKEN_MOUNT,
+        "RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE": token_mount,
     }
     capture_enabled = os.environ.get("RECON_GATEWAY_CAPTURE", "").strip().lower() in ("1", "true", "yes")
     if capture_enabled:
@@ -379,6 +387,30 @@ async def _contained_docker_backend(
         )
         gateway_env["RECON_SCAN_ID"] = scan_id or ""
         gateway_env["RECON_CAPTURE_CONTROL_HOST"] = "127.0.0.1"
+    if stage_for_gateway:
+        # The worker's files are closed to every other UID, so the gateway cannot read them in
+        # place. Copy them into a per-launch volume owned by the gateway's UID (mode 0400). This
+        # runs after every other check that can raise, so nothing staged outlives a failure.
+        try:
+            with _suppress():
+                gateway_staging.sweep_stale(dc, boundary_labels)
+            stage_volume = gateway_staging.stage(
+                dc,
+                image=gw_image,
+                boundary_labels=boundary_labels,
+                spec_path=_gsp,
+                token_path=reporter_token_host,
+                uid=gateway_uid,
+            )
+        except BaseException:
+            _cleanup_boundary()
+            raise
+        volumes[stage_volume.name] = {"bind": gateway_staging.STAGE_MOUNT, "mode": "ro"}
+        token_mount = f"{gateway_staging.STAGE_MOUNT}/{gateway_staging.TOKEN_NAME}"
+        gateway_env["RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE"] = token_mount
+        gateway_env["RECON_ENGAGEMENT_SPEC"] = (
+            f"{gateway_staging.STAGE_MOUNT}/{gateway_staging.SPEC_NAME}"
+        )
     try:
         gw = dc.containers.run(
             gw_image,
@@ -403,7 +435,7 @@ async def _contained_docker_backend(
         raise RuntimeError(f"egress gateway {gw_name} not ready; refusing to start the agent (fail-closed)")
 
     try:
-        token_readable = _gateway_can_read_token(gw)
+        token_readable = _gateway_can_read_token(gw, token_mount)
     except BaseException:
         _cleanup_boundary(gw)
         raise
@@ -411,7 +443,7 @@ async def _contained_docker_backend(
         _cleanup_boundary(gw)
         raise RuntimeError(
             f"egress gateway {gw_name} cannot read the escalation token at "
-            f"{_REPORTER_TOKEN_MOUNT}; refusing to start the agent (fail-closed). The token "
+            f"{token_mount}; refusing to start the agent (fail-closed). The token "
             "file must be readable by the gateway's user"
         )
 
@@ -471,6 +503,7 @@ async def _contained_docker_backend(
     client.recon_gateway_container = gw
     client.recon_internal_network = internal_net
     client.recon_gateway_ca_volume = ca_volume
+    client.recon_gateway_stage_volume = stage_volume
     options = DockerSandboxClientOptions(image=image, exposed_ports=exposed_ports)
     session = None
     try:
@@ -494,12 +527,12 @@ async def _contained_docker_backend(
 
 
 
-def _gateway_can_read_token(gateway: Any) -> bool:
+def _gateway_can_read_token(gateway: Any, token_mount: str = _REPORTER_TOKEN_MOUNT) -> bool:
     """The gateway runs as an unprivileged user, so a private host file can mount yet be unreadable.
 
     Readiness never opens the token, and the failure would surface only after a trip.
     """
-    code, _out = gateway.exec_run(["head", "-c", "1", _REPORTER_TOKEN_MOUNT])
+    code, _out = gateway.exec_run(["head", "-c", "1", token_mount])
     return code == 0
 
 
