@@ -166,6 +166,7 @@ function emptyVulnerabilityDefaults(): Omit<
     remediation_steps: null,
     fix_pr_body: null,
     evidence: null,
+    evidence_capture: null,
     assumptions: null,
     fix_effort: null,
     cvss_breakdown: null,
@@ -223,9 +224,21 @@ function parseOneVulnerability(
     remediation_steps: asStringOrNull(raw.remediation_steps),
     fix_pr_body: asStringOrNull(raw.fix_pr_body),
     evidence: asStringOrNull(raw.evidence),
+    evidence_capture: parseEvidenceCapture(raw.evidence_capture),
     assumptions: asStringOrNull(raw.assumptions),
     fix_effort: (asStringOrNull(raw.fix_effort) as Vulnerability["fix_effort"]) ?? null,
     cvss_breakdown: (raw.cvss_breakdown as Vulnerability["cvss_breakdown"]) ?? null,
+  };
+}
+
+function parseEvidenceCapture(value: unknown): Vulnerability["evidence_capture"] {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const shots = Array.isArray(raw.screenshots) ? raw.screenshots.map(String) : [];
+  return {
+    request: typeof raw.request === "string" ? raw.request : "",
+    response: typeof raw.response === "string" ? raw.response : "",
+    screenshots: shots,
   };
 }
 
