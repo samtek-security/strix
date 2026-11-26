@@ -25,6 +25,10 @@ _ENV_KEYS = ["STRIX_LLM", "LLM_API_KEY", "LLM_API_BASE", "LLM_EXTRA_HEADERS"]
 def _reset(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for key in _ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
+    # configure_sdk_model_defaults writes OPENAI_BASE_URL straight into os.environ;
+    # registering it here makes monkeypatch remove it after each test.
+    monkeypatch.setenv("OPENAI_BASE_URL", "")
+    monkeypatch.delenv("OPENAI_BASE_URL")
     monkeypatch.setattr(loader, "_cached", None)
     monkeypatch.setattr(loader, "_override", None)
 
