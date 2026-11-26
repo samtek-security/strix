@@ -74,7 +74,11 @@ def resolve_uid(dc: Any, image: str) -> int:
         return gateway_uid()
     user = ""
     with contextlib.suppress(Exception):
-        user = str(dc.images.get(image).attrs.get("Config", {}).get("User") or "")
+        try:
+            found = dc.images.get(image)
+        except Exception:  # noqa: BLE001  (not cached locally: pull as containers.run would)
+            found = dc.images.pull(image)
+        user = str(found.attrs.get("Config", {}).get("User") or "")
     first = user.split(":", 1)[0]
     if first.isdigit() and int(first) > 0:
         return int(first)

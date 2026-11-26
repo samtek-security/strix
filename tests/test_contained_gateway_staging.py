@@ -455,3 +455,23 @@ def test_a_stock_image_tag_set_through_the_override_is_still_accepted(
     with pytest.raises(RuntimeError, match="not ready"):
         _start(files[0])
     assert fake_docker.helper_calls[0]["command"][-1] == "10001"
+
+
+def test_an_uncached_custom_image_is_pulled_before_its_user_is_read(
+    fake_docker: _FakeDocker, files: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _custom_image(fake_docker, "", monkeypatch)
+    pulled: list[str] = []
+
+    def missing(_name: str) -> Any:
+        raise docker.errors.ImageNotFound("absent")
+
+    def pull(name: str) -> Any:
+        pulled.append(name)
+        return SimpleNamespace(attrs={"Config": {"User": "30001"}})
+
+    fake_docker.images = SimpleNamespace(get=missing, pull=pull)
+    with pytest.raises(RuntimeError, match="not ready"):
+        _start(files[0])
+    assert pulled == ["registry.example/custom-gateway:1"]
+    assert fake_docker.helper_calls[0]["command"][-1] == "30001"
