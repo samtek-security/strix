@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -371,3 +372,66 @@ def test_calibration_metadata_survives_into_result_properties(tmp_path: Path) ->
     assert strix["confidence_rationale"] == "Reproduced once out of three attempts."
     assert strix["severity_change_conditions"] == "Critical if the WAF rule is removed."
     assert strix["fix_verification"] == "Not retested."
+
+
+def _fp(result: dict[str, Any]) -> str:
+    return result["partialFingerprints"]["primaryLocationLineHash"]
+
+
+def test_same_path_in_two_repositories_stays_distinct(tmp_path: Path) -> None:
+    api = _finding(
+        id="a", code_locations=[{"repo": "acme/api", "file": "app/views.py", "start_line": 3}]
+    )
+    web = _finding(
+        id="b", code_locations=[{"repo": "acme/web", "file": "app/views.py", "start_line": 3}]
+    )
+    write_sarif(tmp_path, [api, web])
+    run = _read(tmp_path)["runs"][0]
+    first, second = run["results"]
+    loc_a = first["locations"][0]["physicalLocation"]["artifactLocation"]
+    loc_b = second["locations"][0]["physicalLocation"]["artifactLocation"]
+    assert loc_a == {"uri": "app/views.py", "uriBaseId": "repo:acme/api"}
+    assert loc_b == {"uri": "app/views.py", "uriBaseId": "repo:acme/web"}
+    assert _fp(first) != _fp(second)  # the fingerprint includes the repository
+    assert set(run["originalUriBaseIds"]) == {"repo:acme/api", "repo:acme/web"}
+    assert (
+        run["originalUriBaseIds"]["repo:acme/api"]["description"]["text"] == "Repository acme/api"
+    )
+
+
+def test_a_location_naming_no_repository_is_unchanged(tmp_path: Path) -> None:
+    write_sarif(tmp_path, [_finding()])
+    run = _read(tmp_path)["runs"][0]
+    assert run["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"] == {
+        "uri": "app.py"
+    }
+    assert "originalUriBaseIds" not in run
+    # the fingerprint of an unqualified location is exactly what it was before repositories existed
+    expected = hashlib.sha256(b"rule:CWE-89|uri:app.py|line:4").hexdigest()
+    assert _fp(run["results"][0]) == expected
+
+
+def test_fixes_carry_the_repository_and_a_bad_repository_is_ignored(tmp_path: Path) -> None:
+    fixed = _finding(
+        code_locations=[
+            {
+                "repo": "acme/web",
+                "file": "app/views.py",
+                "start_line": 3,
+                "end_line": 3,
+                "fix_before": "a",
+                "fix_after": "b",
+            },
+        ]
+    )
+    odd = _finding(
+        id="c", code_locations=[{"repo": "../x", "file": "app/views.py", "start_line": 3}]
+    )
+    write_sarif(tmp_path, [fixed, odd])
+    run = _read(tmp_path)["runs"][0]
+    change = run["results"][0]["fixes"][0]["artifactChanges"][0]["artifactLocation"]
+    assert change == {"uri": "app/views.py", "uriBaseId": "repo:acme/web"}
+    assert run["results"][1]["locations"][0]["physicalLocation"]["artifactLocation"] == {
+        "uri": "app/views.py"
+    }
+    assert list(run["originalUriBaseIds"]) == ["repo:acme/web"]

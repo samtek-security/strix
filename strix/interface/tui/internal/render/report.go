@@ -171,6 +171,9 @@ func renderCodeLocations(b *strings.Builder, raw any) {
 		if file == "" {
 			file = "unknown"
 		}
+		if repo := StringValue(loc["repo"]); repo != "" {
+			b.WriteString(Dim().Render(repo + ": "))
+		}
 		b.WriteString(Bold(InfoBlue).Render(file))
 		if start, ok := NumericValue(loc["start_line"]); ok {
 			if end, ok := NumericValue(loc["end_line"]); ok && end != start {
