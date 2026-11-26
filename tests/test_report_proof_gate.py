@@ -168,6 +168,7 @@ async def test_no_exchange_source_files_a_lead_with_its_own_reason(
     assert report["proof_status"] == "lead"
     assert report["proof_status_reason"] == NO_EXCHANGE_SOURCE_REASON
     assert "proof_source" not in report
+    assert report["http_exchange_ids"] == [_GOOD]
 
 
 @pytest.mark.asyncio
@@ -270,3 +271,12 @@ async def test_both_tools_reach_the_same_proof_status(
         )
 
     assert decision(direct) == decision(promoted)
+
+
+@pytest.mark.asyncio
+async def test_a_no_source_report_without_ids_stores_none(report_state: ReportState) -> None:
+    await _file(None)
+    report = _filed(report_state)
+    assert report["proof_status"] == "lead"
+    assert report["proof_status_reason"] == NO_EXCHANGE_SOURCE_REASON
+    assert not report.get("http_exchange_ids")
