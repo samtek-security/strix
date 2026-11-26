@@ -58,6 +58,7 @@ import re
 import shlex
 import shutil
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 from urllib.parse import urlsplit
@@ -652,73 +653,149 @@ async def _complete_totp(session: Any, flow: dict[str, Any], session_name: str, 
     return True, "TOTP MFA: code entered"
 
 
-async def preflight_role(
-    session: Any, flow: dict[str, Any], *, target_url: str, external_state: str | None = None,
-) -> dict[str, Any]:
-    """Log in + verify ONE role. Returns a result dict (never raises).
+@dataclass(frozen=True)
+class _RoleCtx:
+    """What every step of one role's preflight shares."""
 
-    ``external_state`` (optional): a HOST-supplied, previously-saved ``storage_state`` blob for
-    THIS role, already freshness-checked by the caller (keying by tenant/target/role is the
-    caller's concern, not this module's). Tried first via the same fail-closed ``_verify`` as
-    everything else - an invalid/expired blob falls straight through to the normal login below,
-    never reported authenticated on its own say-so."""
-    role = _role_of(flow)
-    if not isinstance(role, str):
-        return {
-            "role": str(role), "session_name": "", "state_path": "", "authenticated": False,
-            "checks": {}, "reason": "malformed auth flow: role must be a string",
-        }
-    slug = _slug(role)
-    session_name = f"recon-{slug}"
-    state_path = f"{_STATE_DIR}/{slug}.json"
-    result = {
-        "role": role, "session_name": session_name, "state_path": state_path,
-        "authenticated": False, "reason": "", "checks": {},
-    }
-    login_url = _text(flow, "login_url")
-    if not login_url:
-        result["reason"] = "no login_url - can't preflight; agent will handle auth"
-        return result
+    session: Any
+    flow: dict[str, Any]
+    role: str
+    slug: str
+    session_name: str
+    state_path: str
+    login_url: str
+    target_url: str
+
+
+def _accept(result: dict[str, Any], ver: dict[str, Any], reason: str) -> dict[str, Any]:
+    """Record a verification that passed all three checks."""
+    result["checks"] = ver["checks"]
+    result["authenticated"] = True
+    result["storage_state"] = ver.get("state_text", "")
+    result["reason"] = reason
+    return result
+
+
+async def _resume_from_host_state(
+    ctx: _RoleCtx, result: dict[str, Any], external_state: str | None, can_prove: bool,
+) -> dict[str, Any] | None:
+    """Try the HOST-supplied ``external_state`` blob: load it into the live session and run the
+    SAME 3-part check before trusting it. A clearly-garbage/tampered blob is rejected before it
+    ever reaches the sandbox. An expired-but-well-formed blob can still leave stale cookies in
+    this role's session when it fails verification - the same accepted trade-off the opt-in
+    RECON_AUTH_STATE_RESUME path has: the full login that follows navigates to login_url fresh.
+    Returns the accepted result, or None to fall through to the normal login."""
+    if not (external_state and can_prove and _looks_like_a_session_blob(external_state)):
+        return None
     try:
-        parsed_login = urlsplit(login_url)
-        login_is_idp = (_oidc_handoff_enabled() and _can_prove_login(flow)
-                        and parsed_login.scheme.lower() == "https") and (
-            _is_approved_oidc_host((parsed_login.hostname or "").lower(), flow))
-    except ValueError:  # a malformed login_url just means "not an IdP" - never raise from here
-        login_is_idp = False
-    # Without a declared success_condition, _verify's "semantic" check collapses to the protected
-    # probe, so a stale nonempty cookie on a target that lands on a public page would pass. A
-    # cross-run resume skips the credential login entirely, so it demands explicit semantic proof.
-    can_prove_resume = bool(_text(flow, "success_condition"))
-    if external_state and can_prove_resume and _looks_like_a_session_blob(external_state):
-        # Load the host-supplied blob into the live session and run the SAME 3-part check before
-        # trusting it. A clearly-garbage/tampered blob is rejected before it ever reaches the
-        # sandbox (the shape check above). An expired-but-well-formed blob can still leave stale
-        # cookies in this role's session when it fails verification here - the same accepted,
-        # documented trade-off the pre-existing RECON_AUTH_STATE_RESUME path below already has:
-        # the subsequent full login below navigates to login_url fresh, and a target that
-        # redirects an authenticated-looking (even if actually expired) session away from its own
-        # login form would need to independently re-validate it server-side to do so correctly.
+        if not await _write_state_file(ctx.session, ctx.state_path, external_state):
+            return None
+        load_ok, _ = await _run(ctx.session, "recon-browser", "--session-name", ctx.session_name,
+                                "state", "load", ctx.state_path)
+        # An empty or expired jar must not be navigated with: opening even a public page can set
+        # an anonymous cookie that would then look like a session.
+        if not (load_ok and await _read_state(ctx.session, ctx.session_name, ctx.state_path)):
+            return None
+        # "state load" restores cookies/local-storage but leaves the browser wherever it already
+        # was (a fresh session starts blank) - navigate to the target BEFORE verifying, or
+        # success_condition's url_contains/element_present would evaluate against nothing.
+        await _run(ctx.session, "recon-browser", "--session-name", ctx.session_name,
+                   "open", ctx.target_url)
+        ver = await _verify(ctx.session, ctx.flow, ctx.session_name, ctx.state_path, ctx.target_url)
+        if ver.get("authenticated"):
+            return _accept(result, ver, "resumed from host-persisted session (no re-login)")
+    except Exception:  # resume is best-effort; never block the full login
+        logger.exception("external-state resume failed for role %s", ctx.role)
+    return None
+
+
+async def _resume_from_local_state(
+    ctx: _RoleCtx, result: dict[str, Any], can_prove: bool,
+) -> dict[str, Any] | None:
+    """P7 cross-run session resume (opt-in): if a storage_state from a PRIOR run of this role
+    persists at state_path + RECON_AUTH_STATE_RESUME=1, load it + verify BEFORE the form login. A
+    valid session skips the login; an expired/invalid one falls through. Freshness guard: the
+    state file's mtime must be within RECON_AUTH_STATE_TTL_HOURS (default 12) so a stale cookie
+    never masks a rotated credential. Fail-closed: a load/verify failure is non-fatal."""
+    if os.environ.get("RECON_AUTH_STATE_RESUME", "0") != "1":
+        return None
+    try:
+        stale = True
         try:
-            if await _write_state_file(session, state_path, external_state):
-                load_ok, _ = await _run(session, "recon-browser", "--session-name", session_name,
-                                        "state", "load", state_path)
-                if load_ok and await _read_state(session, session_name, state_path):
-                    # "state load" restores cookies/local-storage but leaves the browser wherever
-                    # it already was (a fresh session starts blank) - navigate to the target
-                    # BEFORE verifying, or success_condition's url_contains/element_present would
-                    # evaluate against nothing and a genuinely valid resume would still fail.
-                    await _run(session, "recon-browser", "--session-name", session_name,
-                              "open", target_url)
-                    ver = await _verify(session, flow, session_name, state_path, target_url)
-                    if ver.get("authenticated"):
-                        result["checks"] = ver["checks"]
-                        result["authenticated"] = True
-                        result["storage_state"] = ver.get("state_text", "")
-                        result["reason"] = "resumed from host-persisted session (no re-login)"
-                        return result
-        except Exception:  # resume is best-effort; never block the full login
-            logger.exception("external-state resume failed for role %s", role)
+            age_h = (time.time() - os.path.getmtime(ctx.state_path)) / 3600.0
+            ttl_h = float(os.environ.get("RECON_AUTH_STATE_TTL_HOURS", "12"))
+            stale = age_h > ttl_h
+        except (OSError, ValueError):
+            stale = True
+        if stale or not can_prove:
+            return None
+        load_ok, _ = await _run(ctx.session, "recon-browser", "--session-name", ctx.session_name,
+                                "state", "load", ctx.state_path)
+        if not (load_ok and await _read_state(ctx.session, ctx.session_name, ctx.state_path)):
+            return None
+        await _run(ctx.session, "recon-browser", "--session-name", ctx.session_name,
+                   "open", ctx.target_url)
+        ver = await _verify(ctx.session, ctx.flow, ctx.session_name, ctx.state_path, ctx.target_url)
+        if ver.get("authenticated"):
+            return _accept(result, ver, "resumed from persisted storage_state (no re-login)")
+    except Exception:  # noqa: BLE001 - resume is best-effort; never block the full login
+        pass
+    return None
+
+
+def _login_url_is_idp(flow: dict[str, Any], login_url: str) -> bool:
+    try:
+        parsed = urlsplit(login_url)
+        return bool(
+            _oidc_handoff_enabled() and _can_prove_login(flow) and parsed.scheme.lower() == "https"
+            and _is_approved_oidc_host((parsed.hostname or "").lower(), flow))
+    except ValueError:  # a malformed login_url just means "not an IdP" - never raise from here
+        return False
+
+
+async def _direct_idp_entry(ctx: _RoleCtx, result: dict[str, Any]) -> dict[str, Any] | None:
+    """The target's login_url IS the identity provider - a direct SSO entry point, not a redirect
+    seen partway through a form-fill. Checked only AFTER both resume paths had their chance and
+    before the form-fill, which has no target-side form to find on a provider page. Open it in
+    the named session first (the agent continues in that session) and hand off only if the open
+    worked AND the browser is still on an approved HTTPS provider afterward; a failed open, or an
+    existing provider session that bounces straight back to a callback, is an ordinary login."""
+    opened, _ = await _run(
+        ctx.session, "recon-browser", "--session-name", ctx.session_name, "open", ctx.login_url)
+    if not opened:
+        return None
+    got_url, final_url = await _run(
+        ctx.session, "recon-browser", "--session-name", ctx.session_name, "get", "url")
+    if got_url and _is_https_approved_provider(final_url, ctx.flow):
+        result["needs_agent_oidc"] = True
+        result["oidc_provider_url"] = _origin(final_url)
+        result["reason"] = _oidc_handoff_reason(_origin(final_url), ctx.session_name)
+        return result
+    if _text(ctx.flow, "success_condition"):
+        # The open landed somewhere else (typically the target's callback because an existing SSO
+        # session redirected straight back). That may already be a valid session with no login
+        # form left to fill: run the same 3-part check on the landing before a form login.
+        ver = await _verify(ctx.session, ctx.flow, ctx.session_name, ctx.state_path, ctx.target_url)
+        if ver.get("authenticated"):
+            return _accept(result, ver, "verified via an existing provider session (no re-login)")
+    return None
+
+
+async def _handoff_if_at_idp(ctx: _RoleCtx, result: dict[str, Any]) -> dict[str, Any] | None:
+    """If the browser is sitting on an approved identity provider right now, mark the role for the
+    agent hand-off. Called at each point BEFORE a verify, never after one: ``_verify``'s probes
+    move the browser away from the provider's page."""
+    oidc = await _check_oidc_handoff(ctx.session, ctx.session_name, ctx.login_url, ctx.flow)
+    if not oidc:
+        return None
+    result.update(oidc)
+    result["reason"] = _oidc_handoff_reason(oidc["oidc_provider_url"], ctx.session_name)
+    return result
+
+
+async def _login_and_verify(ctx: _RoleCtx, result: dict[str, Any]) -> dict[str, Any]:
+    """The deterministic form login, the MFA step, and the 3-part verification."""
+    flow = ctx.flow
     # username is the label half of the "<role>:<label>" cred key, surfaced on the flow.
     username = _text(flow, "username") or _text(flow, "label")
     # For an email second factor, snapshot the mailbox (UIDNEXT, UIDVALIDITY) baseline right
@@ -738,126 +815,91 @@ async def preflight_role(
             email_baseline = await asyncio.to_thread(mb.uid_baseline, mb.config_from_env())
 
         pre_submit = _snapshot_baseline
-    # P7 cross-run session resume (opt-in): if a storage_state from a PRIOR run of this role persists
-    # at state_path + RECON_AUTH_STATE_RESUME=1, load it + verify BEFORE the form login. A valid session
-    # skips the login (resume); an expired/invalid one falls through to the full login. Freshness guard:
-    # the state file's mtime must be within RECON_AUTH_STATE_TTL_HOURS (default 12) so a stale cookie
-    # never masks a rotated credential. Fail-closed: a load/verify failure is non-fatal (full login runs).
-    if os.environ.get("RECON_AUTH_STATE_RESUME", "0") == "1":
-        try:
-            stale = True
-            try:
-                age_h = (time.time() - os.path.getmtime(state_path)) / 3600.0
-                ttl_h = float(os.environ.get("RECON_AUTH_STATE_TTL_HOURS", "12"))
-                stale = age_h > ttl_h
-            except (OSError, ValueError):
-                stale = True
-            if not stale and can_prove_resume:
-                load_ok, _ = await _run(session, "recon-browser", "--session-name", session_name,
-                                        "state", "load", state_path)
-                # An empty or expired jar must not be navigated with: opening even a public page
-                # can set an anonymous cookie that would then look like a session.
-                if load_ok and await _read_state(session, session_name, state_path):
-                    # Same reason as the external_state branch above: navigate before verifying.
-                    await _run(session, "recon-browser", "--session-name", session_name,
-                              "open", target_url)
-                    ver = await _verify(session, flow, session_name, state_path, target_url)
-                    if ver.get("authenticated"):
-                        result["checks"] = ver["checks"]
-                        result["authenticated"] = True
-                        result["storage_state"] = ver.get("state_text", "")
-                        result["reason"] = "resumed from persisted storage_state (no re-login)"
-                        return result
-        except Exception:  # noqa: BLE001 - resume is best-effort; never block the full login
-            pass
-    if login_is_idp:
-        # The target's login_url IS the identity provider - a direct SSO entry point, not a
-        # redirect we'd see partway through a form-fill. Checked only AFTER both resume paths
-        # above had their chance (a valid persisted session spares the interactive SSO entirely),
-        # and before the form-fill, which has no target-side form to find on a provider page.
-        # Open it in the named session first (the agent continues in that session, which would
-        # otherwise be blank) and hand off only if the open worked AND the browser is still on an
-        # approved HTTPS provider afterward: a failed open, or an existing provider session that
-        # bounces straight back to a callback, is an ordinary login attempt, not a hand-off.
-        opened, _ = await _run(
-            session, "recon-browser", "--session-name", session_name, "open", login_url)
-        at_idp = False
-        if opened:
-            got_url, final_url = await _run(
-                session, "recon-browser", "--session-name", session_name, "get", "url")
-            at_idp = got_url and _is_https_approved_provider(final_url, flow)
-        if at_idp:
-            result["needs_agent_oidc"] = True
-            result["oidc_provider_url"] = _origin(final_url)
-            result["reason"] = _oidc_handoff_reason(_origin(final_url), session_name)
-            return result
-        if opened and _text(flow, "success_condition"):
-            # Opening the provider landed somewhere else (typically the target's callback because
-            # an existing SSO session redirected straight back). That may already be a valid
-            # session, and no login form remains to fill - run the same 3-part check on the
-            # landing before falling back to a form login that would find nothing to submit.
-            ver = await _verify(session, flow, session_name, state_path, target_url)
-            if ver.get("authenticated"):
-                result["checks"] = ver["checks"]
-                result["authenticated"] = True
-                result["storage_state"] = ver.get("state_text", "")
-                result["reason"] = "verified via an existing provider session (no re-login)"
-                return result
 
-    async def _oidc_or(fallback_reason: str) -> dict[str, Any]:
-        """Check for an OIDC hand-off right now, before anything navigates the browser further
-        (``_verify``'s own probes would move us away from the provider's page, which is why this
-        is called at each point BEFORE a verify, never after one)."""
-        oidc = await _check_oidc_handoff(session, session_name, login_url, flow)
-        if oidc:
-            result.update(oidc)
-            result["reason"] = _oidc_handoff_reason(oidc["oidc_provider_url"], session_name)
-            return result
-        result["reason"] = fallback_reason
+    async def _fail_or_handoff(reason: str) -> dict[str, Any]:
+        # The target's login page - or its MFA step - can itself be where the OIDC redirect
+        # happens, so a failure is checked for a hand-off before it is reported as a failure.
+        handoff = await _handoff_if_at_idp(ctx, result)
+        if handoff is not None:
+            return handoff
+        result["reason"] = reason
         return result
 
-    ran, note = await _do_login(session, flow, slug, session_name, username, pre_submit=pre_submit)
+    ran, note = await _do_login(
+        ctx.session, flow, ctx.slug, ctx.session_name, username, pre_submit=pre_submit)
     if not ran:
-        # The deterministic form-fill can fail outright on an OIDC target: the target's OWN login
-        # page is often just a redirect, not a standard form.
-        return await _oidc_or(note)
+        return await _fail_or_handoff(note)
     # The target's OWN login form may have succeeded while ALSO being just step one of an OIDC
-    # flow (redirect to the provider happens right after). Check now, before MFA or verify run.
-    oidc_now = await _check_oidc_handoff(session, session_name, login_url, flow)
-    if oidc_now:
-        result.update(oidc_now)
-        result["reason"] = _oidc_handoff_reason(oidc_now["oidc_provider_url"], session_name)
-        return result
-    if is_email_mfa:
-        mfa_ok, mfa_note = await _complete_email_mfa(
-            session, flow, session_name, login_started, target_url, email_baseline)
-        if not mfa_ok:
-            # The MFA step itself can be where the OIDC redirect happens (the target's own
-            # first-factor succeeded, then it bounces to the provider for a second factor).
-            return await _oidc_or(mfa_note)
-    elif is_totp_mfa:
-        mfa_ok, mfa_note = await _complete_totp(session, flow, session_name, flow.get("role") or role)
-        if not mfa_ok:
-            return await _oidc_or(mfa_note)
+    # flow (the redirect to the provider happens right after): check before MFA or verify run.
+    early = await _handoff_if_at_idp(ctx, result)
+    if early is not None:
+        return early
     if is_email_mfa or is_totp_mfa:
+        if is_email_mfa:
+            mfa_ok, mfa_note = await _complete_email_mfa(
+                ctx.session, flow, ctx.session_name, login_started, ctx.target_url, email_baseline)
+        else:
+            mfa_ok, mfa_note = await _complete_totp(ctx.session, flow, ctx.session_name, ctx.role)
+        if not mfa_ok:
+            return await _fail_or_handoff(mfa_note)
         # A SUCCESSFUL OTP submit or magic-link open can itself land on an identity provider
-        # (command-level success, redirect afterward). Check before _verify's probes navigate
-        # away and erase the provider's location.
-        oidc_after_mfa = await _check_oidc_handoff(session, session_name, login_url, flow)
-        if oidc_after_mfa:
-            result.update(oidc_after_mfa)
-            result["reason"] = _oidc_handoff_reason(
-                oidc_after_mfa["oidc_provider_url"], session_name)
-            return result
-    ver = await _verify(session, flow, session_name, state_path, target_url)
+        # (command-level success, redirect afterward): check before _verify navigates away.
+        after_mfa = await _handoff_if_at_idp(ctx, result)
+        if after_mfa is not None:
+            return after_mfa
+    ver = await _verify(ctx.session, flow, ctx.session_name, ctx.state_path, ctx.target_url)
     result["checks"] = ver["checks"]
     result["authenticated"] = ver["authenticated"]
     if ver["authenticated"]:
         result["storage_state"] = ver.get("state_text", "")
         result["reason"] = "verified"
-        return result
-    result["reason"] = f"login ran but verification failed: {ver['checks']}"
+    else:
+        result["reason"] = f"login ran but verification failed: {ver['checks']}"
     return result
+
+
+async def preflight_role(
+    session: Any, flow: dict[str, Any], *, target_url: str, external_state: str | None = None,
+) -> dict[str, Any]:
+    """Log in + verify ONE role. Returns a result dict (never raises).
+
+    ``external_state`` (optional): a HOST-supplied, previously-saved ``storage_state`` blob for
+    THIS role, already freshness-checked by the caller (keying by tenant/target/role is the
+    caller's concern, not this module's). Tried first via the same fail-closed ``_verify`` as
+    everything else - an invalid/expired blob falls straight through to the normal login below,
+    never reported authenticated on its own say-so."""
+    role = _role_of(flow)
+    if not isinstance(role, str):
+        return {
+            "role": str(role), "session_name": "", "state_path": "", "authenticated": False,
+            "checks": {}, "reason": "malformed auth flow: role must be a string",
+        }
+    slug = _slug(role)
+    ctx = _RoleCtx(
+        session=session, flow=flow, role=role, slug=slug, session_name=f"recon-{slug}",
+        state_path=f"{_STATE_DIR}/{slug}.json", login_url=_text(flow, "login_url"),
+        target_url=target_url,
+    )
+    result: dict[str, Any] = {
+        "role": role, "session_name": ctx.session_name, "state_path": ctx.state_path,
+        "authenticated": False, "reason": "", "checks": {},
+    }
+    if not ctx.login_url:
+        result["reason"] = "no login_url - can't preflight; agent will handle auth"
+        return result
+    # Without a declared success_condition, _verify's "semantic" check collapses to the protected
+    # probe, so a stale nonempty cookie on a target that lands on a public page would pass. A
+    # cross-run resume skips the credential login entirely, so it demands explicit semantic proof.
+    can_prove = bool(_text(flow, "success_condition"))
+    resumed = (await _resume_from_host_state(ctx, result, external_state, can_prove)
+               or await _resume_from_local_state(ctx, result, can_prove))
+    if resumed is not None:
+        return resumed
+    if _login_url_is_idp(flow, ctx.login_url):
+        entered = await _direct_idp_entry(ctx, result)
+        if entered is not None:
+            return entered
+    return await _login_and_verify(ctx, result)
 
 
 async def reverify_role(session: Any, flow: dict[str, Any], *, target_url: str) -> dict[str, Any]:
