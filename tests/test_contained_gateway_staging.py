@@ -32,7 +32,9 @@ OTHER_UID = os.geteuid() + 1
 class _Volume:
     def __init__(self, name: str, labels: dict[str, str]) -> None:
         self.name = name
-        self.attrs = {"Labels": labels}
+        self.attrs = {"Labels": labels, "CreatedAt": f"created-{name}"}
+        # Volumes have no ID: the backend removes one only if the daemon still holds this same one.
+        self.client = SimpleNamespace(volumes=SimpleNamespace(get=lambda _name: self))
         self.removed = False
 
     def reload(self) -> None:
