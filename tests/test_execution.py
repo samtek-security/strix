@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -17,12 +18,13 @@ from agents.run_config import CallModelData, ModelInputData
 from agents.tool_context import ToolContext
 from openai.types.responses import ResponseOutputMessage, ResponseOutputRefusal, ResponseOutputText
 
-from strix.core import execution
+from strix.core import execution, runner
 from strix.core.agents import AgentCoordinator, WaitKind
 from strix.core.execution import (
     _notify_root_on_budget_reserve,
     notify_parent_on_terminal,
 )
+from strix.core.runner import _budget_stop_exit_reason
 from strix.core.sessions import seed_initial_input
 from strix.tools.agents_graph.tools import agent_finish, stop_agent
 from strix.tools.finish.tool import finish_scan
@@ -1763,3 +1765,89 @@ async def test_text_only_filter_scrubs_images_then_chains_existing_filter() -> N
         {"type": "input_text", "text": execution._TEXT_ONLY_IMAGE_TEXT}
     ]
     assert data.model_data.input[0]["output"] == [image]
+
+
+@pytest.mark.asyncio
+async def test_budget_stop_defaults_to_budget_exceeded() -> None:
+    coordinator = AgentCoordinator()
+    await coordinator.trigger_budget_stop()
+    assert coordinator.stop_reason == "budget_exceeded"
+    assert _budget_stop_exit_reason(coordinator) == "budget_exceeded"
+    # A BudgetExceededError with no recorded stop (raised by the hooks) is still the dollar budget.
+    assert _budget_stop_exit_reason(AgentCoordinator()) == "budget_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_elapsed_stop_reports_its_own_exit_reason() -> None:
+    coordinator = AgentCoordinator()
+    await coordinator.trigger_budget_stop("elapsed_budget")
+    assert coordinator.budget_stopped is True
+    assert _budget_stop_exit_reason(coordinator) == "elapsed_budget"
+
+
+@pytest.mark.asyncio
+async def test_first_stop_reason_is_kept() -> None:
+    coordinator = AgentCoordinator()
+    await coordinator.trigger_budget_stop("elapsed_budget")
+    # The agent loop re-triggers with the default when its BudgetExceededError unwinds.
+    await coordinator.trigger_budget_stop()
+    assert coordinator.stop_reason == "elapsed_budget"
+
+    dollars = AgentCoordinator()
+    await dollars.trigger_budget_stop()
+    await dollars.trigger_budget_stop("elapsed_budget")
+    assert dollars.stop_reason == "budget_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_stop_reason_survives_snapshot_and_clears_on_reset() -> None:
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    await coordinator.trigger_budget_stop("elapsed_budget")
+    snap = await coordinator.snapshot()
+    assert snap["stop_reason"] == "elapsed_budget"
+
+    restored = AgentCoordinator()
+    await restored.restore(snap)
+    assert restored.stop_reason == "elapsed_budget"
+
+    await restored.reset_budget_stops(budget_stopped=False, reserve_stopped=False)
+    assert restored.budget_stopped is False
+    assert restored.stop_reason is None
+
+    legacy = dict(snap)
+    del legacy["stop_reason"]
+    older = AgentCoordinator()
+    await older.restore(legacy)
+    assert older.budget_stopped is True
+    assert older.stop_reason is None
+
+
+def test_stop_artifacts_are_saved_once_the_scan_has_wound_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved: list[tuple[str | None, str | None]] = []
+    state = SimpleNamespace(
+        scan_ended_exit_reason=None,
+        save_run_data=lambda status=None: saved.append((state.scan_ended_exit_reason, status)),
+    )
+    monkeypatch.setattr(runner, "get_global_report_state", lambda: state)
+
+    # Recording the reason does not save: finalization is still to come.
+    runner._note_exit_reason("elapsed_budget")
+    runner._note_exit_reason("budget_exceeded")  # the first reason stays
+    assert state.scan_ended_exit_reason == "elapsed_budget"
+    assert saved == []
+
+    runner._save_stop_artifacts()
+    assert saved == [("elapsed_budget", "stopped")]
+
+
+def test_no_stop_reason_means_no_stop_save(monkeypatch: pytest.MonkeyPatch) -> None:
+    saved: list[object] = []
+    state = SimpleNamespace(
+        scan_ended_exit_reason=None, save_run_data=lambda status=None: saved.append(status)
+    )
+    monkeypatch.setattr(runner, "get_global_report_state", lambda: state)
+    runner._save_stop_artifacts()
+    assert saved == []

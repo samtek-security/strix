@@ -148,6 +148,29 @@ def _record_mcp_connections(connection_names: list[str]) -> None:
     report_state.record_mcp_connections(connection_names)
 
 
+def _budget_stop_exit_reason(coordinator: AgentCoordinator) -> str:
+    """The exit reason for a scan that ended on BudgetExceededError.
+
+    The model-dollar budget is the default. A caller that stopped the scan for another
+    cause (the engagement's elapsed budget) names it when it triggers the stop.
+    """
+    return coordinator.stop_reason or "budget_exceeded"
+
+
+def _save_stop_artifacts() -> None:
+    """Write the run artifacts once a scan that recorded a stop reason has fully wound down.
+
+    Recon runs the scan directly, with no CLI cleanup to save the report afterward, and
+    coverage.json carries the exit reason. Called at the very end of the scan's cleanup, so
+    ``end_time``, the agent snapshot and the coverage document include the finalization work.
+    """
+    report_state = get_global_report_state()
+    if report_state is None or report_state.scan_ended_exit_reason is None:
+        return
+    with contextlib.suppress(Exception):
+        report_state.save_run_data(status="stopped")
+
+
 def _note_exit_reason(reason: str) -> None:
     """Record why the scan stopped so the end-of-scan beacon reports it."""
     report_state = get_global_report_state()
@@ -753,7 +776,7 @@ async def _run_scan(
         return result  # noqa: TRY300
     except BudgetExceededError as exc:
         logger.info("Scan %s stopped: %s", scan_id, exc)
-        _note_exit_reason("budget_exceeded")
+        _note_exit_reason(_budget_stop_exit_reason(coordinator))
         if root_id is not None:
             with contextlib.suppress(Exception):
                 await coordinator.set_status(root_id, "stopped")
@@ -837,6 +860,8 @@ async def _run_scan(
             if cleanup_on_exit:
                 logger.info("Tearing down sandbox session for scan %s", scan_id)
                 await session_manager.cleanup(scan_id)
+            if not scan_cancelled:
+                _save_stop_artifacts()
             logger.info("Strix scan %s done", scan_id)
             teardown_logging()
 
