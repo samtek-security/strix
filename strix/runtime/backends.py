@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 
+from strix.runtime import host_isolation
+
 if TYPE_CHECKING:
     from agents.sandbox.manifest import Manifest
 
@@ -240,6 +242,7 @@ async def _contained_docker_backend(
     reporter_url, reporter_token_host = _reporter_settings()
 
     dc = docker.from_env()
+    host_isolation.require_isolated_gateway_support(dc)
     net_name = "recon-net-" + (scan_id or "default")
     ca_name = "recon-ca-" + (scan_id or "default")
     gw_name = _gateway_name(scan_id)
@@ -257,6 +260,7 @@ async def _contained_docker_backend(
             net_name,
             driver="bridge",
             internal=True,
+            options=host_isolation.isolated_options(),
             check_duplicate=True,
             labels={**boundary_labels, "recon.role": "agent-gateway-network"},
         )
@@ -270,6 +274,13 @@ async def _contained_docker_backend(
         internal_net = matches[0]
     internal_net.reload()
     net_attrs = internal_net.attrs
+    try:
+        host_isolation.require_isolated_network(net_attrs, net_name)
+    except RuntimeError:
+        if network_created:
+            with _suppress():
+                internal_net.remove()
+        raise
     expected_net_labels = {**boundary_labels, "recon.role": "agent-gateway-network"}
     if (
         net_attrs.get("Name") != net_name
@@ -398,6 +409,34 @@ async def _contained_docker_backend(
             f"{_REPORTER_TOKEN_MOUNT}; refusing to start the agent (fail-closed). The token "
             "file must be readable by the gateway's user"
         )
+
+    # The gateway is still on the internal network alone: prove it cannot reach the host before
+    # the outbound NIC goes on and before the agent exists.
+    try:
+        internal_net.reload()
+        host_isolation.check_host_unreachable(gw, internal_net.attrs)
+    except BaseException:
+        _cleanup_boundary(gw)
+        raise
+
+    # Practice targets live on their own isolated network that only the gateway joins. Verify it
+    # and probe the host from it before the gateway reaches the targets.
+    targets_net_name = os.environ.get("RECON_TARGETS_NETWORK", "").strip()
+    if targets_net_name:
+        try:
+            targets_net = dc.networks.get(targets_net_name)
+            targets_net.reload()
+            host_isolation.require_isolated_network(targets_net.attrs, targets_net_name)
+            targets_net.connect(gw)
+            targets_net.reload()
+            host_isolation.check_host_unreachable(gw, targets_net.attrs)
+        except BaseException as exc:
+            _cleanup_boundary(gw)
+            if isinstance(exc, RuntimeError):
+                raise
+            raise RuntimeError(
+                f"targets network {targets_net_name!r} could not be verified and joined"
+            ) from exc
 
     # Dual-home only after the private listener is ready. Attachment is mandatory:
     # without it the run is broken, so remove the gateway and fail before the agent.
