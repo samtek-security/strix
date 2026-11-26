@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Host isolation for the contained backend's per-engagement Docker network.
 
 An ``internal`` bridge blocks routing out, but Docker still gives the bridge a host-side gateway

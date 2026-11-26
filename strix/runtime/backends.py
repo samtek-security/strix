@@ -15,8 +15,8 @@ from stat import S_IMODE, S_ISREG
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-
 from strix.runtime import host_isolation
+
 
 if TYPE_CHECKING:
     from agents.sandbox.manifest import Manifest
@@ -218,6 +218,7 @@ async def _contained_docker_backend(
     up with a broken/absent boundary.
     """
     import stat as _stat
+
     import docker
     from agents.sandbox.sandboxes.docker import DockerSandboxClientOptions
 
