@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 import ipaddress
 import json
 import logging
@@ -195,6 +196,8 @@ def format_vulnerability_report(report: dict[str, Any]) -> Text:  # noqa: PLR091
         for i, loc in enumerate(code_locations):
             text.append("\n\n")
             text.append(f"  Location {i + 1}: ", style="dim")
+            if loc.get("repo"):
+                text.append(f"{loc['repo']}: ", style="dim")
             text.append(loc.get("file", "unknown"), style="bold")
             start = loc.get("start_line")
             end = loc.get("end_line")

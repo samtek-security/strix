@@ -265,3 +265,16 @@ def test_render_vulnerability_md_surfaces_calibration_metadata() -> None:
     assert "## Confidence Rationale" in md
     assert "## What Would Change This Severity" in md
     assert "## Fix Verification" in md
+
+
+def test_render_vulnerability_md_names_the_repository_of_a_code_location() -> None:
+    md = render_vulnerability_md(
+        _sample_report(
+            code_locations=[
+                {"repo": "acme/api", "file": "app/views.py", "start_line": 3, "end_line": 3},
+                {"file": "app/views.py", "start_line": 1, "end_line": 1},
+            ],
+        ),
+    )
+    assert "`acme/api: app/views.py` (line 3)" in md
+    assert "`app/views.py` (line 1)" in md

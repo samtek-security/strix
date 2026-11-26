@@ -183,3 +183,31 @@ async def test_a_plain_lead_verdict_and_the_boundary_drain_keep_the_location(
     assert rs.vulnerability_reports[1]["code_locations"] == [
         {"file": "app/other.py", "start_line": 3, "end_line": 4}
     ]
+
+
+def test_a_queued_location_keeps_the_repository_it_names() -> None:
+    queued = {"vulnerable_code_location": "app/views.py:3"}
+    got = ex._queued_code_locations({**queued, "repo": "acme/api"})
+    assert got == [{"repo": "acme/api", "file": "app/views.py", "start_line": 3, "end_line": 3}]
+    # a repository that is not a plain name gives no location, never one in the wrong clone
+    assert ex._queued_code_locations({**queued, "repo": "../x"}) is None
+    assert ex._queued_code_locations({**queued, "repo": None}) == [
+        {"file": "app/views.py", "start_line": 3, "end_line": 3}
+    ]
+
+
+def test_promotion_locations_inherit_the_queued_repository() -> None:
+    item = {"repo": "acme/api"}
+    structured = [
+        {"file": "a.py", "start_line": 1, "end_line": 1},
+        {"repo": "acme/web", "file": "b.py"},
+    ]
+    got = ex._with_queued_repo(structured, item)
+    assert got[0]["repo"] == "acme/api" and got[1]["repo"] == "acme/web"
+    assert ex._with_queued_repo([{"file": "a.py"}], {}) == [{"file": "a.py"}]
+    assert ex._with_queued_repo(None, item) is None
+
+
+def test_a_malformed_queued_repository_is_not_inherited() -> None:
+    structured = [{"file": "a.py", "start_line": 1, "end_line": 1}]
+    assert ex._with_queued_repo(structured, {"repo": "../x"}) == structured

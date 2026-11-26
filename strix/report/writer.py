@@ -361,6 +361,8 @@ def render_vulnerability_md(report: dict[str, Any]) -> str:  # noqa: PLR0912, PL
         lines.append("## Code Analysis\n")
         for i, loc in enumerate(report["code_locations"]):
             file_ref = loc.get("file", "unknown")
+            if loc.get("repo"):
+                file_ref = f"{loc['repo']}: {file_ref}"  # two repositories can share a path
             line_ref = ""
             if loc.get("start_line") is not None:
                 if loc.get("end_line") and loc["end_line"] != loc["start_line"]:
