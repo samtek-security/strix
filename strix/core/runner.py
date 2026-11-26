@@ -163,9 +163,10 @@ def _note_exit_reason(reason: str) -> None:
     if report_state is not None and report_state.scan_ended_exit_reason is None:
         report_state.scan_ended_exit_reason = reason
         # A caller that runs the scan directly (Recon's engine) has no CLI cleanup that saves
-        # the report afterward, and coverage.json carries this reason, so write it now.
+        # the report afterward, and coverage.json carries this reason, so write it now, with the
+        # run marked stopped to match.
         with contextlib.suppress(Exception):
-            report_state.save_run_data()
+            report_state.save_run_data(status="stopped")
 
 
 def _persist_mcp_status(roster: list[dict[str, Any]]) -> None:

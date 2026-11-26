@@ -1827,10 +1827,10 @@ def test_exit_reason_is_saved_to_the_run_artifacts(monkeypatch: pytest.MonkeyPat
     saved: list[str | None] = []
     state = SimpleNamespace(
         scan_ended_exit_reason=None,
-        save_run_data=lambda: saved.append(state.scan_ended_exit_reason),
+        save_run_data=lambda status=None: saved.append((state.scan_ended_exit_reason, status)),
     )
     monkeypatch.setattr(runner, "get_global_report_state", lambda: state)
     runner._note_exit_reason("elapsed_budget")
     runner._note_exit_reason("budget_exceeded")  # the first reason stays
     assert state.scan_ended_exit_reason == "elapsed_budget"
-    assert saved == ["elapsed_budget"]
+    assert saved == [("elapsed_budget", "stopped")]
