@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 
 from strix.core.paths import run_record_path, runs_base_dir, runtime_state_dir
 
+from strix.report.proof import is_validated
+
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -71,7 +73,8 @@ def _title(record: dict[str, Any], findings: Any) -> str:
     if instruction:
         return instruction.splitlines()[0]
     found = [f for f in findings if isinstance(f, dict)] if isinstance(findings, list) else []
-    worst = min(found, key=lambda f: _SEVERITY_RANK.get(str(f.get("severity")), 4), default={})
+    proven = [f for f in found if is_validated(f)] or found
+    worst = min(proven, key=lambda f: _SEVERITY_RANK.get(str(f.get("severity")), 4), default={})
     return re.split(r" via | on | \(", str(worst.get("title") or ""))[0]
 
 

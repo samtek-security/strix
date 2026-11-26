@@ -22,6 +22,7 @@ from rich.text import Text
 from strix.config import load_settings
 from strix.telemetry import report_error
 from strix.utils.api_spec import detect_spec_format
+from strix.report.proof import is_validated, lead_count
 
 
 logger = logging.getLogger(__name__)
@@ -236,9 +237,12 @@ def _build_vulnerability_stats(stats_text: Text, report_state: Any) -> None:
     if vuln_count > 0:
         severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
         for report in report_state.vulnerability_reports:
+            if not is_validated(report):
+                continue
             severity = report.get("severity", "").lower()
             if severity in severity_counts:
                 severity_counts[severity] += 1
+        leads = lead_count(report_state.vulnerability_reports)
 
         stats_text.append("Vulnerabilities  ", style="bold red")
 
@@ -251,6 +255,12 @@ def _build_vulnerability_stats(stats_text: Text, report_state: Any) -> None:
                 severity_text.append(f"{severity.upper()}: ", style=severity_color)
                 severity_text.append(str(count), style=f"bold {severity_color}")
                 severity_parts.append(severity_text)
+
+        if leads:
+            lead_text = Text()
+            lead_text.append("LEADS: ", style="dim white")
+            lead_text.append(str(leads), style="bold dim white")
+            severity_parts.append(lead_text)
 
         for i, part in enumerate(severity_parts):
             stats_text.append(part)
@@ -401,9 +411,12 @@ def build_live_stats_text(report_state: Any) -> Text:
     if vuln_count > 0:
         severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
         for report in report_state.vulnerability_reports:
+            if not is_validated(report):
+                continue
             severity = report.get("severity", "").lower()
             if severity in severity_counts:
                 severity_counts[severity] += 1
+        leads = lead_count(report_state.vulnerability_reports)
 
         severity_parts = []
         for severity in ["critical", "high", "medium", "low", "info"]:
@@ -414,6 +427,12 @@ def build_live_stats_text(report_state: Any) -> Text:
                 severity_text.append(f"{severity.upper()}: ", style=severity_color)
                 severity_text.append(str(count), style=f"bold {severity_color}")
                 severity_parts.append(severity_text)
+
+        if leads:
+            lead_text = Text()
+            lead_text.append("LEADS: ", style="dim white")
+            lead_text.append(str(leads), style="bold dim white")
+            severity_parts.append(lead_text)
 
         for i, part in enumerate(severity_parts):
             stats_text.append(part)

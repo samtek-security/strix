@@ -18,6 +18,7 @@ from rich.text import Text
 
 from strix.config import codex, load_settings, persist_current
 from strix.core.paths import RUNS_DIR_NAME, run_dir_for
+from strix.report.proof import is_validated
 from strix.interface.cli_args import (
     FAIL_ON_SEVERITIES,
     ResumeError,
@@ -275,11 +276,14 @@ def display_completion_message(args: argparse.Namespace, results_path: Path) -> 
 def findings_fail_build(reports: list[dict[str, Any]], fail_on: str | None) -> bool:
     """Whether headless findings should exit 2 under the ``--fail-on`` threshold.
 
-    With no threshold any finding fails. Otherwise a finding fails when its
+    Only validated findings count: a lead (a promotion that did not verify) keeps its claimed
+    severity on the report but never fails the build. With no threshold any finding fails.
+    Otherwise a finding fails when its
     severity is at or above the threshold. A severity outside the known scale
     fails too, so a gate never passes on a value it cannot rank. ``none`` is a
     known level below ``info`` and only fails without a threshold.
     """
+    reports = [r for r in reports if is_validated(r)]
     if not reports:
         return False
     if fail_on is None:
