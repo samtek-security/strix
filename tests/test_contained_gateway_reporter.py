@@ -375,7 +375,15 @@ def test_round_trip_property_over_generated_and_mutated_urls() -> None:
 
 
 @pytest.mark.parametrize(
-    "content", [" " + "a" * 40, "a" * 40 + " ", "\t" + "a" * 40, "a" * 40 + "\t\n"]
+    "content",
+    [
+        " " + "a" * 40,
+        "a" * 40 + " ",
+        "\t" + "a" * 40,
+        "a" * 40 + "\t\n",
+        "a" * 40 + "\r\n",
+        "a" * 40 + "\n\n",
+    ],
 )
 def test_refuses_a_token_with_surrounding_whitespace(
     fake_docker: _FakeDocker,
@@ -395,7 +403,7 @@ def test_refuses_a_token_with_surrounding_whitespace(
     assert fake_docker.run_calls == []
 
 
-@pytest.mark.parametrize("terminator", ["\n", "\r\n", ""])
+@pytest.mark.parametrize("terminator", ["\n", ""])
 def test_accepts_a_token_with_only_a_line_terminator(
     fake_docker: _FakeDocker,
     spec_file: str,

@@ -172,9 +172,9 @@ def _reporter_settings() -> tuple[str, Path]:
             "user and not accessible by group or other"
         )
     try:
-        # Only the line terminator is dropped, as `$(cat file)` does for the control plane's copy.
-        # Other surrounding whitespace is rejected below, not silently trimmed.
-        token = token_file.read_text(encoding="utf-8").rstrip("\r\n")
+        # Raw bytes, so CRLF is not translated. Exactly one trailing LF is dropped, as `$(cat file)`
+        # does for the control plane's copy; a CR or any other whitespace is rejected below.
+        token = token_file.read_bytes().decode("utf-8").removesuffix("\n")
     except (OSError, UnicodeDecodeError) as exc:
         raise ValueError(
             f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} is not a readable file: {exc}"
