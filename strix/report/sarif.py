@@ -248,7 +248,7 @@ def build_sarif_report(
 
         # A lead gets its own rule: rule-level severity is what code-scanning shows, so a rule
         # shared with a validated finding would present the lead at that finding's severity.
-        rule_id = _rule_id(report) + ("" if is_validated(report) else "-lead")
+        rule_id = _rule_id(report) + ("" if is_validated(report) else _LEAD_RULE_SUFFIX)
         if rule_id not in rules_by_id:
             rule_index_by_id[rule_id] = len(rules_by_id)
             rules_by_id[rule_id] = _build_rule(rule_id, report)
@@ -435,6 +435,9 @@ def _apply_repository_context(run: dict[str, Any], context: dict[str, Any]) -> N
 # ---------------------------------------------------------------------------
 
 
+_LEAD_RULE_SUFFIX = "-lead"
+
+
 def _build_rule(rule_id: str, report: dict[str, Any]) -> dict[str, Any]:
     """Build a SARIF rule descriptor from a Strix finding."""
     title = _string_value(report.get("title")) or rule_id
@@ -443,7 +446,7 @@ def _build_rule(rule_id: str, report: dict[str, Any]) -> dict[str, Any]:
 
     rule: dict[str, Any] = {
         "id": rule_id,
-        "name": _rule_name(rule_id, title),
+        "name": _rule_name(rule_id.removesuffix(_LEAD_RULE_SUFFIX), title),
         "shortDescription": {"text": title},
         "fullDescription": {"text": full_description},
         "defaultConfiguration": {"level": _report_level(report)},
@@ -453,12 +456,14 @@ def _build_rule(rule_id: str, report: dict[str, Any]) -> dict[str, Any]:
     properties: dict[str, Any] = {
         "security-severity": _security_severity(report),
     }
-    tags = _rule_tags(rule_id, report)
+    # A lead's rule id carries a suffix; the CWE tags and help link come from the base id.
+    base_id = rule_id.removesuffix(_LEAD_RULE_SUFFIX)
+    tags = _rule_tags(base_id, report)
     if tags:
         properties["tags"] = tags
     rule["properties"] = properties
 
-    help_uri = _help_uri_for(rule_id)
+    help_uri = _help_uri_for(base_id)
     if help_uri:
         rule["helpUri"] = help_uri
 

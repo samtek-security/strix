@@ -102,6 +102,9 @@ def test_sarif_gives_a_lead_its_own_rule(tmp_path: Path) -> None:
     assert rules["CWE-89"]["defaultConfiguration"]["level"] == "error"
     assert rules["CWE-89-lead"]["defaultConfiguration"]["level"] == "note"
     assert rules["CWE-89-lead"]["properties"]["security-severity"] == "1.0"
+    # the suffix is only the rule id: tags and the help link stay on the canonical CWE
+    assert rules["CWE-89-lead"]["properties"]["tags"] == rules["CWE-89"]["properties"]["tags"]
+    assert rules["CWE-89-lead"]["helpUri"] == rules["CWE-89"]["helpUri"]
 
 
 def test_report_summary_entry_carries_the_proof_status() -> None:
