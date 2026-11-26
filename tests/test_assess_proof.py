@@ -141,7 +141,7 @@ async def test_assess_proof_itself_refuses_a_capture_that_does_not_verify(
     ids, status, reason, source = await assess_proof(
         _ctx(_Signed({_GOOD}, verified=verified)), [_GOOD], require_all=False
     )
-    assert status == "lead" and source is None and ids == [_GOOD]
+    assert status == "lead" and source is None and ids is None
     assert reason is not None and "integrity" in reason
 
 

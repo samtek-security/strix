@@ -104,6 +104,7 @@ async def test_a_capture_that_does_not_verify_files_a_lead(
     report = rs.vulnerability_reports[0]
     assert report["proof_status"] == "lead"
     assert "capture_integrity_sha256" not in report and "proof_source" not in report
+    assert "http_exchange_ids" not in report
 
 
 @pytest.mark.asyncio
