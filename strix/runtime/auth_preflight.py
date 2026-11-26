@@ -280,6 +280,22 @@ def _is_approved_oidc_host(hostname: str, flow: dict[str, Any]) -> bool:
     return any(_matches(host) for host in _KNOWN_OIDC_HOSTS)
 
 
+def _norm_host(value: str, *, keep_leading_dot: bool = False) -> str:
+    """Lowercase a host or signed scope entry and drop what never changes WHICH host it names: a
+    trailing dot, a ``:port`` suffix and IPv6 brackets. The signed scope accepts those forms, so
+    the matcher must too or a valid in-scope landing is rejected. A leading dot (the subdomain
+    wildcard) is kept for scope entries."""
+    host = (value or "").strip().lower()
+    dotted = keep_leading_dot and host.startswith(".")
+    host = host.lstrip(".")
+    if host.startswith("["):
+        host = host[1:].split("]", 1)[0]
+    elif host.count(":") == 1:
+        host = host.split(":", 1)[0]
+    host = host.rstrip(".")
+    return ("." + host) if dotted and host else host
+
+
 def _in_signed_scope(hostname: str, flow: dict[str, Any]) -> bool:
     """The provider host must ALSO be inside the engagement's signed in-scope host list, carried
     on the flow as ``scope_hosts`` (the compiled config's ``allow_hosts``; a leading dot covers
@@ -289,15 +305,16 @@ def _in_signed_scope(hostname: str, flow: dict[str, Any]) -> bool:
     entries = flow.get("scope_hosts")
     if not isinstance(entries, (list, tuple)):
         return False
+    host = _norm_host(hostname)
     for raw in entries:
-        entry = str(raw).strip().lower()
+        entry = _norm_host(str(raw), keep_leading_dot=True)
         if not entry:
             continue
         if entry.startswith("."):
             bare = entry[1:]
-            if bare and (hostname == bare or hostname.endswith(entry)):
+            if bare and (host == bare or host.endswith(entry)):
                 return True
-        elif hostname == entry:
+        elif host == entry:
             return True
     return False
 
