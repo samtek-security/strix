@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -12,6 +13,7 @@ from strix.tools.exploitation.tool import (
     NO_EXCHANGE_SOURCE_REASON,
     PROOF_FAILED_PREFIX,
     assess_proof,
+    assess_proof_with_integrity,
 )
 
 
@@ -27,6 +29,16 @@ class _Capture:
 
     async def capture_exists(self, request_id: str) -> bool:
         return request_id in self.known
+
+    async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+        del request_id, part
+        return SimpleNamespace(
+            request=SimpleNamespace(raw="GET / HTTP/1.1"),
+            response=SimpleNamespace(raw="HTTP/1.1 200 OK"),
+            integrity_sha256="a" * 64,
+            integrity_verified=True,
+            captured_at="2026-11-26T10:00:00Z",
+        )
 
 
 def _ctx(client: Any) -> Any:
@@ -94,3 +106,40 @@ async def test_require_all_verifies_every_cited_id() -> None:
         _ctx(_Capture({_GOOD, _OTHER, third})), [_GOOD, _OTHER, third]
     )
     assert (ids, status) == ([_GOOD, _OTHER, third], "exploited")
+
+
+class _Signed(_Capture):
+    def __init__(self, known: set[str], *, verified: bool | None) -> None:
+        super().__init__(known)
+        self.verified = verified
+
+    async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+        del request_id, part
+        out = {
+            "request": SimpleNamespace(raw="GET / HTTP/1.1"),
+            "response": SimpleNamespace(raw="HTTP/1.1 200 OK"),
+            "integrity_sha256": "d" * 64,
+            "captured_at": "2026-11-26T10:00:00Z",
+        }
+        if self.verified is not None:
+            out["integrity_verified"] = self.verified
+        return SimpleNamespace(**out)
+
+
+@pytest.mark.asyncio
+async def test_a_verified_capture_returns_its_hash_and_time() -> None:
+    out = await assess_proof_with_integrity(_ctx(_Signed({_GOOD}, verified=True)), [_GOOD])
+    assert out == ([_GOOD], "exploited", None, "gateway_capture", "d" * 64, "2026-11-26T10:00:00Z")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verified", [False, None])
+async def test_assess_proof_itself_refuses_a_capture_that_does_not_verify(
+    verified: bool | None,
+) -> None:
+    # Direct reports call assess_proof, so the integrity check has to live behind it.
+    ids, status, reason, source = await assess_proof(
+        _ctx(_Signed({_GOOD}, verified=verified)), [_GOOD], require_all=False
+    )
+    assert status == "lead" and source is None and ids == [_GOOD]
+    assert reason is not None and "integrity" in reason
