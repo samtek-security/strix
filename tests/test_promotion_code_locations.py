@@ -40,6 +40,7 @@ _FIELDS = {
         ("../etc/passwd:3", None),
         ("/etc/passwd:3", None),
         ("app/views.py:50-40", None),
+        ("app/views.py:" + "9" * 5000, None),
         ("", None),
         (None, None),
     ],
@@ -120,6 +121,9 @@ async def test_an_unparsable_location_does_not_stop_the_promotion(
 async def test_structured_snippets_are_redacted_before_filing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Recon's redactor is not importable standalone, so stand one in.
+    monkeypatch.setattr(ex, "_REDACT_CACHED", True)
+    monkeypatch.setattr(ex, "_REDACT_FN", lambda t: t.replace("LEAKEDSECRET99", "[REDACTED]"))
     loc = [{"file": "a.py", "start_line": 1, "end_line": 1, "snippet": "api_key=LEAKEDSECRET99"}]
     out, rs = await _promote(_exploited(code_locations=loc), {}, tmp_path, monkeypatch)
     assert out["success"] is True, out
