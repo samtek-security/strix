@@ -241,6 +241,7 @@ async def _contained_docker_backend(
 
     # Checked before any Docker resource exists (fail-closed).
     reporter_url, reporter_token_host = _reporter_settings()
+    stage_for_gateway = gateway_staging.needs_staging()  # validates RECON_GATEWAY_UID up front
 
     dc = docker.from_env()
     host_isolation.require_isolated_gateway_support(dc)
@@ -346,7 +347,7 @@ async def _contained_docker_backend(
     }
     volumes = {ca_name: {"bind": "/ca", "mode": "rw"}}
     token_mount = _REPORTER_TOKEN_MOUNT
-    if not gateway_staging.needs_staging():
+    if not stage_for_gateway:
         volumes[_gsp] = {"bind": "/etc/recon/engagement.json", "mode": "ro"}
         volumes[str(reporter_token_host)] = {"bind": _REPORTER_TOKEN_MOUNT, "mode": "ro"}
     # Gateway capture (Plan Phase 4): when enabled, give the gateway a SESSION-DERIVED capability
@@ -384,7 +385,7 @@ async def _contained_docker_backend(
         )
         gateway_env["RECON_SCAN_ID"] = scan_id or ""
         gateway_env["RECON_CAPTURE_CONTROL_HOST"] = "127.0.0.1"
-    if gateway_staging.needs_staging():
+    if stage_for_gateway:
         # The worker's files are closed to every other UID, so the gateway cannot read them in
         # place. Copy them into a per-launch volume owned by the gateway's UID (mode 0400). This
         # runs after every other check that can raise, so nothing staged outlives a failure.

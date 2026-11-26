@@ -29,6 +29,7 @@ STAGE_MOUNT = "/etc/recon-staged"
 SPEC_NAME = "engagement.json"
 TOKEN_NAME = "target-health-token"  # noqa: S105  (a file name, not a secret)
 STAGE_ROLE = "gateway-staging-volume"
+HELPER_ROLE = "gateway-staging-helper"
 
 # Runs as root inside the helper. The umask makes every file 0400 from creation, so there is no
 # window in which a copy is readable by anyone but its owner.
@@ -83,6 +84,11 @@ def sweep_stale(dc: Any, boundary_labels: dict[str, str]) -> None:
     scan_id = boundary_labels.get("recon.scan_id", "")
     if not scan_id:
         return
+    # Helpers first: a stopped helper left by a crash still holds its volume.
+    helper_filters = {"label": [f"recon.role={HELPER_ROLE}", f"recon.scan_id={scan_id}"]}
+    for helper in dc.containers.list(all=True, filters=helper_filters):
+        with contextlib.suppress(Exception):
+            helper.remove(force=True)
     filters = {"label": [f"recon.role={STAGE_ROLE}", f"recon.scan_id={scan_id}"]}
     for volume in dc.volumes.list(filters=filters):
         logger.warning("Removing stale gateway staging volume %s", getattr(volume, "name", "?"))
@@ -103,6 +109,7 @@ def stage(
     run_id = uuid.uuid4().hex[:12]
     name = f"recon-gwstage-{boundary_labels.get('recon.scan_id') or 'default'}-{run_id}"
     volume = None
+    helper = None
     try:
         volume = dc.volumes.create(name=name, labels=volume_labels(boundary_labels, run_id))
         helper = dc.containers.run(
@@ -115,21 +122,21 @@ def stage(
             cap_add=list(_HELPER_CAPS),
             security_opt=["no-new-privileges"],
             read_only=True,
-            # Removed by the daemon when it exits, so a crashed worker cannot leave a stopped
-            # helper holding the volume.
-            auto_remove=True,
             detach=True,
-            labels={**boundary_labels, "recon.role": "gateway-staging-helper"},
+            labels={**boundary_labels, "recon.role": HELPER_ROLE},
             volumes={
                 str(spec_path): {"bind": f"/src/{SPEC_NAME}", "mode": "ro"},
                 str(token_path): {"bind": f"/src/{TOKEN_NAME}", "mode": "ro"},
                 name: {"bind": "/stage", "mode": "rw"},
             },
         )
-        status = helper.wait(condition="removed").get("StatusCode")
+        status = helper.wait().get("StatusCode")
         if status != 0:
             raise RuntimeError(f"staging helper exited with status {status}")  # noqa: TRY301
     except BaseException as exc:
+        if helper is not None:
+            with contextlib.suppress(Exception):
+                helper.remove(force=True)
         if volume is not None:
             with contextlib.suppress(Exception):
                 volume.remove(force=True)
@@ -138,4 +145,6 @@ def stage(
             f"could not stage the signed spec and reporter token for gateway UID {uid}: "
             f"{type(exc).__name__}; refusing to start (fail-closed)"
         ) from exc
+    with contextlib.suppress(Exception):
+        helper.remove(force=True)
     return volume

@@ -74,7 +74,10 @@ class _FakeDocker:
         self.version = lambda: {"Version": "29.9.2"}
         self.networks = SimpleNamespace(create=self._net)
         self.volumes = SimpleNamespace(create=self._vol, list=self._list)
-        self.containers = SimpleNamespace(run=self._run)
+        self.containers = SimpleNamespace(run=self._run, list=self._list_containers)
+        self.stale_helpers: list[SimpleNamespace] = []
+        self.container_filters: list[dict[str, Any]] = []
+        self.helpers_removed = 0
 
     def _net(self, name: str, **kw: Any) -> _Network:
         net = _Network(name, kw["labels"])
@@ -90,12 +93,19 @@ class _FakeDocker:
         self.list_filters.append(filters or {})
         return self.stale
 
+    def _list_containers(self, filters: dict[str, Any] | None = None, **_kw: Any) -> list:
+        self.container_filters.append(filters or {})
+        return self.stale_helpers
+
     def _run(self, _image: str, **kw: Any) -> Any:
         if "entrypoint" in kw:
             self.helper_calls.append({"image": _image, **kw})
             if self.helper_error is not None:
                 raise self.helper_error
-            return SimpleNamespace(wait=lambda **_kw: {"StatusCode": self.helper_status})
+            return SimpleNamespace(
+                wait=lambda **_kw: {"StatusCode": self.helper_status},
+                remove=lambda **_kw: setattr(self, "helpers_removed", self.helpers_removed + 1),
+            )
         self.gateway_calls.append(kw)
         return SimpleNamespace(
             remove=lambda **_: None, exec_run=lambda _cmd: (0, b""), name=kw.get("name")
@@ -152,7 +162,8 @@ def test_staged_launch_gives_the_gateway_its_own_read_only_copies(
     assert set(helper["cap_add"]) == {"CHOWN", "DAC_OVERRIDE", "FOWNER"}
     assert helper["security_opt"] == ["no-new-privileges"]
     assert helper["read_only"] is True
-    assert helper["auto_remove"] is True
+    assert "auto_remove" not in helper
+    assert fake_docker.helpers_removed == 1
     assert helper["detach"] is True
     assert helper["command"][-1] == str(OTHER_UID)
     script = helper["command"][0]
@@ -207,10 +218,18 @@ def test_stale_staging_volumes_of_this_engagement_are_swept_on_the_next_launch(
 ) -> None:
     leftover = _Volume("recon-gwstage-s1-dead", {})
     fake_docker.stale = [leftover]
+    dead_helper = SimpleNamespace(remove=lambda **_kw: setattr(leftover, "helper_gone", True))
+    fake_docker.stale_helpers = [dead_helper]
     with pytest.raises(RuntimeError, match="not ready"):
         _start(files[0])
 
     assert leftover.removed
+    assert getattr(leftover, "helper_gone", False)
+    (helper_filters,) = fake_docker.container_filters
+    assert sorted(helper_filters["label"]) == [
+        f"recon.role={gateway_staging.HELPER_ROLE}",
+        "recon.scan_id=s1",
+    ]
     (filters,) = fake_docker.list_filters
     assert sorted(filters["label"]) == [
         f"recon.role={gateway_staging.STAGE_ROLE}",
@@ -310,3 +329,18 @@ def test_teardown_removes_the_staging_volume() -> None:
         asyncio.run(client.delete(session))  # type: ignore[arg-type]
 
     client.recon_gateway_stage_volume.remove.assert_called_once_with(force=True)
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "-5"])
+def test_bad_gateway_uid_fails_before_any_docker_resource(
+    raw: str, fake_docker: _FakeDocker, files: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.undo()
+    monkeypatch.setattr(docker, "from_env", lambda: fake_docker)
+    monkeypatch.setenv("RECON_TARGET_HEALTH_REPORTER_URL", URL)
+    monkeypatch.setenv("RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE", files[1])
+    monkeypatch.setenv("RECON_GATEWAY_UID", raw)
+    with pytest.raises(ValueError, match="RECON_GATEWAY_UID"):
+        _start(files[0])
+    assert fake_docker.networks_made == []
+    assert fake_docker.volumes_made == []
