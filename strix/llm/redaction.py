@@ -331,6 +331,136 @@ def redact_literals_only(text: str) -> str:
 
 
 _LITERAL_REDACTION_MAX_DEPTH = 64
+REDACTED_SUBTREE = "[redacted-subtree]"
+
+
+def _duplicate_key_count(text: str) -> int | None:
+    """Count repeated object members in ``text`` (``None`` if it won't parse).
+
+    ``json.loads`` keeps the last of a repeated member, so a plain parse hides
+    exactly the collision a placeholder replacement can create.
+    """
+    repeats = 0
+
+    def count(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        nonlocal repeats
+        keys = [k for k, _ in pairs]
+        repeats += len(keys) - len(set(keys))
+        return dict(pairs)
+
+    with contextlib.suppress(json.JSONDecodeError, TypeError, ValueError, RecursionError):
+        json.loads(text, object_pairs_hook=count)
+        return repeats
+    return None
+
+
+def _scrub_literals_no_new_duplicates(text: str) -> str | None:
+    """Blind-scrub ``text`` unless that creates a repeated object member.
+
+    Two different registered secrets used as sibling keys both become the same
+    placeholder; the reparse then keeps one value and silently drops the other.
+    Returns ``None`` when the scrub would do that, or when the result is no
+    longer parseable JSON.
+    """
+    scrubbed = _scrub_literals(text)
+    if scrubbed == text:
+        return text
+    before = _duplicate_key_count(text)
+    after = _duplicate_key_count(scrubbed)
+    if before is None or after is None or after > before:
+        return None
+    return scrubbed
+
+
+def _scrub_truncated_subtree(value: Any) -> tuple[Any, bool]:
+    """Redact literals in a subtree the depth-bounded walk did not visit.
+
+    Same rules as the walk (keys deduplicated with :func:`_dedupe_key`) but
+    with no depth bound and no JSON-string re-parsing. A subtree too deep for
+    the interpreter becomes :data:`REDACTED_SUBTREE`: fail closed, and visible.
+    """
+    try:
+        return _scrub_subtree_inner(value)
+    except RecursionError:
+        return REDACTED_SUBTREE, True
+
+
+def _scrub_subtree_string(value: str) -> str:
+    """Scrub one string inside a truncated subtree.
+
+    A string that is itself a JSON object or array gets the same collision
+    care as the outer text: a plain replace could merge two secret keys.
+    """
+    parsed = _safe_json_loads(value)
+    if isinstance(parsed, str):
+        # A JSON string wrapping JSON: decode, scrub the inner text with the
+        # same care, and re-encode.
+        inner = _scrub_subtree_string(parsed)
+        return json.dumps(inner) if inner != parsed else redact_literals_only(value)
+    if parsed is None and value.lstrip()[:1] in ("{", "["):
+        # Looks like JSON that CPython would not parse (a huge integer, extreme
+        # nesting). Its keys cannot be checked for collisions, so a change
+        # means the value is replaced rather than risk merging two keys.
+        scrubbed = redact_literals_only(value)
+        return scrubbed if scrubbed == value else REDACTED_SUBTREE
+    if not isinstance(parsed, dict | list):
+        return redact_literals_only(value)
+    rebuilt, _ = _scrub_subtree_inner(parsed)
+    # A text-level replace keeps the caller's formatting and repeated members,
+    # but is trusted only when it parses to what the structural scrub made: it
+    # cannot see a collision inside a nested JSON string.
+    safe = _scrub_literals_no_new_duplicates(value)
+    if safe is not None and _safe_json_loads(safe) == rebuilt:
+        return safe
+    if _duplicate_key_count(value):
+        return REDACTED_SUBTREE
+    safe_rebuilt = _scrub_literals_no_new_duplicates(json.dumps(rebuilt))
+    return safe_rebuilt if safe_rebuilt is not None else REDACTED_SUBTREE
+
+
+def _scrub_subtree_inner(value: Any) -> tuple[Any, bool]:
+    if isinstance(value, str):
+        scrubbed = _scrub_subtree_string(value)
+        return scrubbed, scrubbed != value
+    if isinstance(value, Mapping):
+        out: dict[Any, Any] = {}
+        changed = False
+        for key, item in value.items():
+            new_key = key
+            if isinstance(key, str):
+                new_key = redact_literals_only(key)
+                changed = changed or new_key != key
+                new_key = _dedupe_key(new_key, out)
+            new_item, item_changed = _scrub_subtree_inner(item)
+            changed = changed or item_changed
+            out[new_key] = new_item
+        return out, changed
+    if isinstance(value, Sequence | set | frozenset):
+        results = [_scrub_subtree_inner(item) for item in cast("Sequence[Any]", value)]
+        return [r for r, _ in results], any(c for _, c in results)
+    return value, False
+
+
+def _scrub_truncated_result(
+    text: str, candidate: str, parsed: Any, redacted: Any, depth: int
+) -> tuple[str, bool]:
+    # Scrub the original text first so repeated members the caller sent
+    # survive. That is only trusted when it parses to what the structural
+    # walk produced: a text-level replace cannot see a collision inside a
+    # nested JSON string, or a literal that is double-encoded in one.
+    scrubbed_text = _scrub_literals_no_new_duplicates(text)
+    if scrubbed_text is not None and _safe_json_loads(scrubbed_text) == redacted:
+        return scrubbed_text, scrubbed_text != text
+    if _duplicate_key_count(text):
+        # Reserializing would drop the caller's repeated member without a
+        # trace, so the whole value becomes the marker instead.
+        return json.dumps(REDACTED_SUBTREE), True
+    scrubbed_safe = _scrub_literals_no_new_duplicates(candidate)
+    if scrubbed_safe is not None:
+        return scrubbed_safe, scrubbed_safe != text
+    marked, _, _ = _redact_literals_in_structure(parsed, depth + 1, mark_truncated=True)
+    fallback = _scrub_literals_no_new_duplicates(json.dumps(marked))
+    return (fallback if fallback is not None else json.dumps(REDACTED_SUBTREE)), True
 
 
 def _redact_literal_json_string(text: str, depth: int) -> tuple[str, bool]:
@@ -353,20 +483,20 @@ def _redact_literal_json_string(text: str, depth: int) -> tuple[str, bool]:
     # recreate the exact collision the dedup helper exists to prevent.
     parsed = _safe_json_loads(text) if depth < _LITERAL_REDACTION_MAX_DEPTH else None
     if isinstance(parsed, dict | list):
-        redacted, changed = _redact_literals_in_structure(parsed, depth + 1)
-        if not changed:
-            # The structural walk found nothing - but json.loads collapses
-            # a duplicate JSON object member to its last occurrence, so an
-            # earlier, shadowed member's secret was never visited either.
-            # Verify the raw text directly before trusting "nothing to
-            # redact."
-            scrubbed = _scrub_literals(text)
+        redacted, changed, truncated = _redact_literals_in_structure(parsed, depth + 1)
+        candidate = json.dumps(redacted) if changed else text
+        # json.loads collapses a repeated JSON object member to its last
+        # occurrence, so an earlier, shadowed member's secret was never visited
+        # by the walk. A final text-level scrub catches it. With no truncated
+        # subtree that scrub is the established behavior. With one, it must not
+        # create a repeated member, and when it would, the truncated subtrees
+        # are replaced by a visible marker instead of dropping a value.
+        if not truncated:
+            scrubbed = _scrub_literals(candidate)
+            if changed:
+                return scrubbed, True
             return (scrubbed, True) if scrubbed != text else (text, False)
-        # Something was found and reconstructed - but the depth cutoff can
-        # still leave an unvisited subtree carrying its own secret, which
-        # this reconstruction never saw. One final scrub over it catches
-        # that before the result is trusted as complete.
-        return _scrub_literals(json.dumps(redacted)), True
+        return _scrub_truncated_result(text, candidate, parsed, redacted, depth)
     if isinstance(parsed, str):
         redacted_str = redact_literals_only(parsed)
         return (json.dumps(redacted_str), True) if redacted_str != parsed else (text, False)
@@ -374,13 +504,42 @@ def _redact_literal_json_string(text: str, depth: int) -> tuple[str, bool]:
     return redacted_text, redacted_text != text
 
 
-def _redact_literals_in_structure(value: Any, depth: int) -> tuple[Any, bool]:
+def _handle_depth_cutoff(value: Any, mark_truncated: bool) -> tuple[Any, bool, bool]:
+    if not isinstance(value, Mapping | Sequence | set | frozenset):
+        return value, False, False
+    if mark_truncated:
+        return REDACTED_SUBTREE, True, True
+    scrubbed, changed = _scrub_truncated_subtree(value)
+    return scrubbed, changed, True
+
+
+def _redact_string_in_walk(value: str, depth: int, mark_truncated: bool) -> tuple[Any, bool, bool]:
+    if depth < _LITERAL_REDACTION_MAX_DEPTH:
+        text, text_changed = _redact_literal_json_string(value, depth)
+        return text, text_changed, False
+    # No further parsing past the bound, but the string may still be JSON
+    # carrying two secret keys, so it gets the collision-safe scrub.
+    if mark_truncated and isinstance(_safe_json_loads(value), dict | list):
+        return REDACTED_SUBTREE, True, True
+    try:
+        scrubbed = _scrub_subtree_string(value)
+    except RecursionError:
+        scrubbed = REDACTED_SUBTREE
+    return scrubbed, scrubbed != value, True
+
+
+def _redact_literals_in_structure(
+    value: Any, depth: int, *, mark_truncated: bool = False
+) -> tuple[Any, bool, bool]:
     """Redact ``value`` for exact registered literals; returns ``(result,
-    changed)`` so a JSON-encoded string caller can keep its exact original
-    text when nothing was actually redacted inside it.
+    changed, truncated)``. ``changed`` lets a JSON-encoded string caller keep
+    its exact original text when nothing was redacted inside it. ``truncated``
+    reports that a subtree past the depth bound was scrubbed by
+    :func:`_scrub_truncated_subtree` (or, with ``mark_truncated``, replaced by
+    :data:`REDACTED_SUBTREE`) rather than walked.
     """
     if isinstance(value, str):
-        return _redact_literal_json_string(value, depth)
+        return _redact_string_in_walk(value, depth, mark_truncated)
     # Unlike the shape-based cutoff, this never falls back to a blunt
     # REDACTED past the limit: this function runs on raw-carrier tool data
     # that must never be destroyed, only have an exact Recon literal removed.
@@ -389,29 +548,37 @@ def _redact_literals_in_structure(value: Any, depth: int) -> tuple[Any, bool]:
     # pathologically deep structure stops getting scanned, but is returned
     # intact rather than redacted away).
     if value is None or isinstance(value, bool | int | float):
-        return value, False
+        return value, False, False
     if depth >= _LITERAL_REDACTION_MAX_DEPTH:
-        return value, False
+        return _handle_depth_cutoff(value, mark_truncated)
     if isinstance(value, Mapping):
         out: dict[Any, Any] = {}
         changed = False
+        truncated = False
         for key, item in cast("Mapping[Any, Any]", value).items():
             new_key = key
             if isinstance(key, str):
                 new_key = redact_literals_only(key)
                 changed = changed or new_key != key
                 new_key = _dedupe_key(new_key, out)
-            new_item, item_changed = _redact_literals_in_structure(item, depth + 1)
+            new_item, item_changed, item_truncated = _redact_literals_in_structure(
+                item, depth + 1, mark_truncated=mark_truncated
+            )
             changed = changed or item_changed
+            truncated = truncated or item_truncated
             out[new_key] = new_item
-        return out, changed
+        return out, changed, truncated
     if isinstance(value, Sequence | set | frozenset):
         results = [
-            _redact_literals_in_structure(item, depth + 1)
+            _redact_literals_in_structure(item, depth + 1, mark_truncated=mark_truncated)
             for item in cast("Sequence[Any]", value)
         ]
-        return [r for r, _ in results], any(c for _, c in results)
-    return value, False
+        return (
+            [r for r, _, _ in results],
+            any(c for _, c, _ in results),
+            any(t for _, _, t in results),
+        )
+    return value, False, False
 
 
 def redact_literals_in_structure(value: Any) -> Any:
@@ -424,7 +591,7 @@ def redact_literals_in_structure(value: Any) -> Any:
     unchanged rather than a reformatted reserialization - duplicate keys,
     number formatting, and non-ASCII escaping all survive byte-for-byte.
     """
-    redacted, _ = _redact_literals_in_structure(value, 0)
+    redacted, _, _ = _redact_literals_in_structure(value, 0)
     return redacted
 
 
