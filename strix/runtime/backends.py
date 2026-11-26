@@ -209,6 +209,7 @@ async def _contained_docker_backend(
     # /ca/recon-capture-ready marker the agent-path readiness gate checks before sending traffic.
     gateway_env = {
         "RECON_MODEL_HOSTS": os.environ.get("RECON_MODEL_HOSTS", ""),
+        "RECON_PENTEST_SUPPORT_HOSTS": os.environ.get("RECON_PENTEST_SUPPORT_HOSTS", ""),
         # entrypoint resolves/binds the internal-net address before the
         # outbound NIC is attached, so egress-network peers cannot proxy.
         "RECON_PROXY_INTERNAL_ONLY": "1",
