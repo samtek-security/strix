@@ -91,7 +91,7 @@ class _ExecResult(Protocol):
 ExecFn = Callable[..., Awaitable[_ExecResult]]
 
 
-def _text(flow: dict, key: str) -> str:
+def _text(flow: dict[str, Any], key: str) -> str:
     """A flow field as stripped text. A missing, empty or non-string value (a number or list from
     malformed config) reads as empty rather than raising, so one malformed field can never escape
     the per-role exception boundary or abort preflight for every role."""
@@ -99,7 +99,7 @@ def _text(flow: dict, key: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _role_of(flow: dict) -> Any:
+def _role_of(flow: dict[str, Any]) -> Any:
     """The flow's role. Only a MISSING or empty-string role defaults to "user"; any other value,
     including falsey non-strings (0, False, [], {}), is returned as-is so callers can reject it as
     malformed instead of silently verifying it under the default session."""
@@ -126,7 +126,9 @@ def _out(res: _ExecResult) -> str:
         return ""
 
 
-async def _run(session: Any, *cmd: str, shell: bool = False, timeout: float = 45.0):
+async def _run(
+    session: Any, *cmd: str, shell: bool = False, timeout: float = 45.0,
+) -> tuple[bool, str]:
     """One sandbox exec; returns (ok, stdout_text). Never raises."""
     try:
         res = await session.exec(*cmd, shell=shell, timeout=timeout)
@@ -245,14 +247,14 @@ def _oidc_handoff_enabled() -> bool:
     return True
 
 
-def _can_prove_login(flow: dict) -> bool:
+def _can_prove_login(flow: dict[str, Any]) -> bool:
     """Only a flow with a declared success_condition can ever be proven authenticated after an
     agent-completed sign-in (``reverify_role`` refuses one without), so a hand-off for any other
     flow could never end in an authenticated role and is not offered."""
     return bool(_text(flow, "success_condition"))
 
 
-def _is_approved_oidc_host(hostname: str, flow: dict) -> bool:
+def _is_approved_oidc_host(hostname: str, flow: dict[str, Any]) -> bool:
     """Exact match or proper subdomain match only - never a substring match against the whole
     URL, so a lookalike host (``okta.com.attacker.example``) or a path signature on an arbitrary
     host (``https://attacker.example/authorize``) can never pass as an identity provider.
@@ -278,7 +280,7 @@ def _is_approved_oidc_host(hostname: str, flow: dict) -> bool:
     return any(_matches(host) for host in _KNOWN_OIDC_HOSTS)
 
 
-def _in_signed_scope(hostname: str, flow: dict) -> bool:
+def _in_signed_scope(hostname: str, flow: dict[str, Any]) -> bool:
     """The provider host must ALSO be inside the engagement's signed in-scope host list, carried
     on the flow as ``scope_hosts`` (the compiled config's ``allow_hosts``; a leading dot covers
     that domain and every subdomain, a plain entry matches exactly - the same rule the agent's
@@ -300,7 +302,7 @@ def _in_signed_scope(hostname: str, flow: dict) -> bool:
     return False
 
 
-def _is_https_approved_provider(url: str, flow: dict) -> bool:
+def _is_https_approved_provider(url: str, flow: dict[str, Any]) -> bool:
     try:
         parts = urlsplit(url or "")
     except ValueError:
@@ -309,7 +311,7 @@ def _is_https_approved_provider(url: str, flow: dict) -> bool:
         (parts.hostname or "").lower(), flow)
 
 
-def _looks_like_oidc_redirect(login_url: str, current_url: str, flow: dict) -> bool:
+def _looks_like_oidc_redirect(login_url: str, current_url: str, flow: dict[str, Any]) -> bool:
     """A login that lands on a DIFFERENT, HTTPS, APPROVED identity-provider host is an OIDC/SSO
     hand-off the deterministic form-login can't complete - distinct from simply being bounced back
     to the target's own login page (``_LOGIN_PAGE_RE``), which is an ordinary failure. HTTPS and an
@@ -329,8 +331,8 @@ def _looks_like_oidc_redirect(login_url: str, current_url: str, flow: dict) -> b
 
 
 async def _check_oidc_handoff(
-    session: Any, session_name: str, login_url: str, flow: dict,
-) -> dict | None:
+    session: Any, session_name: str, login_url: str, flow: dict[str, Any],
+) -> dict[str, Any] | None:
     """Check whether we are sitting on an approved external identity provider's page rather than
     just having failed. Returns an enrichment dict (``needs_agent_oidc``, ``oidc_provider_url``)
     or None when this isn't an OIDC hand-off."""
@@ -365,7 +367,7 @@ def _parse_success_condition(cond: str) -> tuple[str, str]:
 
 
 async def _do_login(
-    session: Any, flow: dict, slug: str, session_name: str, username: str,
+    session: Any, flow: dict[str, Any], slug: str, session_name: str, username: str,
     pre_submit: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[bool, str]:
     """Deterministic form login via recon-browser's auth vault. The password is piped from the
@@ -394,7 +396,7 @@ async def _do_login(
     return login_ok, "auth login ok" if login_ok else "auth login failed (see host debug log)"
 
 
-def _is_known_provider_url(url: str, flow: dict) -> bool:
+def _is_known_provider_url(url: str, flow: dict[str, Any]) -> bool:
     """True when the URL's host is a known (or flow-declared) identity provider, scope aside.
     Used to refuse a verification that ENDED on a provider: provider cookies make saved_state true
     and a provider page avoids the login-page pattern, but that is not an application session."""
@@ -407,7 +409,7 @@ def _is_known_provider_url(url: str, flow: dict) -> bool:
     return bool(host) and any(host == h or host.endswith("." + h) for h in hosts)
 
 
-def _landing_in_scope(url: str, flow: dict) -> bool:
+def _landing_in_scope(url: str, flow: dict[str, Any]) -> bool:
     """True when the flow carries NO scope key (behavior unchanged), or the URL's host is inside
     it; a scope that is present but not a list fails closed. Applied to EVERY page a
     verification ends on - the starting page, the protected probe's final URL and the api_ok
@@ -442,7 +444,7 @@ async def _read_state(session: Any, session_name: str, state_path: str) -> str:
     return cat if ok else ""
 
 
-async def _verify(session: Any, flow: dict, session_name: str, state_path: str, target_url: str) -> dict:
+async def _verify(session: Any, flow: dict[str, Any], session_name: str, state_path: str, target_url: str) -> dict[str, Any]:
     """Three-part fail-closed verification. Returns a checks dict + overall `authenticated`."""
     checks: dict[str, Any] = {}
 
@@ -533,7 +535,7 @@ def _safe_mfa_timeout(raw: str | None, default: float = 90.0) -> float:
 
 
 async def _complete_email_mfa(
-    session: Any, flow: dict, session_name: str, since_epoch: float, target_url: str, baseline: Any,
+    session: Any, flow: dict[str, Any], session_name: str, since_epoch: float, target_url: str, baseline: Any,
 ) -> tuple[bool, str]:
     """Complete an email second factor after the form login triggered it.
 
@@ -605,7 +607,7 @@ def _totp_code(seed: str, *, now: float | None = None, step: int = 30, digits: i
     return str(code).zfill(digits)
 
 
-async def _complete_totp(session: Any, flow: dict, session_name: str, role: str) -> tuple[bool, str]:
+async def _complete_totp(session: Any, flow: dict[str, Any], session_name: str, role: str) -> tuple[bool, str]:
     """Complete a TOTP second factor deterministically, HOST-SIDE. The seed is brokered via
     RECON_TOTP_<ROLE> (the control plane sets it from the data-collection form; it never crosses to the
     agent and is never logged). The code is derived via _totp_code (RFC 6238, stdlib) and filled +
@@ -628,8 +630,8 @@ async def _complete_totp(session: Any, flow: dict, session_name: str, role: str)
 
 
 async def preflight_role(
-    session: Any, flow: dict, *, target_url: str, external_state: str | None = None,
-) -> dict:
+    session: Any, flow: dict[str, Any], *, target_url: str, external_state: str | None = None,
+) -> dict[str, Any]:
     """Log in + verify ONE role. Returns a result dict (never raises).
 
     ``external_state`` (optional): a HOST-supplied, previously-saved ``storage_state`` blob for
@@ -779,7 +781,7 @@ async def preflight_role(
                 result["reason"] = "verified via an existing provider session (no re-login)"
                 return result
 
-    async def _oidc_or(fallback_reason: str) -> dict | None:
+    async def _oidc_or(fallback_reason: str) -> dict[str, Any]:
         """Check for an OIDC hand-off right now, before anything navigates the browser further
         (``_verify``'s own probes would move us away from the provider's page, which is why this
         is called at each point BEFORE a verify, never after one)."""
@@ -835,7 +837,7 @@ async def preflight_role(
     return result
 
 
-async def reverify_role(session: Any, flow: dict, *, target_url: str) -> dict:
+async def reverify_role(session: Any, flow: dict[str, Any], *, target_url: str) -> dict[str, Any]:
     """Re-run the SAME fail-closed 3-part check for a role the agent just finished logging in to
     directly - e.g. after completing an OIDC sign-in that ``preflight_role``
     flagged with ``needs_agent_oidc``. Never trust the agent's own claim of success without this:
@@ -878,7 +880,7 @@ async def reverify_role(session: Any, flow: dict, *, target_url: str) -> dict:
     return result
 
 
-def _plan_flows(auth_flows: list) -> tuple[dict[str, dict], dict[str, list[str]]]:
+def _plan_flows(auth_flows: list[Any]) -> tuple[dict[str, dict[str, Any]], dict[str, list[str]]]:
     """Decide, before any login, which flow runs for each role and which roles collide.
 
     ``chosen``: ONE flow per exact role name - the first that CAN log in (has a login_url), else
@@ -887,7 +889,7 @@ def _plan_flows(auth_flows: list) -> tuple[dict[str, dict], dict[str, list[str]]
     ``members``: the distinct role names per session slug. Roles whose names slug alike also
     share a brokered credential env var and a browser session, so logging the first in would
     already leave it racing the others' credential; every colliding role is refused up front."""
-    chosen: dict[str, dict] = {}
+    chosen: dict[str, dict[str, Any]] = {}
     members: dict[str, list[str]] = {}
     for flow in auth_flows:
         if not isinstance(flow, dict) or not isinstance(_role_of(flow), str):
@@ -903,8 +905,8 @@ def _plan_flows(auth_flows: list) -> tuple[dict[str, dict], dict[str, list[str]]
 
 
 def _pre_login_verdict(
-    flow: dict, role: Any, chosen: dict[str, dict], members: dict[str, list[str]],
-) -> tuple[bool, dict | None]:
+    flow: dict[str, Any], role: Any, chosen: dict[str, dict[str, Any]], members: dict[str, list[str]],
+) -> tuple[bool, dict[str, Any] | None]:
     """(skip, refusal) for one flow before it may log in. ``skip`` drops a duplicate flow for a
     role (the broker holds ONE credential per role and every flow for a role shares one browser
     session, so a second flow would overwrite the first's session and give contradictory results
@@ -934,9 +936,9 @@ def _pre_login_verdict(
 
 
 async def run_auth_preflight(
-    session: Any, auth_flows: list[dict], *, target_url: str,
+    session: Any, auth_flows: list[Any], *, target_url: str,
     external_states: dict[str, str] | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Preflight every flow that has a login_url. Best-effort; returns per-role results.
 
     ``external_states`` (optional): {role_name: storage_state_text} for a cross-run resume - keyed
@@ -984,7 +986,7 @@ async def run_auth_preflight(
     return results
 
 
-def preflight_instruction(results: list[dict]) -> str:
+def preflight_instruction(results: list[dict[str, Any]]) -> str:
     """Turn the host's verified results into an authoritative directive for the agent: reuse the
     sessions that authenticated, don't re-login them, and don't make authenticated claims for the
     ones that failed."""
