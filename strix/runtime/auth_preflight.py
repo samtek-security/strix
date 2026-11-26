@@ -398,6 +398,20 @@ def _is_known_provider_url(url: str, flow: dict) -> bool:
     return bool(host) and any(host == h or host.endswith("." + h) for h in hosts)
 
 
+def _landing_in_scope(url: str, flow: dict) -> bool:
+    """True when the flow carries no signed scope (behavior unchanged), or the URL's host is
+    inside it. Applied to EVERY page a verification ends on - the starting page, the protected
+    probe's final URL and the api_ok final URL - so a redirect out of scope can never prove a
+    session or have its state persisted."""
+    if not isinstance(flow.get("scope_hosts"), (list, tuple)):
+        return True
+    try:
+        host = (urlsplit(url or "").hostname or "").lower()
+    except ValueError:
+        return False
+    return _in_signed_scope(host, flow)
+
+
 async def _verify(session: Any, flow: dict, session_name: str, state_path: str, target_url: str) -> dict:
     """Three-part fail-closed verification. Returns a checks dict + overall `authenticated`."""
     checks: dict[str, Any] = {}
@@ -407,16 +421,7 @@ async def _verify(session: Any, flow: dict, session_name: str, state_path: str, 
     # saved_state. Look BEFORE any probe navigates away, and fail everything if so.
     on_page, current = await _run(
         session, "recon-browser", "--session-name", session_name, "get", "url")
-    out_of_scope = False
-    if on_page and isinstance(flow.get("scope_hosts"), (list, tuple)):
-        # The signed scope is known: a landing page outside it (an attacker-controlled callback
-        # that mimics url_contains/element_present and sets a cookie) can never prove a session,
-        # even when the target URL itself is public and passes the protected probe.
-        try:
-            landing = (urlsplit(current or "").hostname or "").lower()
-        except ValueError:
-            landing = ""
-        out_of_scope = not _in_signed_scope(landing, flow)
+    out_of_scope = bool(on_page) and not _landing_in_scope(current, flow)
     if not on_page or out_of_scope or _is_known_provider_url(current, flow):
         # Fail closed: if the page cannot even be read, we cannot tell that this is not still the
         # provider, and every later check could pass on it.
@@ -444,7 +449,8 @@ async def _verify(session: Any, flow: dict, session_name: str, state_path: str, 
         ok, _ = await _run(session, "recon-browser", "--session-name", session_name, "open", probe)
         _, purl = await _run(session, "recon-browser", "--session-name", session_name, "get", "url")
         success_ok = (ok and not _LOGIN_PAGE_RE.search(purl)
-                      and not _is_known_provider_url(purl, flow))
+                      and not _is_known_provider_url(purl, flow)
+                      and _landing_in_scope(purl, flow))
     elif declared:
         # A condition WAS declared but we can't evaluate it (unknown kind / empty value). Fail
         # closed - never silently downgrade a declared gate to probe-only.
@@ -458,7 +464,8 @@ async def _verify(session: Any, flow: dict, session_name: str, state_path: str, 
         ok, _ = await _run(session, "recon-browser", "--session-name", session_name, "open", target_url)
         got, url = await _run(session, "recon-browser", "--session-name", session_name, "get", "url")
         probe_ok = (ok and got and not _LOGIN_PAGE_RE.search(url or "")
-                    and not _is_known_provider_url(url, flow))
+                    and not _is_known_provider_url(url, flow)
+                    and _landing_in_scope(url, flow))
     checks["protected_probe"] = probe_ok
 
     # (2) NON-EMPTY saved session state (real cookies), persisted for postmortem. Done LAST,
