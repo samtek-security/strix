@@ -34,6 +34,7 @@ _FIELDS = {
         ("app/views.py:42", [{"file": "app/views.py", "start_line": 42, "end_line": 42}]),
         ("app/views.py:42-57", [{"file": "app/views.py", "start_line": 42, "end_line": 57}]),
         ("app/views.py#L42-L57", [{"file": "app/views.py", "start_line": 42, "end_line": 57}]),
+        ("app/my views.py:7", [{"file": "app/my views.py", "start_line": 7, "end_line": 7}]),
         ("app/views.py", None),
         ("app/views.py:abc", None),
         ("../etc/passwd:3", None),
@@ -113,6 +114,38 @@ async def test_an_unparsable_location_does_not_stop_the_promotion(
     )
     assert out["success"] is True, out
     assert "code_locations" not in rs.vulnerability_reports[0]
+
+
+@pytest.mark.asyncio
+async def test_structured_snippets_are_redacted_before_filing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loc = [{"file": "a.py", "start_line": 1, "end_line": 1, "snippet": "api_key=LEAKEDSECRET99"}]
+    out, rs = await _promote(_exploited(code_locations=loc), {}, tmp_path, monkeypatch)
+    assert out["success"] is True, out
+    assert "LEAKEDSECRET99" not in json.dumps(rs.vulnerability_reports[0]["code_locations"])
+
+
+@pytest.mark.asyncio
+async def test_structured_locations_apply_to_a_plain_lead_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loc = [{"file": "a.py", "start_line": 5, "end_line": 6}]
+    args = {"status": "lead", "reason": "blocked", "code_locations": loc}
+    out, rs = await _promote(args, {"vulnerable_code_location": "b.py:1"}, tmp_path, monkeypatch)
+    assert out["success"] is True, out
+    assert rs.vulnerability_reports[0]["code_locations"] == loc
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [[{"snippet": "x"}], [{"file": "a.py", "start_line": 3}]])
+async def test_unusable_structured_locations_are_refused_not_ignored(
+    bad: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    item = {"vulnerable_code_location": "b.py:1"}
+    out, rs = await _promote(_exploited(code_locations=bad), item, tmp_path, monkeypatch)
+    assert out["success"] is False and out["retriable"] is True, out
+    assert ex._queue["q-0001"]["status"] == "queued" and not rs.vulnerability_reports
 
 
 @pytest.mark.asyncio
