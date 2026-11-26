@@ -13,7 +13,7 @@ from typing import Any
 import docker
 import pytest
 
-from strix.runtime import backends
+from strix.runtime import backends, host_isolation
 
 
 URL = "http://control-plane.test:4001"
@@ -30,6 +30,8 @@ class _FakeNetwork:
             "Internal": True,
             "Labels": labels,
             "Containers": {},
+            "Options": host_isolation.isolated_options(),
+            "IPAM": {"Config": [{"Subnet": "10.250.97.0/29"}]},
         }
 
     def reload(self) -> None:
@@ -44,6 +46,7 @@ class _FakeDocker:
         self.run_calls: list[dict[str, Any]] = []
         self.exec_code = 0
         self.networks = SimpleNamespace(create=self._create_network)
+        self.version = lambda: {"Version": "29.9.2"}
         self.volumes = SimpleNamespace(create=self._create_volume)
         self.containers = SimpleNamespace(run=self._run)
 
