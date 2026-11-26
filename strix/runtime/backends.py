@@ -15,7 +15,7 @@ from stat import S_IMODE, S_ISREG
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from strix.runtime import host_isolation
+from strix.runtime import host_isolation, report_network
 
 
 if TYPE_CHECKING:
@@ -244,6 +244,10 @@ async def _contained_docker_backend(
 
     dc = docker.from_env()
     host_isolation.require_isolated_gateway_support(dc)
+    # The gateway reports trips to the control plane over its own network, so the host can allow
+    # the API port from that subnet alone. Verified before any engagement resource exists.
+    report_net_name, report_net_subnet = report_network.settings()
+    report_net = report_network.ensure_network(dc, report_net_name, report_net_subnet)
     net_name = "recon-net-" + (scan_id or "default")
     ca_name = "recon-ca-" + (scan_id or "default")
     gw_name = _gateway_name(scan_id)
@@ -448,6 +452,13 @@ async def _contained_docker_backend(
         _cleanup_boundary(gw)
         raise RuntimeError(
             f"egress gateway {gw_name} could not attach outbound network {egress_net!r}"
+        ) from exc
+    try:
+        report_net.connect(gw)
+    except Exception as exc:
+        _cleanup_boundary(gw)
+        raise RuntimeError(
+            f"egress gateway {gw_name} could not attach report network {report_net_name!r}"
         ) from exc
 
     # 4. Agent, contained: joined to the internal network, caps dropped, no host route.

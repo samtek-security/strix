@@ -124,3 +124,29 @@ def _isolate_wallet_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     for name in ("MPPX_ACCOUNT", "MPPX_STRIPE_SECRET_KEY", "MPPX_STRIPE_PAYMENT_METHOD"):
         monkeypatch.delenv(name, raising=False)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "real_report_network: run the real gateway report network logic, not the default stub",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stub_report_network(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Contained-backend tests use fake Docker clients that do not model the report network.
+
+    Tests of that network's own logic opt out with ``@pytest.mark.real_report_network``.
+    """
+    if request.node.get_closest_marker("real_report_network"):
+        return
+    from types import SimpleNamespace  # noqa: PLC0415
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    from strix.runtime import report_network  # noqa: PLC0415
+
+    def _stub(_dc: object, _name: str, _subnet: str) -> SimpleNamespace:
+        return SimpleNamespace(connect=MagicMock())
+
+    monkeypatch.setattr(report_network, "ensure_network", _stub)
