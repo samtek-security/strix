@@ -45,6 +45,12 @@ def _gateway_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> dict
     client.containers.run.side_effect = _StopError
     monkeypatch.setattr(docker, "from_env", lambda: client)
     monkeypatch.delenv("RECON_GATEWAY_CAPTURE", raising=False)
+    # The backend refuses to start without the control-plane escalation reporter.
+    token = tmp_path / "reporter-token"
+    token.write_text("t" * 32)
+    token.chmod(0o600)
+    monkeypatch.setenv("RECON_TARGET_HEALTH_REPORTER_URL", "http://control-plane.test:4001")
+    monkeypatch.setenv("RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE", str(token))
 
     with pytest.raises(_StopError):
         asyncio.run(

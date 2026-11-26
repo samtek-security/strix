@@ -7,9 +7,13 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
+from stat import S_IMODE, S_ISREG
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 
 if TYPE_CHECKING:
@@ -68,10 +72,126 @@ async def _docker_backend(
     return client, session
 
 
+_REPORTER_TOKEN_MOUNT = "/etc/recon/target-health-token"  # noqa: S105  (a path, not a secret)
+_REPORTER_TOKEN_MIN_BYTES = 32
+
+
 def _gateway_name(scan_id: str) -> str:
     """Deterministic gateway container name so the agent's proxy env can point at it by name on the
     internal network BEFORE it is up (docker resolves the name once both join the network)."""
     return "recon-egress-" + (scan_id or "default")
+
+
+# One DNS label is 1-63 letters, digits or inner hyphens; labels are joined by single dots.
+_REPORTER_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_REPORTER_HOST_RE = re.compile(rf"{_REPORTER_LABEL}(?:\.{_REPORTER_LABEL})*")
+_REPORTER_IPV6_RE = re.compile(r"[0-9A-Fa-f:.]+")
+_REPORTER_PATH_RE = re.compile(r"(?:/[A-Za-z0-9._~-]+)*/?")
+
+
+def _canonical_reporter_url(raw: str) -> str:
+    """Return the reporter base URL rebuilt from scheme, host, port and path only.
+
+    A strict allowlist, not a denylist: the URL is parsed, rebuilt from those four parts, and
+    refused unless the raw string equals the rebuilt one. Anything the parser tolerates but the
+    rebuild drops (query, fragment, credentials, whitespace, odd ports, mixed case) fails the
+    comparison, so the gateway receives exactly the string that was validated.
+    """
+    try:
+        parts = urlsplit(raw)
+        host = parts.hostname
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_URL {raw!r} is not a valid URL: {exc}"
+        ) from exc
+    bad = (
+        parts.scheme not in ("http", "https")
+        or not host
+        or (port is not None and not 1 <= port <= 65535)
+        or not _REPORTER_PATH_RE.fullmatch(parts.path)
+    )
+    if not bad:
+        ipv6 = ":" in host
+        host_ok = _REPORTER_IPV6_RE if ipv6 else _REPORTER_HOST_RE
+        bad = len(host) > 253 or not host_ok.fullmatch(host)
+    if bad:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_URL {raw!r} must be http(s)://host[:port][/path] "
+            "using letters, digits, '.', '-' and '/'"
+        )
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None:
+        netloc += f":{port}"
+    rebuilt = f"{parts.scheme}://{netloc}{parts.path}"
+    if raw != rebuilt:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_URL {raw!r} is not in canonical form; write it as "
+            f"{rebuilt!r}"
+        )
+    return rebuilt
+
+
+def _reporter_settings() -> tuple[str, Path]:
+    """Validate the control-plane escalation reporter the contained gateway must carry.
+
+    Without both settings an RoE trip would block the target but never stop the engagement, so
+    the engagement refuses to start. There is no opt-out.
+    """
+    url = os.environ.get("RECON_TARGET_HEALTH_REPORTER_URL", "")
+    token_path = os.environ.get("RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE", "").strip()
+    missing = [
+        name
+        for name, value in (
+            ("RECON_TARGET_HEALTH_REPORTER_URL", url),
+            ("RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE", token_path),
+        )
+        if not value.strip()
+    ]
+    if missing:
+        raise ValueError(
+            "contained docker backend requires the control-plane escalation reporter; "
+            f"missing {', '.join(missing)}"
+        )
+    url = _canonical_reporter_url(url)
+    token_file = Path(token_path)
+    try:
+        token_stat = token_file.stat()
+    except OSError as exc:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} is not a readable file: {exc}"
+        ) from exc
+    if not S_ISREG(token_stat.st_mode):
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} is not a regular file"
+        )
+    # Same rule as the signed spec: this is a bearer credential that can stop engagements.
+    if token_stat.st_uid != os.geteuid() or S_IMODE(token_stat.st_mode) & 0o077:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} must be owned by the worker "
+            "user and not accessible by group or other"
+        )
+    try:
+        # Raw bytes, so CRLF is not translated. Exactly one trailing LF is dropped, as `$(cat file)`
+        # does for the control plane's copy; a CR or any other whitespace is rejected below.
+        token = token_file.read_bytes().decode("utf-8").removesuffix("\n")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} is not a readable file: {exc}"
+        ) from exc
+    # The control plane rejects gateway credentials under 32 bytes, so a shorter token would
+    # only fail after a trip, when the emergency stop can no longer be delivered.
+    if not (token.isascii() and token.isprintable() and " " not in token):
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} must hold one line of "
+            "printable ASCII with no spaces (it is sent as an Authorization header)"
+        )
+    if len(token.encode()) < _REPORTER_TOKEN_MIN_BYTES:
+        raise ValueError(
+            f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} holds fewer than "
+            f"{_REPORTER_TOKEN_MIN_BYTES} bytes"
+        )
+    return url, token_file.resolve()
 
 
 async def _contained_docker_backend(
@@ -115,6 +235,9 @@ async def _contained_docker_backend(
         raise ValueError(f"gateway_spec_path {_gsp!r} is not owned by the worker user")
     if _stat.S_IMODE(_stat_result.st_mode) & 0o077:
         raise ValueError(f"gateway_spec_path {_gsp!r} must not be accessible by group or other")
+
+    # Checked before any Docker resource exists (fail-closed).
+    reporter_url, reporter_token_host = _reporter_settings()
 
     dc = docker.from_env()
     net_name = "recon-net-" + (scan_id or "default")
@@ -203,6 +326,7 @@ async def _contained_docker_backend(
     volumes = {
         _gsp: {"bind": "/etc/recon/engagement.json", "mode": "ro"},
         ca_name: {"bind": "/ca", "mode": "rw"},
+        str(reporter_token_host): {"bind": _REPORTER_TOKEN_MOUNT, "mode": "ro"},
     }
     # Gateway capture (Plan Phase 4): when enabled, give the gateway a SESSION-DERIVED capability
     # token + scan id so it runs the redacted capture store + retrieval API and publishes the
@@ -213,6 +337,8 @@ async def _contained_docker_backend(
         # entrypoint resolves/binds the internal-net address before the
         # outbound NIC is attached, so egress-network peers cannot proxy.
         "RECON_PROXY_INTERNAL_ONLY": "1",
+        "RECON_TARGET_HEALTH_REPORTER_URL": reporter_url,
+        "RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE": _REPORTER_TOKEN_MOUNT,
     }
     capture_enabled = os.environ.get("RECON_GATEWAY_CAPTURE", "").strip().lower() in ("1", "true", "yes")
     if capture_enabled:
@@ -260,6 +386,19 @@ async def _contained_docker_backend(
         _cleanup_boundary(gw)
         raise RuntimeError(f"egress gateway {gw_name} not ready; refusing to start the agent (fail-closed)")
 
+    try:
+        token_readable = _gateway_can_read_token(gw)
+    except BaseException:
+        _cleanup_boundary(gw)
+        raise
+    if not token_readable:
+        _cleanup_boundary(gw)
+        raise RuntimeError(
+            f"egress gateway {gw_name} cannot read the escalation token at "
+            f"{_REPORTER_TOKEN_MOUNT}; refusing to start the agent (fail-closed). The token "
+            "file must be readable by the gateway's user"
+        )
+
     # Dual-home only after the private listener is ready. Attachment is mandatory:
     # without it the run is broken, so remove the gateway and fail before the agent.
     egress_net = os.environ.get("RECON_EGRESS_NETWORK", "bridge")
@@ -302,6 +441,15 @@ async def _contained_docker_backend(
         raise
     return client, session
 
+
+
+def _gateway_can_read_token(gateway: Any) -> bool:
+    """The gateway runs as an unprivileged user, so a private host file can mount yet be unreadable.
+
+    Readiness never opens the token, and the failure would surface only after a trip.
+    """
+    code, _out = gateway.exec_run(["head", "-c", "1", _REPORTER_TOKEN_MOUNT])
+    return code == 0
 
 
 def _wait_gateway_ready(container: Any, timeout_s: int = 30, require_capture_ready: bool = False) -> bool:
