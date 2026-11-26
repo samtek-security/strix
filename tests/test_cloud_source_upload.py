@@ -42,6 +42,21 @@ def _token_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STRIX_API_TOKEN", "test-token")
 
 
+@pytest.fixture(autouse=True)
+def _isolated_git_config(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Keep the operator's real global and system git config out of every test."""
+    home = tmp_path_factory.mktemp("git-home")
+    global_config = home / "gitconfig"
+    global_config.write_text("", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "xdg"))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    return global_config
+
+
 def _git_source(tmp_path: Path) -> Path:
     git = shutil.which("git")
     assert git is not None
@@ -696,3 +711,80 @@ def test_oversize_archive_names_largest_files_and_exclude_guidance(
     assert "--exclude" in raised.value.next_step
     assert "--dry-run --show-files" in raised.value.next_step
     assert not list(tmp_path.glob("strix-source-*.zip"))
+
+
+def _set_global_excludes(global_config: Path, patterns: str) -> None:
+    excludes = global_config.parent / "global-excludes"
+    excludes.write_text(patterns, encoding="utf-8")
+    global_config.write_text(f"[core]\n\texcludesFile = {excludes}\n", encoding="utf-8")
+
+
+def test_global_excludes_are_honoured_and_counted_as_git_ignored(
+    tmp_path: Path, _isolated_git_config: Path
+) -> None:
+    _set_global_excludes(_isolated_git_config, "*.zip\n")
+    source = _git_source(tmp_path / "repo")
+    (source / "hidden-by-global.zip").write_bytes(b"PK\x03\x04 not really a zip")
+
+    manifest = source_upload.select_source(source)
+
+    assert [item.archive_name for item in manifest.files] == ["README.md", "app.py"]
+    assert manifest.excluded["git_ignored"] == 2  # ignored.log and the global *.zip
+    assert manifest.excluded["nested_archive"] == 0
+    assert manifest.excluded_total == 3  # plus the hidden .gitignore
+
+
+def test_ignored_directory_counts_once_and_classifier_exclusions_are_not_double_counted(
+    tmp_path: Path,
+) -> None:
+    source = _git_source(tmp_path / "repo")
+    (source / ".gitignore").write_text("build/\n.env\nsecrets.pem\n", encoding="utf-8")
+    (source / "build").mkdir()
+    for index in range(50):
+        (source / "build" / f"out{index}.js").write_text("x\n", encoding="utf-8")
+    (source / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+    (source / "secrets.pem").write_text("secret\n", encoding="utf-8")
+
+    manifest = source_upload.select_source(source, include_hidden=True)
+
+    assert manifest.excluded["git_ignored"] == 3
+    assert manifest.excluded["sensitive_filename"] == 0
+    assert manifest.excluded["dependency_or_build_output"] == 0
+
+
+def test_ignored_count_is_capped_and_never_rejects_the_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _git_source(tmp_path / "repo")
+    (source / ".gitignore").write_text("*.tmp\n", encoding="utf-8")
+    for index in range(12):
+        (source / f"f{index}.tmp").write_text("x\n", encoding="utf-8")
+    monkeypatch.setattr(source_upload, "MAX_GIT_IGNORED_COUNT", 5)
+
+    manifest = source_upload.select_source(source)
+
+    assert [item.archive_name for item in manifest.files] == ["README.md", "app.py", "ignored.log"]
+    assert manifest.excluded["git_ignored"] == 5
+    assert manifest.excluded["git_ignored_truncated"] == 1
+    assert manifest.excluded_total == 6  # the marker is not a path
+    assert manifest.as_dict(show_files=False)["excluded_count"] == 6
+
+
+def test_ignored_listing_failure_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _git_source(tmp_path / "repo")
+    real_git = shutil.which("git")
+    assert real_git is not None
+    wrapper = tmp_path / "git-wrapper"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'for arg in "$@"; do [ "$arg" = "--ignored" ] && exit 128; done\n'
+        f'exec {real_git} "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setattr(source_upload.shutil, "which", lambda _name: str(wrapper))
+
+    with pytest.raises(http.CloudError, match="ignored source paths"):
+        source_upload.select_source(source)
