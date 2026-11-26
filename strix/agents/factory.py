@@ -307,7 +307,9 @@ def _function_tool_with_error_result(tool: FunctionTool) -> FunctionTool:
     return tool
 
 
-def _interception_decision(ctx: Any, tool_name: str, input_text: str) -> interception.InterceptionDecision | None:
+def _interception_decision(
+    ctx: Any, tool_name: str, input_text: str
+) -> interception.InterceptionDecision | None:
     context = getattr(ctx, "context", None)
     rules = interception.rules_from_context(context if isinstance(context, dict) else None)
     return interception.evaluate(rules, tool_name, input_text)
@@ -315,7 +317,9 @@ def _interception_decision(ctx: Any, tool_name: str, input_text: str) -> interce
 
 def _interception_denied_message(decision: interception.InterceptionDecision) -> str:
     message = f"Denied by interception rule {decision.rule.id!r}."
-    return f"{message} {decision.rule.description}".strip() if decision.rule.description else message
+    if decision.rule.description:
+        return f"{message} {decision.rule.description}".strip()
+    return message
 
 
 def _with_function_tool_interception(tool: FunctionTool) -> FunctionTool:
@@ -354,7 +358,9 @@ def _with_function_tool_interception(tool: FunctionTool) -> FunctionTool:
         return await invoke_tool(ctx, raw_input)
 
     async def rule_needs_approval(ctx: Any, args: dict[str, Any], call_id: str) -> bool:  # noqa: ARG001
-        decision = _interception_decision(ctx, tool.name, json.dumps(args, ensure_ascii=False, sort_keys=True))
+        decision = _interception_decision(
+            ctx, tool.name, json.dumps(args, ensure_ascii=False, sort_keys=True)
+        )
         return decision is not None and decision.action == "ask"
 
     if own_needs_approval is False:
@@ -910,7 +916,9 @@ def build_strix_agent(
     _ensure_unique_tool_names(tools)
     tools = [
         _with_function_tool_interception(
-            _with_bounded_result(_with_strictness(_with_coerced_arguments(tool), strict_tool_schemas))
+            _with_bounded_result(
+                _with_strictness(_with_coerced_arguments(tool), strict_tool_schemas)
+            )
         )
         if isinstance(tool, FunctionTool)
         else tool

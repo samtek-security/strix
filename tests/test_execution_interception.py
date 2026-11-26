@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Tests for the ask/approve/reject-and-resume path in strix.core.execution."""
 
 from __future__ import annotations
@@ -37,8 +38,12 @@ class _FakeRunState:
         self.approved.append(item)
 
     def reject(
-        self, item: Any, always_reject: bool = False, *, rejection_message: str | None = None
-    ) -> None:  # noqa: ARG002
+        self,
+        item: Any,
+        always_reject: bool = False,  # noqa: ARG002
+        *,
+        rejection_message: str | None = None,
+    ) -> None:
         self.rejected.append((item, rejection_message))
 
 
@@ -94,7 +99,9 @@ def _ask_rule(pattern: str = "exec_command") -> InterceptionRule:
     )
 
 
-def _item(tool_name: str = "exec_command", arguments: str = '{"cmd":"rm -rf /"}') -> _FakeApprovalItem:
+def _item(
+    tool_name: str = "exec_command", arguments: str = '{"cmd":"rm -rf /"}'
+) -> _FakeApprovalItem:
     return _FakeApprovalItem(tool_name=tool_name, raw_item={"arguments": arguments})
 
 
@@ -243,7 +250,9 @@ async def test_native_custom_tool_input_is_read_from_the_input_field() -> None:
     gateway = _ScriptedGateway(["denied"])
     rule = InterceptionRule(id="ask-patch", field="tool_input", pattern="/etc/", action="ask")
     context = {INTERCEPTION_RULES_KEY: [rule], APPROVAL_GATEWAY_KEY: gateway}
-    item = _FakeApprovalItem(tool_name="apply_patch", raw_item={"input": "*** Update File: /etc/hosts"})
+    item = _FakeApprovalItem(
+        tool_name="apply_patch", raw_item={"input": "*** Update File: /etc/hosts"}
+    )
     stream = _FakeInterruptedStream(interruptions=[item])
 
     state = await _resolve_interruptions(stream, context=context, report=None)

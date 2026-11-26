@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Tests for the interception (allow/deny/ask) wiring in the agent factory."""
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from strix.core.interception import INTERCEPTION_RULES_KEY, InterceptionRule
 
 
 def _tool(name: str = "exec_command") -> FunctionTool:
-    async def invoke(_ctx: Any, raw_input: str) -> str:  # noqa: ARG001
+    async def invoke(_ctx: Any, raw_input: str) -> str:
         return "ran:" + raw_input
 
     return FunctionTool(
@@ -26,7 +27,7 @@ def _tool(name: str = "exec_command") -> FunctionTool:
 
 
 def _custom_tool(name: str = "apply_patch") -> CustomTool:
-    async def invoke(_ctx: Any, raw_input: str) -> str:  # noqa: ARG001
+    async def invoke(_ctx: Any, raw_input: str) -> str:
         return "ran:" + raw_input
 
     return CustomTool(name=name, description="test custom tool", on_invoke_tool=invoke)
@@ -83,7 +84,9 @@ async def test_function_tool_ask_sets_needs_approval_true() -> None:
 @pytest.mark.asyncio
 async def test_function_tool_allow_runs_normally() -> None:
     wrapped = factory._with_function_tool_interception(_tool())
-    allow_rule = InterceptionRule(id="allow-1", field="tool_name", pattern="exec_command", action="allow")
+    allow_rule = InterceptionRule(
+        id="allow-1", field="tool_name", pattern="exec_command", action="allow"
+    )
     result = await wrapped.on_invoke_tool(_ctx([allow_rule]), json.dumps({"cmd": "ls"}))
     assert result == 'ran:{"cmd": "ls"}'
 
