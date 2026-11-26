@@ -275,6 +275,57 @@ async def _verify_http_exchange_ids(
     return request_ids, [], None
 
 
+async def _assess_direct_report_proof(
+    ctx: RunContextWrapper, raw_ids: Any
+) -> tuple[list[str] | None, dict[str, Any], str | None]:
+    """Hold a directly filed report to the proof bar ``promote_finding`` applies.
+
+    Returns ``(ids, proof_fields, warning)``. The report is ``exploited`` only when at least
+    one cited exchange id verifies through the same check the exploitation queue uses;
+    anything else files as a ``lead`` with the reason recorded. Syntactically invalid ids
+    are still rejected by the caller before this runs.
+    """
+    from strix.tools.exploitation.tool import (
+        NO_EXCHANGE_SOURCE_REASON,
+        PROOF_FAILED_PREFIX,
+        _capture_available,
+        _exchange_source,
+        _verify_proof,
+    )
+
+    cited, _ = _normalize_http_exchange_ids(raw_ids)
+    cited = cited or []
+    if not _capture_available(ctx):
+        return (
+            cited or None,
+            {"proof_status": "lead", "proof_status_reason": NO_EXCHANGE_SOURCE_REASON},
+            None,
+        )
+
+    verified: list[str] = []
+    kept: list[str] = []
+    failure: str | None = None
+    for exchange_id in cited or [None]:
+        ids, why = await _verify_proof(ctx, exchange_id, None)
+        if why is None:
+            verified.extend(ids or [])
+        else:
+            failure = failure or why
+            kept.extend(ids or [])
+    if verified:
+        return (
+            verified,
+            {"proof_status": "exploited", "proof_source": _exchange_source(verified[0])},
+            None,
+        )
+    warning = _HTTP_EXCHANGE_UNVERIFIED_WARNING if kept else None
+    return (
+        kept or None,
+        {"proof_status": "lead", "proof_status_reason": f"{PROOF_FAILED_PREFIX} {failure}"},
+        warning,
+    )
+
+
 def _with_warning(result: dict[str, Any], warning: str | None) -> dict[str, Any]:
     if warning and result.get("success"):
         result["warning"] = warning
@@ -1331,6 +1382,11 @@ async def create_vulnerability_report(
             stored, the finding is filed without them: attach them with
             ``update_vulnerability_report`` once the proxy responds.
             Keep IDs out of ``evidence`` and all other report text.
+            The report files as proven only when at least one ID verifies
+            against this run's exchange source. With no ID, an ID the
+            source does not know, or no source to check against, it files
+            as a lead and the report records why. Proof text alone never
+            makes a report proven.
 
             **How ``fix_before`` / ``fix_after`` work**: they're used as
             literal GitHub/GitLab PR suggestion blocks. When a reviewer
@@ -1433,11 +1489,7 @@ async def create_vulnerability_report(
             change itself belongs in ``code_locations``. Omit for
             black-box findings.
     """
-    (
-        http_exchange_ids,
-        http_exchange_errors,
-        http_exchange_warning,
-    ) = await _verify_http_exchange_ids(ctx, http_exchange_ids)
+    _, http_exchange_errors = _normalize_http_exchange_ids(http_exchange_ids)
     if http_exchange_errors:
         return json.dumps(
             {
@@ -1448,10 +1500,14 @@ async def create_vulnerability_report(
             ensure_ascii=False,
             default=str,
         )
+    http_exchange_ids, proof_fields, http_exchange_warning = await _assess_direct_report_proof(
+        ctx, http_exchange_ids
+    )
 
     agent_id, agent_name = _caller_identity(ctx)
 
     result = await _do_create(
+        **proof_fields,
         title=title,
         description=description,
         impact=impact,
