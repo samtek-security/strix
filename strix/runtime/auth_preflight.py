@@ -34,12 +34,13 @@ Two extensions on top of the above:
   reported authenticated. On ANY successful preflight (fresh login or resume) the result carries
   back the current ``storage_state`` text (``result["storage_state"]``) so the caller can persist
   it for the next run.
-- **OIDC/SSO handoff** (OFF by default; ``RECON_AUTH_OIDC_HANDOFF=1`` enables it outside production only,
-  and production is gated on per-flow issuer/client_id validation, issue #122 item 3): a login that
-  redirects to a different origin matching a known identity-provider pattern can't be completed by ``recon-browser``'s deterministic form-fill (the
-  target's OWN login page is often just a redirect, not a form). Such a role is flagged
-  (``result["needs_agent_oidc"]``) rather than just reported failed, with the provider URL the
-  agent should complete the provider sign-in in. ``reverify_role`` lets a caller re-run the
+- **OIDC/SSO handoff** (OFF by default; ``RECON_AUTH_OIDC_HANDOFF=1`` enables it outside
+  production only, and production is gated on per-flow issuer/client_id validation, issue #122
+  item 3): a login that redirects to a different origin matching a known identity-provider
+  pattern can't be completed by ``recon-browser``'s deterministic form-fill (the target's OWN
+  login page is often just a redirect, not a form). Such a role is flagged
+  (``result["needs_agent_oidc"]``) rather than just reported failed, with the provider origin
+  the agent should complete the provider sign-in in. ``reverify_role`` lets a caller re-run the
   unchanged 3-part check afterward, once the agent believes it has landed on an authenticated
   page - the host verification is never weakened or bypassed for an agent-driven login.
 """
@@ -400,9 +401,10 @@ def _is_known_provider_url(url: str, flow: dict) -> bool:
 
 def _landing_in_scope(url: str, flow: dict) -> bool:
     """True when the flow carries NO scope key (behavior unchanged), or the URL's host is inside
-    it; a scope that is present but not a list fails closed. Applied to EVERY page a verification ends on - the starting page, the protected
-    probe's final URL and the api_ok final URL - so a redirect out of scope can never prove a
-    session or have its state persisted."""
+    it; a scope that is present but not a list fails closed. Applied to EVERY page a
+    verification ends on - the starting page, the protected probe's final URL and the api_ok
+    final URL - so a redirect out of scope can never prove a session or have its state
+    persisted."""
     if flow.get("scope_hosts") is None:
         return True
     if not isinstance(flow["scope_hosts"], (list, tuple)):
@@ -800,7 +802,8 @@ async def preflight_role(
         oidc_after_mfa = await _check_oidc_handoff(session, session_name, login_url, flow)
         if oidc_after_mfa:
             result.update(oidc_after_mfa)
-            result["reason"] = _oidc_handoff_reason(oidc_after_mfa["oidc_provider_url"], session_name)
+            result["reason"] = _oidc_handoff_reason(
+                oidc_after_mfa["oidc_provider_url"], session_name)
             return result
     ver = await _verify(session, flow, session_name, state_path, target_url)
     result["checks"] = ver["checks"]
