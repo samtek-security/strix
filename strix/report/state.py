@@ -219,12 +219,19 @@ class ReportState:
         self.scan_config: dict[str, Any] | None = None
         # Imported here so importing this module never enters the agents SDK
         # package (which the warm-up thread may be initializing concurrently).
-        from strix.report.usage import LLMUsageLedger
+        from strix.report.usage import LLMUsageLedger, is_custom_api_base
 
         self._llm_usage = LLMUsageLedger()
         self._telemetry_llm_usage_baseline: dict[str, Any] = {}
         auth_mode = codex.auth_mode(load_settings().llm.model)
         self._llm_usage.zero_cost = auth_mode == "subscription"
+        settings = load_settings()
+        self._llm_usage.custom_base = is_custom_api_base(settings.llm.api_base)
+        # Dedupe uses its own base only with a dedicated model and base; any
+        # other case runs on the main endpoint.
+        own_base = settings.dedupe.api_base if settings.dedupe.model else None
+        dedupe_base = own_base or settings.llm.api_base
+        self._llm_usage.dedupe_custom_base = is_custom_api_base(dedupe_base)
         self.run_record: dict[str, Any] = {
             "run_id": self.run_id,
             "run_name": self.run_name,
@@ -1209,12 +1216,23 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
     if isinstance(provider, str) and provider and not model.startswith(f"{provider}/"):
         candidates.append(f"{provider}/{model}")
     candidates.append(model)
+    # A supplied provider already chose the route, so no candidate may be
+    # steered to another provider's first-party price.
+    first_party_allowed = not (isinstance(provider, str) and provider)
+    provider_route_only = not first_party_allowed and "/" not in model
+    retry_from = len(candidates)
     if "/" in model:
         candidates.append(model.rsplit("/", 1)[-1])
 
-    for candidate in candidates:
-        resolved = resolve_litellm_model(candidate)
+    for index, candidate in enumerate(candidates):
+        resolved = resolve_litellm_model(
+            candidate, first_party=first_party_allowed and index < retry_from
+        )
         if not resolved:
+            if provider_route_only and index == 0 and not _bare_entry_belongs_to(model, provider):
+                # The supplied provider is not in the catalog and the bare
+                # entry belongs to another provider, so leave the call unpriced.
+                return None
             continue
         try:
             value = completion_cost(
@@ -1226,6 +1244,13 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
         if isinstance(value, int | float) and value > 0:
             return float(value)
     return None
+
+
+def _bare_entry_belongs_to(model: str, provider: Any) -> bool:
+    import litellm
+
+    entry = getattr(litellm, "model_cost", {}).get(model)
+    return isinstance(entry, dict) and entry.get("litellm_provider") == provider
 
 
 def _usage_payload(completion_response: Any) -> dict[str, Any] | None:
