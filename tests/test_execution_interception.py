@@ -467,3 +467,19 @@ async def test_resume_unwraps_a_converted_custom_tool_payload() -> None:
     )
     assert gateway.requests and gateway.requests[0]["rule_id"] == "ask-etc"
     assert [rejected for rejected, _ in state.rejected] == [item]
+
+
+@pytest.mark.asyncio
+async def test_an_opaque_input_with_a_lone_surrogate_does_not_abort_the_scan() -> None:
+    gateway = _ScriptedGateway(["denied"])
+    rule = InterceptionRule(id="ask-all", field="tool_name", pattern="custom", action="ask")
+    context = {INTERCEPTION_RULES_KEY: [rule], APPROVAL_GATEWAY_KEY: gateway}
+    item = _FakeApprovalItem(tool_name="custom_tool", raw_item={"input": "bad \ud800 text"})
+
+    state = await _resolve_interruptions(
+        _FakeInterruptedStream(interruptions=[item]), context=context, report=None
+    )
+
+    assert [rejected for rejected, _ in state.rejected] == [item]
+    assert gateway.requests
+    gateway.requests[0]["tool_input_summary"].encode("utf-8")  # transport-safe

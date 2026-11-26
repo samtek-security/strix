@@ -297,10 +297,14 @@ def _interruption_input(item: Any) -> tuple[str, bool]:
 
 
 def _dedup_key(tool_name: str, input_text: str) -> str:
-    return hashlib.sha256(f"{tool_name}:{input_text}".encode()).hexdigest()
+    # surrogatepass: an opaque custom-tool input may hold a lone surrogate, which a
+    # strict encode rejects; hashing it must not abort the scan.
+    return hashlib.sha256(f"{tool_name}:{input_text}".encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _bounded_summary(text: str) -> str:
+    # Transport-safe: a lone surrogate cannot be encoded for the broker body.
+    text = text.encode("utf-8", "replace").decode("utf-8")
     if len(text) <= _ASK_INPUT_SUMMARY_MAX_CHARS:
         return text
     return text[:_ASK_INPUT_SUMMARY_MAX_CHARS] + "…(truncated)"
