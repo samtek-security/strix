@@ -346,7 +346,7 @@ def _print_model_connection_error(exc: BaseException) -> None:
 
 def _print_cli_error(message: str) -> None:
     Console(stderr=True, soft_wrap=True).print(
-        f"strix: error: {message}", markup=False, highlight=False
+        f"{CLI_NAME}: error: {message}", markup=False, highlight=False
     )
 
 
