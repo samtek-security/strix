@@ -268,13 +268,14 @@ def _is_approved_oidc_host(hostname: str, flow: dict[str, Any]) -> bool:
     through belongs with the already-held "fully declarative auth config" design pass (issue
     #122's third item), not bolted on here - this hatch is ready for it, callable directly today
     by anything that builds a flow dict itself (tests, a future internal caller)."""
+    hostname = _norm_host(hostname)
     if not hostname or not _in_signed_scope(hostname, flow):
         return False
 
     def _matches(host: str) -> bool:
         return hostname == host or hostname.endswith("." + host)
 
-    declared = _text(flow, "oidc_provider_host").lower()
+    declared = _norm_host(_text(flow, "oidc_provider_host"))
     if declared and _matches(declared):
         return True
     return any(_matches(host) for host in _KNOWN_OIDC_HOSTS)
@@ -416,12 +417,13 @@ async def _do_login(
 def _is_known_provider_url(url: str, flow: dict[str, Any]) -> bool:
     """True when the URL's host is a known (or flow-declared) identity provider, scope aside.
     Used to refuse a verification that ENDED on a provider: provider cookies make saved_state true
-    and a provider page avoids the login-page pattern, but that is not an application session."""
+    and a provider page avoids the login-page pattern, but that is not an application session.
+    Hosts are normalized (case, trailing dot, port) so ``accounts.google.com.`` cannot slip by."""
     try:
-        host = (urlsplit(url or "").hostname or "").lower()
+        host = _norm_host(urlsplit(url or "").hostname or "")
     except ValueError:
         return False
-    declared = _text(flow, "oidc_provider_host").lower()
+    declared = _norm_host(_text(flow, "oidc_provider_host"))
     hosts = _KNOWN_OIDC_HOSTS + ((declared,) if declared else ())
     return bool(host) and any(host == h or host.endswith("." + h) for h in hosts)
 
@@ -491,7 +493,11 @@ async def _verify(session: Any, flow: dict[str, Any], session_name: str, state_p
     checks["saved_state"] = cookies_ok
 
     # (1) semantic success_condition the operator declared.
-    declared = bool(_text(flow, "success_condition"))
+    raw_condition = flow.get("success_condition")
+    # A condition that is PRESENT but not text (a number, list) is a declared gate we cannot
+    # evaluate: fail closed, never read it as "absent" and fall back to the weaker probe.
+    malformed_condition = raw_condition is not None and not isinstance(raw_condition, str)
+    declared = bool(_text(flow, "success_condition")) or malformed_condition
     kind, val = _parse_success_condition(_text(flow, "success_condition"))
     success_ok: bool | None = None
     if kind == "url_contains" and val:
