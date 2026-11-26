@@ -275,6 +275,101 @@ async def _verify_http_exchange_ids(
     return request_ids, [], None
 
 
+async def _assess_direct_report_proof(
+    ctx: RunContextWrapper, raw_ids: Any
+) -> tuple[list[str] | None, dict[str, Any], str | None]:
+    """Hold a directly filed report to the proof bar ``promote_finding`` applies.
+
+    Returns ``(ids, proof_fields, warning)``. The decision is ``assess_proof``, the same function
+    the exploitation queue calls: one verified id is enough here, anything else files as a lead
+    with the reason recorded. Syntactically invalid ids are rejected by the caller first.
+    """
+    from strix.tools.exploitation.tool import assess_proof
+
+    cited, _ = _normalize_http_exchange_ids(raw_ids)
+    ids, status, reason, source = await assess_proof(ctx, list(cited or []), require_all=False)
+    fields: dict[str, Any] = {"proof_status": status}
+    if reason:
+        fields["proof_status_reason"] = reason
+    if source:
+        fields["proof_source"] = source
+    warning = _HTTP_EXCHANGE_UNVERIFIED_WARNING if status == "lead" and ids else None
+    return ids, fields, warning
+
+
+# Fields that carry or describe the proof behind a report. A revision that changes
+# one of them on a proven report has to pass the exchange check again.
+_PROOF_BEARING_FIELDS = (
+    "evidence",
+    "target",
+    "endpoint",
+    "method",
+    "poc_description",
+    "poc_script_code",
+    "http_exchange_ids",
+)
+
+PROOF_INVALIDATED_PREFIX = "proof_invalidated:"
+
+
+def _stored_report(report_id: str) -> dict[str, Any] | None:
+    from strix.report.state import get_global_report_state
+
+    state = get_global_report_state()
+    if state is None:
+        return None
+    return next((r for r in state.get_existing_vulnerabilities() if r.get("id") == report_id), None)
+
+
+def _touches_proof(report: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """Whether a revision replaces something a proven report's proof rests on."""
+    for name in _PROOF_BEARING_FIELDS:
+        value = fields.get(name)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                continue
+        if name == "http_exchange_ids":
+            if list(value) != list(report.get(name) or []):
+                return True
+        elif value != report.get(name):
+            return True
+    return False
+
+
+async def _revalidate_proof(
+    ctx: RunContextWrapper, report_id: str, fields: dict[str, Any]
+) -> dict[str, Any]:
+    """Proof fields to write with a revision of a proven report.
+
+    Returns ``{}`` when the report is not proven or the revision leaves its proof
+    alone. Otherwise the same exchange check that filed the report runs again over
+    the ids the revised report will carry. The report keeps ``exploited`` only when
+    that check passes, and demotes to ``lead`` with the reason recorded. Proof text
+    in ``evidence`` never counts: only ``http_exchange_ids`` can prove a report.
+    """
+    report = _stored_report(report_id)
+    if report is None or report.get("proof_status") != "exploited":
+        return {}
+    if not _touches_proof(report, fields):
+        return {}
+
+    raw = fields.get("http_exchange_ids")
+    ids = raw if raw is not None else report.get("http_exchange_ids")
+    from strix.tools.exploitation.tool import assess_proof
+
+    cited, _ = _normalize_http_exchange_ids(ids)
+    _, status, reason, source = await assess_proof(ctx, list(cited or []), require_all=False)
+    if status == "exploited":
+        return {"proof_source": source} if source else {}
+    return {
+        "proof_status": "lead",
+        "proof_status_reason": f"{PROOF_INVALIDATED_PREFIX} {reason or ''}".strip(),
+    }
+
+
 def _with_warning(result: dict[str, Any], warning: str | None) -> dict[str, Any]:
     if warning and result.get("success"):
         result["warning"] = warning
@@ -635,6 +730,7 @@ def _do_update(
     report_id: str,
     update_reason: str,
     fields: dict[str, Any],
+    proof: dict[str, Any] | None = None,
     agent_id: str | None = None,
     agent_name: str | None = None,
 ) -> dict[str, Any]:
@@ -661,6 +757,9 @@ def _do_update(
     class_error = _fit_revision_to_class(report_state, report_id, changes)
     if class_error is not None:
         return class_error
+    if proof:
+        # Written with the revision, so a demotion never trails the content it judges.
+        changes.update(proof)
 
     try:
         updated = report_state.update_vulnerability_report(
@@ -1582,7 +1681,10 @@ async def update_vulnerability_report(
         cwe: Replacement CWE id.
         code_locations: Replacement code locations.
         http_exchange_ids: Replacement proxy request ids. Pass an empty
-            list to remove all linked exchanges.
+            list to remove all linked exchanges. On a proven report, changing
+            the ids, the evidence, the target, the endpoint, the method or
+            the PoC runs the exchange check again, and the report drops to a
+            lead when no cited id verifies.
         fix_verification: Verification statement for an applyable fix.
         fix_pr_body: Replacement fix PR body.
         contextual_cvss_reasoning: Dependency findings only. What you
@@ -1639,12 +1741,15 @@ async def update_vulnerability_report(
             default=str,
         )
 
+    proof = await _revalidate_proof(ctx, (report_id or "").strip(), fields)
+
     agent_id, agent_name = _caller_identity(ctx)
     result = await asyncio.to_thread(
         _do_update,
         report_id=report_id,
         update_reason=update_reason,
         fields=fields,
+        proof=proof,
         agent_id=agent_id,
         agent_name=agent_name,
     )
