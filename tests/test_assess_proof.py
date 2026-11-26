@@ -167,6 +167,8 @@ async def test_a_direct_report_needs_one_capture_that_verifies() -> None:
         ctx, [_GOOD, _OTHER], require_all=False
     )
     assert (status, source, sha) == ("exploited", "gateway_capture", "e" * 64)
+    ids, *_ = await assess_proof_with_integrity(ctx, [_GOOD, _OTHER], require_all=False)
+    assert ids == [_OTHER]  # the capture that failed its hash is not kept as evidence
     # the promotion gate wants every cited capture to verify
     _, status, reason, _, _, _ = await assess_proof_with_integrity(ctx, [_GOOD, _OTHER])
     assert status == "lead" and reason is not None and "integrity" in reason
