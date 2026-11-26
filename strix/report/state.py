@@ -367,6 +367,10 @@ class ReportState:
         fix_pr_body: str | None = None,
         finding_class: str | None = None,
         dependency_metadata: dict[str, str] | None = None,
+        proof_status: str | None = None,
+        proof_status_reason: str | None = None,
+        proof_source: str | None = None,
+        queue_item_id: str | None = None,
         agent_id: str | None = None,
         agent_name: str | None = None,
     ) -> str:
@@ -430,6 +434,14 @@ class ReportState:
         report["finding_class"] = (finding_class or "dynamic").strip().lower()
         if dependency_metadata:
             report["dependency_metadata"] = dependency_metadata
+        if proof_status:
+            report["proof_status"] = proof_status.strip().lower()
+        if proof_status_reason:
+            report["proof_status_reason"] = proof_status_reason.strip()
+        if proof_source:
+            report["proof_source"] = proof_source
+        if queue_item_id:
+            report["queue_item_id"] = queue_item_id
         if agent_id:
             report["agent_id"] = agent_id
         if agent_name:

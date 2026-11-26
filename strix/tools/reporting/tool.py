@@ -170,6 +170,9 @@ _REQUIRED_FIELDS = {
 
 _VALID_FIX_EFFORT = frozenset({"trivial", "low", "medium", "high"})
 _VALID_CONFIDENCE = frozenset({"high", "medium", "low"})
+# Set only by the exploitation queue's promote_finding; create_vulnerability_report never
+# passes one, so a report without it keeps resolving by its evidence on the recon side.
+_VALID_PROOF_STATUS = frozenset({"exploited", "lead"})
 _MAX_HTTP_EXCHANGE_IDS = 10
 _MAX_HTTP_EXCHANGE_ID_CHARS = 128
 # Under contained egress the trusted gateway, not Caido, records the traffic and
@@ -810,6 +813,10 @@ async def _do_create(
     confidence_rationale: str | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
+    proof_status: str | None = None,
+    proof_status_reason: str | None = None,
+    proof_source: str | None = None,
+    queue_item_id: str | None = None,
     agent_id: str | None = None,
     agent_name: str | None = None,
 ) -> dict[str, Any]:
@@ -856,6 +863,10 @@ async def _do_create(
         http_exchange_ids
     )
     errors.extend(http_exchange_errors)
+    if proof_status is not None and proof_status not in _VALID_PROOF_STATUS:
+        errors.append(
+            f"Invalid proof_status: {proof_status!r}. Must be one of: {sorted(_VALID_PROOF_STATUS)}"
+        )
 
     if errors:
         return {"success": False, "error": "Validation failed", "errors": errors}
@@ -941,6 +952,10 @@ async def _do_create(
 
         report_id = report_state.add_vulnerability_report(
             **report_fields,
+            proof_status=proof_status,
+            proof_status_reason=proof_status_reason,
+            proof_source=proof_source,
+            queue_item_id=queue_item_id,
             agent_id=agent_id if isinstance(agent_id, str) else None,
             agent_name=agent_name if isinstance(agent_name, str) else None,
         )
