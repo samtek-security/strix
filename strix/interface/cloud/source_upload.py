@@ -407,12 +407,18 @@ def _count_git_ignored(git: str, git_root: Path, source: Path, excluded: Counter
     buffer = b""
     count = 0
     truncated = False
+    ignored_dir = b"\0"
     try:
         while not truncated and (chunk := process.stdout.read(64 * 1024)):
             buffer += chunk
             records = buffer.split(b"\0")
             buffer = records.pop()
-            for _ in records:
+            for record in records:
+                # A directory with its own .gitignore also lists its ignored children.
+                if record.startswith(ignored_dir):
+                    continue
+                if record.endswith(b"/"):
+                    ignored_dir = record
                 if count >= MAX_GIT_IGNORED_COUNT:
                     truncated = True
                     break

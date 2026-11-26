@@ -788,3 +788,16 @@ def test_ignored_listing_failure_fails_closed(
 
     with pytest.raises(http.CloudError, match="ignored source paths"):
         source_upload.select_source(source)
+
+
+def test_directory_with_its_own_gitignore_counts_once(tmp_path: Path) -> None:
+    source = _git_source(tmp_path / "repo")
+    cache = source / ".pytest_cache"
+    (cache / "v" / "cache").mkdir(parents=True)
+    (cache / ".gitignore").write_text("*\n", encoding="utf-8")
+    (cache / "README.md").write_text("cache\n", encoding="utf-8")
+    (cache / "v" / "cache" / "lastfailed").write_text("{}\n", encoding="utf-8")
+
+    manifest = source_upload.select_source(source)
+
+    assert manifest.excluded["git_ignored"] == 2  # ignored.log and .pytest_cache/
