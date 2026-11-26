@@ -416,3 +416,33 @@ async def test_identical_parallel_calls_are_asked_once() -> None:
     assert len(gateway.requests) == 2, "one ask per distinct call, not per call"
     assert first in state.approved and second in state.approved
     assert [item for item, _ in state.rejected] == [other]
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_timeout_before_the_deadline_is_retried_not_treated_as_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gateway's own TimeoutError (an HTTP client timeout) is a transient poll
+    failure: the ask goes on to the next poll and can still be approved."""
+
+    monkeypatch.setattr("strix.core.execution._ASK_POLL_INTERVAL_S", 0.01)
+
+    class FlakyThenApproved(_ScriptedGateway):
+        async def poll(self, approval_id: str) -> str:  # noqa: ARG002
+            self.polls += 1
+            if self.polls == 1:
+                raise TimeoutError("client timed out")
+            return "approved"
+
+    gateway = FlakyThenApproved([])
+    decision = InterceptionDecision(rule=_ask_rule(), action="ask")
+    outcome = await _wait_for_human_decision(
+        gateway,
+        decision=decision,
+        tool_name="exec_command",
+        input_text="{}",
+        timeout=30,
+        report=None,
+    )
+    assert outcome == "approved"
+    assert gateway.polls == 2

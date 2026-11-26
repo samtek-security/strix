@@ -333,9 +333,15 @@ async def _within(deadline: float, awaitable: Awaitable[Any]) -> Any:
             close()
         raise _AskDeadlineError
     try:
-        return await asyncio.wait_for(awaitable, timeout=remaining)
+        async with asyncio.timeout(remaining) as limit:
+            return await awaitable
     except TimeoutError as exc:
-        raise _AskDeadlineError from exc
+        # Only the ask's own deadline ends the ask. A TimeoutError the gateway
+        # raised itself (an HTTP client timeout, say) is an ordinary transient
+        # failure of that one call and keeps its normal handling.
+        if limit.expired():
+            raise _AskDeadlineError from exc
+        raise
 
 
 async def _wait_for_human_decision(  # noqa: PLR0911 - one return per distinct outcome
