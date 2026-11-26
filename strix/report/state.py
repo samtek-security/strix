@@ -387,6 +387,8 @@ class ReportState:
         proof_status: str | None = None,
         proof_status_reason: str | None = None,
         proof_source: str | None = None,
+        capture_integrity_sha256: str | None = None,
+        captured_at: str | None = None,
         queue_item_id: str | None = None,
         suspected_duplicate_of: str | None = None,
         agent_id: str | None = None,
@@ -458,6 +460,10 @@ class ReportState:
             report["proof_status_reason"] = proof_status_reason.strip()
         if proof_source:
             report["proof_source"] = proof_source
+        if capture_integrity_sha256:
+            report["capture_integrity_sha256"] = capture_integrity_sha256
+        if captured_at:
+            report["captured_at"] = captured_at
         if queue_item_id:
             report["queue_item_id"] = queue_item_id
         if suspected_duplicate_of:
