@@ -307,9 +307,12 @@ class AgentCoordinator:
         task: asyncio.Task[Any] | None = None,
         interrupt_on_message: bool | None = None,
         resumable: bool | None = None,
+        unsettled: bool = False,
     ) -> None:
         async with self._lock:
             runtime = self.runtimes.setdefault(agent_id, AgentRuntime())
+            if unsettled:
+                runtime.turn_settled.clear()
             if session is not None:
                 runtime.session = session
             if task is not None:
@@ -621,6 +624,23 @@ class AgentCoordinator:
         except TimeoutError:
             return False
         return True
+
+    async def writes_are_final(self, agent_id: str) -> bool:
+        """Whether nothing more can ever be written to the agent's session.
+
+        Read as one snapshot under the lock: the agent must be non-resumable,
+        in a terminal status, and its turn settled. A stop can race a cycle's
+        startup and see the status flip back to running, so a settled turn
+        alone does not prove the agent is done. An agent with no runtime
+        recorded is not treated as final.
+        """
+        async with self._lock:
+            runtime = self.runtimes.get(agent_id)
+            if runtime is None or runtime.resumable:
+                return False
+            return (
+                self.statuses.get(agent_id) in TERMINAL_STATUSES and runtime.turn_settled.is_set()
+            )
 
     async def session_items(self, agent_id: str) -> list[Any] | None:
         """Read back a stopped agent's own session items.

@@ -586,3 +586,18 @@ async def test_no_turn_limit_no_notice() -> None:
         _make_warn_context(requests=14, parent_id="root-1"), MagicMock(), None, items
     )
     assert items == []
+
+
+@pytest.mark.parametrize("requests", [85, 95])
+@pytest.mark.asyncio
+async def test_root_directive_gates_finality_on_both_evidence_flags(requests: int) -> None:
+    hooks = ReportUsageHooks(model="test-model", max_turns=100)
+    items: list[Any] = []
+    await hooks.on_llm_start(
+        _make_warn_context(requests=requests, parent_id=None), MagicMock(), None, items
+    )
+    content = items[0]["content"]
+
+    assert "evidence_writes_final" in content
+    assert "evidence_complete" in content
+    assert "possibly incomplete" in content

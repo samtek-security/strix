@@ -12,10 +12,12 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 from agents.tool_context import ToolContext
 
+from strix.core import execution
 from strix.core.agents import AgentCoordinator
 from strix.tools.agents_graph import tools as agents_graph_tools
 from strix.tools.agents_graph.tools import stop_agent
@@ -247,6 +249,8 @@ async def test_stop_agent_returns_the_target_evidence_directly() -> None:
             "agent_id": "child",
             "name": "Validator",
             "evidence_settled": True,
+            "evidence_writes_final": True,
+            "evidence_complete": True,
             "evidence": [
                 {
                     "type": "function_call",
@@ -348,7 +352,13 @@ async def test_stop_agent_withholds_evidence_from_a_non_ancestor() -> None:
 
     assert result["success"] is True
     entry = result["stopped_agents"][0]
-    assert entry == {"agent_id": "child", "name": "Validator", "evidence_settled": None}
+    assert entry == {
+        "agent_id": "child",
+        "name": "Validator",
+        "evidence_settled": None,
+        "evidence_writes_final": False,
+        "evidence_complete": False,
+    }
     assert "evidence" not in entry
     assert "withheld" in result["note"]
 
@@ -622,3 +632,272 @@ async def test_stop_agent_result_stays_under_a_small_configured_byte_cap(
     assert result["success"] is True
     entry = result["stopped_agents"][0]
     assert entry["evidence_truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_unstarted_child_runner_is_not_final(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A stop between registration and the runner's first write must not read
+    the empty session as final."""
+    started = asyncio.Event()
+
+    async def blocked_loop(**_kwargs: Any) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(execution, "run_agent_loop", blocked_loop)
+    coordinator = await _graph()
+    await coordinator.register("late", "Late", parent_id="root")
+    sessions: list[Any] = []
+    await execution._start_child_runner(
+        parent_ctx={},
+        coordinator=coordinator,
+        agents_db_path=tmp_path / "agents.db",
+        sessions_to_close=sessions,
+        run_config=MagicMock(),
+        max_turns=5,
+        interactive=False,
+        child_agent=MagicMock(),
+        child_id="late",
+        name="late",
+        parent_id="root",
+        task="t",
+        skills=[],
+        initial_input=[],
+    )
+    try:
+        assert coordinator.runtimes["late"].turn_settled.is_set() is False
+        await coordinator.request_stop("late")
+        assert await coordinator.writes_are_final("late") is False
+    finally:
+        task = coordinator.runtimes["late"].task
+        assert task is not None
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for session in sessions:
+            session.close()
+
+
+# --- evidence_writes_final / evidence_complete ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_non_interactive_settled_target_is_final_and_complete() -> None:
+    coordinator = await _graph()
+    await coordinator.attach_runtime("child", session=FakeSession([{"role": "assistant"}]))
+
+    result = await _call(
+        stop_agent, coordinator, "root", {"target_agent_id": "child", "cascade": False}
+    )
+
+    entry = result["stopped_agents"][0]
+    assert entry["evidence_settled"] is True
+    assert entry["evidence_writes_final"] is True
+    assert entry["evidence_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_interactive_settled_target_is_not_final() -> None:
+    coordinator = await _graph()
+    await coordinator.attach_runtime(
+        "child", session=FakeSession([{"role": "assistant"}]), resumable=True
+    )
+
+    result = await _call(
+        stop_agent, coordinator, "root", {"target_agent_id": "child", "cascade": False}
+    )
+
+    entry = result["stopped_agents"][0]
+    assert entry["evidence_settled"] is True
+    assert entry["evidence_writes_final"] is False
+    assert entry["evidence_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_unsettled_non_interactive_target_is_not_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = await _graph()
+    await coordinator.attach_runtime("child", session=FakeSession([{"role": "assistant"}]))
+    await coordinator.mark_turn_unsettled("child")
+    monkeypatch.setattr(agents_graph_tools, "_STOP_AGENT_EVIDENCE_BUDGET_S", 0.01)
+
+    result = await _call(
+        stop_agent, coordinator, "root", {"target_agent_id": "child", "cascade": False}
+    )
+
+    entry = result["stopped_agents"][0]
+    assert entry["evidence_settled"] is False
+    assert entry["evidence_writes_final"] is False
+
+
+@pytest.mark.asyncio
+async def test_non_interactive_target_restored_to_running_is_not_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop can land while a cycle starts and mark_running flips the status
+    back; the settled turn then proves nothing about later writes."""
+    coordinator = await _graph()
+    await coordinator.attach_runtime("child", session=FakeSession([{"role": "assistant"}]))
+    original = coordinator.join_stopped
+
+    async def join_then_restart(agent_id: str, timeout: float) -> bool:
+        settled = await original(agent_id, timeout)
+        await coordinator.mark_running(agent_id)
+        return settled
+
+    monkeypatch.setattr(coordinator, "join_stopped", join_then_restart)
+
+    result = await _call(
+        stop_agent, coordinator, "root", {"target_agent_id": "child", "cascade": False}
+    )
+
+    entry = result["stopped_agents"][0]
+    assert entry["evidence_settled"] is True
+    assert entry["evidence_writes_final"] is False
+
+
+@pytest.mark.asyncio
+async def test_item_truncated_evidence_is_incomplete() -> None:
+    coordinator = await _graph()
+    items = [{"role": "assistant", "content": f"m{i}"} for i in range(100)]
+    await coordinator.attach_runtime("child", session=FakeSession(items))
+
+    result = await _call(
+        stop_agent, coordinator, "root", {"target_agent_id": "child", "cascade": False}
+    )
+
+    entry = result["stopped_agents"][0]
+    assert entry["evidence_truncated"] is True
+    assert entry["evidence_writes_final"] is True
+    assert entry["evidence_complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_byte_capped_evidence_is_incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Context:
+        tool_output_max_bytes = 1024
+
+    class _Settings:
+        context = _Context()
+
+    monkeypatch.setattr(agents_graph_tools, "load_settings", _Settings)
+    coordinator = await _graph()
+    items: list[Any] = []
+    for i in range(10):
+        items.append(
+            {"type": "function_call", "call_id": f"c{i}", "name": "http_request", "arguments": "{}"}
+        )
+        items.append({"type": "function_call_output", "call_id": f"c{i}", "output": "x" * 200})
+    await coordinator.attach_runtime("child", session=FakeSession(items))
+
+    result = await _call(
+        stop_agent, coordinator, "root", {"target_agent_id": "child", "cascade": False}
+    )
+
+    assert result["stopped_agents"][0]["evidence_complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_unreadable_session_is_incomplete() -> None:
+    coordinator = await _graph()
+    await coordinator.attach_runtime("child", session=ExplodingSession([]))
+
+    result = await _call(
+        stop_agent, coordinator, "root", {"target_agent_id": "child", "cascade": False}
+    )
+
+    entry = result["stopped_agents"][0]
+    assert entry["evidence_writes_final"] is True
+    assert entry["evidence_complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_withheld_evidence_is_neither_final_nor_complete() -> None:
+    coordinator = await _graph()
+    await coordinator.register("peer", "Peer", parent_id="root")
+    await coordinator.attach_runtime("peer", resumable=False)
+
+    result = await _call(
+        stop_agent, coordinator, "child", {"target_agent_id": "peer", "cascade": False}
+    )
+
+    entry = result["stopped_agents"][0]
+    assert entry["evidence_writes_final"] is False
+    assert entry["evidence_complete"] is False
+
+
+def test_omitted_agents_are_listed_by_id_with_both_flags_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stopped_agents = [
+        {
+            "agent_id": f"id{i}",
+            "name": "x" * 200,
+            "evidence_settled": True,
+            "evidence_writes_final": True,
+            "evidence_complete": True,
+            "evidence": [],
+        }
+        for i in range(10)
+    ]
+    result = {"success": True, "reason": "", "note": "n", "stopped_agents": stopped_agents}
+
+    class _Context:
+        tool_output_max_bytes = 1024
+
+    class _Settings:
+        context = _Context()
+
+    monkeypatch.setattr(agents_graph_tools, "load_settings", _Settings)
+
+    agents_graph_tools._fit_evidence_to_byte_cap(result, stopped_agents, {})
+
+    kept = [e["agent_id"] for e in stopped_agents]
+    omitted = result["stopped_agents_omitted"]
+    assert result["stopped_agents_truncated"] is True
+    assert omitted["agent_ids"] == [f"id{i}" for i in range(len(kept), 10)]
+    assert omitted["evidence_writes_final"] is False
+    assert omitted["evidence_complete"] is False
+
+
+def test_omitted_id_list_is_bounded_when_it_would_overflow_the_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stopped_agents = [
+        {
+            "agent_id": f"agent{i:03d}",
+            "name": "x",
+            "evidence_settled": True,
+            "evidence_writes_final": True,
+            "evidence_complete": True,
+            "evidence": [],
+        }
+        for i in range(200)
+    ]
+    result = {"success": True, "reason": "", "note": "n", "stopped_agents": stopped_agents}
+
+    class _Context:
+        tool_output_max_bytes = 1024
+
+    class _Settings:
+        context = _Context()
+
+    monkeypatch.setattr(agents_graph_tools, "load_settings", _Settings)
+
+    agents_graph_tools._fit_evidence_to_byte_cap(result, stopped_agents, {})
+
+    cap = max(1024 - agents_graph_tools._RESULT_BYTE_CAP_MARGIN, 512)
+    omitted = result["stopped_agents_omitted"]
+    assert agents_graph_tools._result_byte_size(result) <= cap
+    assert omitted["count"] == 200 - len(stopped_agents)
+    assert omitted["agent_ids_truncated"] is True
+    assert len(omitted["agent_ids"]) < omitted["count"]
+
+
+def test_stop_agent_docstring_explains_the_interactive_case() -> None:
+    doc = stop_agent.description
+    assert "evidence_writes_final" in doc
+    assert "evidence_complete" in doc
+    assert "woken" in doc

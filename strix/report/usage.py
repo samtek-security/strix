@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 from agents.usage import Usage, deserialize_usage, serialize_usage
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -58,6 +59,39 @@ class ProviderUsage(BaseModel):
 _PROVIDER_USAGE = TypeAdapter(dict[str, ProviderUsage])
 
 
+# Endpoints a provider serves by default; a base set to one of these is not a
+# custom gateway.
+_DEFAULT_API_HOSTS = frozenset(
+    {
+        "api.openai.com",
+        "api.anthropic.com",
+        "api.x.ai",
+        "api.deepseek.com",
+        "api.mistral.ai",
+        "api.z.ai",
+        "open.bigmodel.cn",
+        "api.moonshot.ai",
+        "api.moonshot.cn",
+        "api.minimax.io",
+        "api.minimaxi.com",
+        "api.cohere.ai",
+        "api.cohere.com",
+        "dashscope.aliyuncs.com",
+        "dashscope-intl.aliyuncs.com",
+        "generativelanguage.googleapis.com",
+    }
+)
+
+
+def is_custom_api_base(base: str | None) -> bool:
+    """Whether ``base`` points somewhere other than a provider's default endpoint."""
+    value = (base or "").strip()
+    if not value:
+        return False
+    host = urlparse(value if "//" in value else f"//{value}").hostname or ""
+    return host.lower() not in _DEFAULT_API_HOSTS
+
+
 class LLMUsageLedger:
     """Aggregate SDK ``Usage`` objects and attach best-effort cost estimates."""
 
@@ -76,6 +110,11 @@ class LLMUsageLedger:
         # When True, tokens are still tracked but cost stays $0 — the run is on a
         # model subscription, so there is no metered per-token charge to report.
         self.zero_cost = False
+        # Set once when the tracker is built. A bare model behind a custom base
+        # is not a first-party route, so it gets no first-party tie-break. The
+        # dedupe model has its own base.
+        self.custom_base = False
+        self.dedupe_custom_base = False
 
     def record(
         self,
@@ -99,7 +138,10 @@ class LLMUsageLedger:
             metadata["model"] = model
 
         if not self.zero_cost:
-            estimated = _estimate_litellm_cost(usage, model)
+            custom_base = (
+                self.dedupe_custom_base if normalized_agent_id == "dedupe" else self.custom_base
+            )
+            estimated = _estimate_litellm_cost(usage, model, custom_base=custom_base)
             if estimated:
                 self._estimated_cost += estimated
                 self._agent_estimated_cost[normalized_agent_id] = (
@@ -262,19 +304,24 @@ def _usage_has_activity(usage: Usage) -> bool:
     )
 
 
-def _estimate_litellm_cost(usage: Usage, model: str | None) -> float | None:
+def _estimate_litellm_cost(
+    usage: Usage, model: str | None, *, custom_base: bool = False
+) -> float | None:
     litellm_model = _litellm_model_name(model)
     if not litellm_model:
         return None
+    # The wrapper prefix is stripped above; a wrapped name may front a custom
+    # endpoint, so it gets no first-party tie-break.
+    first_party = not custom_base and model is not None and model.strip() == litellm_model
 
     entries = list(usage.request_usage_entries)
     if not entries:
-        return _estimate_litellm_entry_cost(usage, litellm_model)
+        return _estimate_litellm_entry_cost(usage, litellm_model, first_party=first_party)
 
     total = 0.0
     estimated_any = False
     for entry in entries:
-        cost = _estimate_litellm_entry_cost(entry, litellm_model)
+        cost = _estimate_litellm_entry_cost(entry, litellm_model, first_party=first_party)
         if cost is None:
             continue
         total += cost
@@ -283,7 +330,9 @@ def _estimate_litellm_cost(usage: Usage, model: str | None) -> float | None:
     return total if estimated_any else None
 
 
-def _estimate_litellm_entry_cost(entry: Any, model: str) -> float | None:
+def _estimate_litellm_entry_cost(
+    entry: Any, model: str, *, first_party: bool = True
+) -> float | None:
     prompt_tokens = _int_or_zero(getattr(entry, "input_tokens", 0))
     completion_tokens = _int_or_zero(getattr(entry, "output_tokens", 0))
     total_tokens = _int_or_zero(getattr(entry, "total_tokens", 0))
@@ -310,8 +359,8 @@ def _estimate_litellm_entry_cost(entry: Any, model: str) -> float | None:
     if "/" in model:
         candidates.append(model.rsplit("/", 1)[-1])
 
-    for candidate in candidates:
-        resolved = resolve_litellm_model(candidate)
+    for index, candidate in enumerate(candidates):
+        resolved = resolve_litellm_model(candidate, first_party=first_party and index == 0)
         if not resolved:
             continue
         try:
