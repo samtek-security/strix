@@ -369,6 +369,7 @@ class ReportState:
         dependency_metadata: dict[str, str] | None = None,
         proof_status: str | None = None,
         proof_status_reason: str | None = None,
+        proof_source: str | None = None,
         queue_item_id: str | None = None,
         agent_id: str | None = None,
         agent_name: str | None = None,
@@ -437,6 +438,8 @@ class ReportState:
             report["proof_status"] = proof_status.strip().lower()
         if proof_status_reason:
             report["proof_status_reason"] = proof_status_reason.strip()
+        if proof_source:
+            report["proof_source"] = proof_source
         if queue_item_id:
             report["queue_item_id"] = queue_item_id
         if agent_id:
