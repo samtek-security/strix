@@ -205,6 +205,7 @@ function parseOneVulnerability(
     title: asStringOrNull(raw.title) ?? "Untitled finding",
     description: asStringOrNull(raw.description) ?? "",
     severity: coerceSeverity(raw.severity),
+    proof_status: asStringOrNull(raw.proof_status),
     status,
     created_at: toIsoTimestamp(raw.timestamp),
     cve: asStringOrNull(raw.cve),
@@ -311,6 +312,15 @@ export function parseAgentsJson(text: string): ParsedAgent[] {
   return ordered;
 }
 
+export function isValidated(v: Pick<Vulnerability, "proof_status">): boolean {
+  const status = (v.proof_status ?? "").trim().toLowerCase();
+  return status === "" || status === "exploited";
+}
+
+export function leadCount(vulns: Vulnerability[]): number {
+  return vulns.filter((v) => !isValidated(v)).length;
+}
+
 export function severityCounts(
   vulns: Vulnerability[]
 ): Record<VulnerabilitySeverity, number> {
@@ -320,6 +330,10 @@ export function severityCounts(
     medium: 0,
     low: 0,
   };
-  for (const v of vulns) counts[v.severity] += 1;
+  for (const v of vulns) {
+    // A lead keeps the severity it claimed but is not counted in a severity bucket.
+    if (!isValidated(v)) continue;
+    counts[v.severity] += 1;
+  }
   return counts;
 }

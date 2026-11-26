@@ -11,6 +11,7 @@ from strix.interface.viewer.transcript import lead_count_of, severity_counts
 from strix.report.proof import is_validated, lead_count
 from strix.report.runs import _title
 from strix.report.sarif import write_sarif
+from strix.tools.reporting.tool import _severity_counts
 
 
 if TYPE_CHECKING:
@@ -86,3 +87,24 @@ def test_sarif_lead_is_a_note_and_keeps_its_claimed_severity(tmp_path: Path) -> 
     assert lead["properties"]["proof_status"] == "lead"
     assert "claimed_severity" not in proven["properties"]
     assert proven["properties"]["security-severity"] == "9.8"
+
+
+def test_sarif_rule_shared_by_a_lead_and_a_validated_finding_takes_the_validated_level(
+    tmp_path: Path,
+) -> None:
+    # The lead is filed first, so the rule would otherwise be built from it.
+    reports = [
+        _report("critical", "lead", cwe="CWE-89"),
+        _report("critical", "exploited", id="vuln-0002", cwe="CWE-89"),
+    ]
+    write_sarif(tmp_path, reports)
+    run = json.loads((tmp_path / "findings.sarif").read_text(encoding="utf-8"))["runs"][0]
+    assert len(run["tool"]["driver"]["rules"]) == 1
+    rule = run["tool"]["driver"]["rules"][0]
+    assert rule["defaultConfiguration"]["level"] == "error"
+    assert rule["properties"]["security-severity"] == "9.8"
+
+
+def test_list_reports_counts_leads_apart() -> None:
+    reports = [_report("critical", "lead"), _report("critical", "exploited"), _report("low")]
+    assert _severity_counts(reports) == {"critical": 1, "low": 1}
