@@ -183,7 +183,7 @@ def test_refuses_empty_or_short_token_file(
     monkeypatch.setenv(URL_VAR, URL)
     monkeypatch.setenv(TOKEN_VAR, str(path))
 
-    with pytest.raises(ValueError, match="fewer than 32 bytes"):
+    with pytest.raises(ValueError, match=r"fewer than 32 bytes|printable ASCII"):
         _start(spec_file)
     assert fake_docker.run_calls == []
 
@@ -372,3 +372,71 @@ def test_round_trip_property_over_generated_and_mutated_urls() -> None:
             continue
         assert accepted == mutated
         assert not any(ch in accepted for ch in " \t\n\r?#@\\\x00\x7f")
+
+
+@pytest.mark.parametrize(
+    "content", [" " + "a" * 40, "a" * 40 + " ", "\t" + "a" * 40, "a" * 40 + "\t\n"]
+)
+def test_refuses_a_token_with_surrounding_whitespace(
+    fake_docker: _FakeDocker,
+    spec_file: str,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+) -> None:
+    path = tmp_path / "padded-token"
+    path.write_text(content)
+    path.chmod(0o600)
+    monkeypatch.setenv(URL_VAR, URL)
+    monkeypatch.setenv(TOKEN_VAR, str(path))
+
+    with pytest.raises(ValueError, match="printable ASCII"):
+        _start(spec_file)
+    assert fake_docker.run_calls == []
+
+
+@pytest.mark.parametrize("terminator", ["\n", "\r\n", ""])
+def test_accepts_a_token_with_only_a_line_terminator(
+    fake_docker: _FakeDocker,
+    spec_file: str,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    terminator: str,
+) -> None:
+    path = tmp_path / "terminated-token"
+    path.write_text("a" * 40 + terminator)
+    path.chmod(0o600)
+    monkeypatch.setenv(URL_VAR, URL)
+    monkeypatch.setenv(TOKEN_VAR, str(path))
+
+    with pytest.raises(RuntimeError, match="not ready"):
+        _start(spec_file)
+    assert len(fake_docker.run_calls) == 1
+
+
+def test_a_transport_error_during_the_token_probe_cleans_up_the_boundary(
+    fake_docker: _FakeDocker, spec_file: str, token_file: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    removed: list[str] = []
+    monkeypatch.setattr(backends, "_wait_gateway_ready", lambda *_a, **_k: True)
+
+    def _broken_exec(_cmd: list[str]) -> tuple[int, bytes]:
+        raise ConnectionError("docker daemon went away")
+
+    fake_docker.exec_run = _broken_exec  # type: ignore[method-assign]
+    fake_docker.networks.get = None  # the run must not reach the network attach
+    monkeypatch.setattr(
+        fake_docker,
+        "_run",
+        lambda _i, **kw: (
+            fake_docker.run_calls.append(kw)
+            or SimpleNamespace(remove=lambda **_: removed.append("gateway"), exec_run=_broken_exec)
+        ),
+    )
+    fake_docker.containers.run = fake_docker._run
+    monkeypatch.setenv(URL_VAR, URL)
+    monkeypatch.setenv(TOKEN_VAR, token_file)
+
+    with pytest.raises(ConnectionError, match="went away"):
+        _start(spec_file)
+    assert removed == ["gateway"]

@@ -172,7 +172,9 @@ def _reporter_settings() -> tuple[str, Path]:
             "user and not accessible by group or other"
         )
     try:
-        token = token_file.read_text(encoding="utf-8").strip()
+        # Only the line terminator is dropped, as `$(cat file)` does for the control plane's copy.
+        # Other surrounding whitespace is rejected below, not silently trimmed.
+        token = token_file.read_text(encoding="utf-8").rstrip("\r\n")
     except (OSError, UnicodeDecodeError) as exc:
         raise ValueError(
             f"RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE {token_path!r} is not a readable file: {exc}"
@@ -384,7 +386,12 @@ async def _contained_docker_backend(
         _cleanup_boundary(gw)
         raise RuntimeError(f"egress gateway {gw_name} not ready; refusing to start the agent (fail-closed)")
 
-    if not _gateway_can_read_token(gw):
+    try:
+        token_readable = _gateway_can_read_token(gw)
+    except BaseException:
+        _cleanup_boundary(gw)
+        raise
+    if not token_readable:
         _cleanup_boundary(gw)
         raise RuntimeError(
             f"egress gateway {gw_name} cannot read the escalation token at "
@@ -441,12 +448,7 @@ def _gateway_can_read_token(gateway: Any) -> bool:
 
     Readiness never opens the token, and the failure would surface only after a trip.
     """
-    import docker
-
-    try:
-        code, _out = gateway.exec_run(["head", "-c", "1", _REPORTER_TOKEN_MOUNT])
-    except docker.errors.DockerException:
-        return False
+    code, _out = gateway.exec_run(["head", "-c", "1", _REPORTER_TOKEN_MOUNT])
     return code == 0
 
 
