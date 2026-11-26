@@ -1,4 +1,5 @@
-"""Generic command runner for `strix cloud`.
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
+"""Generic command runner for `recon cloud`.
 
 The runner turns one entry of the command table into an argument parser,
 sends the HTTP request, renders the result, and returns the exit code.
@@ -469,10 +470,10 @@ def _execute(  # noqa: PLR0912, PLR0915
         row_numbers=workspace_list or integration_list,
         omit_columns=frozenset({"id"}) if workspace_list else frozenset(),
         hint=(
-            "Switch with `strix cloud workspaces use NUMBER`."
+            "Switch with `recon cloud workspaces use NUMBER`."
             if workspace_list
             else (
-                "For Git providers, disconnect with `strix cloud integrations disconnect "
+                "For Git providers, disconnect with `recon cloud integrations disconnect "
                 "PROVIDER --installation-id INSTALLATION_ID`; omit the ID for Slack."
                 if integration_list
                 else None
@@ -582,7 +583,7 @@ def _merge_extra_body(body: dict[str, Any], extra_body: dict[str, Any]) -> None:
 
 
 def _build_parser(group: str, verb_label: str, cmd: Cmd) -> argparse.ArgumentParser:
-    parser = CloudArgumentParser(prog=f"strix cloud {group} {verb_label}", description=cmd.help)
+    parser = CloudArgumentParser(prog=f"recon cloud {group} {verb_label}", description=cmd.help)
     for name in _PLACEHOLDER.findall(cmd.path):
         parser.add_argument(_dest(name), metavar=_metavar(name))
     for param in cmd.query:
@@ -790,7 +791,7 @@ def _interrupted_scan_launch_error(idempotency_key: str | None = None) -> http.C
     retry_note = _idempotency_retry_note(idempotency_key)
     message = (
         "Interrupted while starting the scan. The launch outcome is unknown; check "
-        f"`strix cloud scans list` before retrying.{retry_note}"
+        f"`recon cloud scans list` before retrying.{retry_note}"
     )
     payload: dict[str, Any] = {
         "error": message,
@@ -810,7 +811,7 @@ def _ambiguous_scan_launch_error(
 ) -> http.CloudError:
     retry_note = _idempotency_retry_note(idempotency_key)
     message = (
-        f"{error} The scan launch outcome is unknown; check `strix cloud scans list` before "
+        f"{error} The scan launch outcome is unknown; check `recon cloud scans list` before "
         f"retrying to avoid a duplicate scan or charge.{retry_note}"
     )
     payload: dict[str, Any] = {

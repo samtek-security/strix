@@ -1,4 +1,5 @@
-"""Inline arrow-key picker for ``strix --resume`` with no run name.
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
+"""Inline arrow-key picker for ``recon --resume`` with no run name.
 
 Draws a short list in the normal terminal (no alternate screen), redraws it in
 place on every key, and returns the chosen run. Keys: up/down, page up/down,

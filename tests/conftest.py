@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Shared test fixtures."""
 
 from __future__ import annotations
@@ -118,7 +119,7 @@ def _plain_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
 def _isolate_wallet_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a developer's real mppx wallet out of the top-up tests.
 
-    ``strix cloud billing topup`` chooses the Stripe Link flow or the
+    ``recon cloud billing topup`` chooses the Stripe Link flow or the
     preconfigured mppx wallet from these variables, so leaving them set would
     silently switch which branch a test runs.
     """

@@ -1,4 +1,5 @@
-"""`strix auth` — ChatGPT subscription sign-in (login / status / logout).
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
+"""`recon auth` — ChatGPT subscription sign-in (login / status / logout).
 
 Signing in only stores OAuth tokens (``~/.strix/subscription-auth.json``); model
 selection stays with ``STRIX_LLM``. A ``chatgpt/<model>`` STRIX_LLM runs on the
@@ -38,13 +39,13 @@ _CALLBACK_TIMEOUT_S = 300
 LOGIN_PROVIDER = "chatgpt"
 _ACCEPTED_PROVIDERS = frozenset({LOGIN_PROVIDER, codex.PROVIDER})
 
-_USAGE = "Usage:\n  strix auth login chatgpt [--manual]\n  strix auth status\n  strix auth logout"
+_USAGE = "Usage:\n  recon auth login chatgpt [--manual]\n  recon auth status\n  recon auth logout"
 
 
 def run_auth(argv: list[str]) -> int:
-    """Entry point for ``strix auth …``. Returns a process exit code."""
+    """Entry point for ``recon auth …``. Returns a process exit code."""
     console = Console()
-    # Bare `strix auth` (no subcommand) defaults to login.
+    # Bare `recon auth` (no subcommand) defaults to login.
     subcommand = argv[0] if argv else "login"
     rest = argv[1:]
 
@@ -67,7 +68,7 @@ def run_auth(argv: list[str]) -> int:
 
 
 def _login(console: Console, argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="strix auth login", add_help=True)
+    parser = argparse.ArgumentParser(prog="recon auth login", add_help=True)
     parser.add_argument(
         "provider",
         nargs="?",
@@ -245,7 +246,7 @@ def _first(query: dict[str, list[str]], key: str) -> str | None:
 def _status(console: Console) -> int:
     record = codex.read_record()
     if record is None:
-        console.print("[yellow]Not signed in.[/] Run [cyan]strix auth login chatgpt[/] to sign in.")
+        console.print("[yellow]Not signed in.[/] Run [cyan]recon auth login chatgpt[/] to sign in.")
         return 1
     settings = load_settings()
     console.print("[green]Signed in[/] with a ChatGPT subscription.")
@@ -297,7 +298,7 @@ def _print_success(console: Console) -> None:
     text.append(") — runs are billed to your ChatGPT plan.", style="white")
     text.append("\n\n", style="white")
     text.append("Run a scan as usual, e.g. ", style="white")
-    text.append("strix --target https://example.com", style="bold cyan")
+    text.append("recon --target https://example.com", style="bold cyan")
     console.print()
     console.print(
         Panel(

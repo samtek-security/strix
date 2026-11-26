@@ -1,10 +1,16 @@
-"""Update notifications and self-update for the strix CLI.
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
+"""Update notifications and self-update for the recon CLI.
 
 Follows the pattern used by tools like gh, uv, and pip: a background,
 rate-limited (once per 24h) check against the release source, a cached
 result in ``~/.strix``, a non-intrusive notice with the upgrade command
-for the detected install method, and a ``strix --update`` self-update
+for the detected install method, and a ``recon --update`` self-update
 path for the standalone binary install.
+
+Recon builds ship with ``UPDATES_ENABLED = False``. The release source below is
+upstream Strix, and applying its binary would replace Recon with upstream code.
+Nothing here reaches the network or rewrites the executable until a Recon
+release channel exists and ``GITHUB_REPO`` and ``PYPI_PACKAGE`` point at it.
 """
 
 from __future__ import annotations
@@ -30,11 +36,13 @@ import requests
 from rich.console import Console
 from rich.prompt import Prompt
 
+from strix.interface.cli_name import CLI_NAME
 from strix.telemetry._common import get_version
 
 
 logger = logging.getLogger(__name__)
 
+UPDATES_ENABLED = False
 GITHUB_REPO = "usestrix/strix"
 PYPI_PACKAGE = "strix-agent"
 CHECK_INTERVAL_SECONDS = 24 * 60 * 60
@@ -46,6 +54,8 @@ _background_thread: threading.Thread | None = None
 
 
 def _is_disabled() -> bool:
+    if not UPDATES_ENABLED:
+        return True
     return bool(os.environ.get("STRIX_NO_UPDATE_CHECK")) or any(
         os.environ.get(key)
         for key in ("CI", "GITHUB_ACTIONS", "GITLAB_CI", "JENKINS_URL", "BUILDKITE", "CIRCLECI")
@@ -70,7 +80,7 @@ def get_install_method() -> str:
 def get_upgrade_command(method: str | None = None) -> str:
     method = method or get_install_method()
     commands = {
-        "binary": "strix --update",
+        "binary": f"{CLI_NAME} --update",
         "pipx": "pipx upgrade strix-agent",
         "uv": "uv tool upgrade strix-agent",
         "pip": "pip install --upgrade strix-agent",
@@ -95,6 +105,8 @@ def _is_newer(latest: str, current: str) -> bool:
 
 
 def _fetch_latest_version() -> str | None:
+    if not UPDATES_ENABLED:
+        return None
     try:
         if is_binary_install():
             with requests.get(
@@ -118,6 +130,8 @@ def _fetch_latest_version() -> str | None:
 
 def _fetch_asset_digest(version: str, filename: str) -> str | None:
     """Return the expected sha256 (hex) for a release asset, if the API provides one."""
+    if not UPDATES_ENABLED:
+        return None
     try:
         with requests.get(
             f"https://api.github.com/repos/{GITHUB_REPO}/releases/tags/v{version}",
@@ -209,7 +223,7 @@ def notify_update(console: Console) -> None:
     if not latest:
         return
     console.print(
-        f"[#eab308]A new version of strix is available:[/] "
+        f"[#eab308]A new version of {CLI_NAME} is available:[/] "
         f"[dim]{get_version()}[/] [dim]→[/] [bold #22c55e]{latest}[/]"
         f"  [dim]·[/]  [#60a5fa]{get_upgrade_command()}[/]"
     )
@@ -231,27 +245,27 @@ def run_package_upgrade(console: Console, method: str) -> bool:
             f"Run it manually: [#60a5fa]{get_upgrade_command(method)}[/]"
         )
         return False
-    console.print("[#22c55e]✓ strix updated — restart the scan to use the new version[/]")
+    console.print(f"[#22c55e]✓ {CLI_NAME} updated — restart the scan to use the new version[/]")
     return True
 
 
 def prompt_update_if_available(console: Console) -> bool:
     """Offer an interactive update before a scan starts.
 
-    Returns True if strix was updated (caller should re-exec / exit).
+    Returns True if the CLI was updated (caller should re-exec / exit).
     """
     latest = get_available_update()
     if not latest or not sys.stdin.isatty() or not sys.stdout.isatty():
         return False
     console.print()
     console.print(
-        f"[#eab308]A new version of strix is available:[/] "
+        f"[#eab308]A new version of {CLI_NAME} is available:[/] "
         f"[dim]{get_version()}[/] [dim]→[/] [bold #22c55e]{latest}[/]"
     )
     console.print(
         "[dim]  y — update now    n — not now (ask again next run)    s — skip this version[/]"
     )
-    choice = Prompt.ask("Update strix?", choices=["y", "n", "s"], default="n")
+    choice = Prompt.ask(f"Update {CLI_NAME}?", choices=["y", "n", "s"], default="n")
     console.print()
     if choice == "s":
         skip_version(latest)
@@ -313,6 +327,8 @@ def _release_target() -> str | None:
 
 
 def _download_and_replace(version: str, target: str, console: Console) -> bool:
+    if not UPDATES_ENABLED:
+        raise RuntimeError("self-update is disabled in this build")
     is_windows = target.startswith("windows")
     archive_ext = ".zip" if is_windows else ".tar.gz"
     filename = f"strix-{version}-{target}{archive_ext}"
@@ -376,7 +392,7 @@ def _download_and_replace(version: str, target: str, console: Console) -> bool:
     return True
 
 
-def self_update(console: Console | None = None, version: str | None = None) -> bool:
+def self_update(console: Console | None = None, version: str | None = None) -> bool:  # noqa: PLR0911
     """Replace the running standalone binary with the latest release.
 
     Returns True on success. For package-manager installs this only
@@ -384,22 +400,30 @@ def self_update(console: Console | None = None, version: str | None = None) -> b
     """
     console = console or Console()
 
+    if not UPDATES_ENABLED:
+        console.print(
+            f"[#eab308]Self-update is disabled in this build.[/] {CLI_NAME} has no release "
+            "channel of its own yet, and upstream Strix binaries would replace it. "
+            "Reinstall from your Recon distribution instead."
+        )
+        return False
+
     if not is_binary_install():
         method = get_install_method()
         console.print(
-            f"[#eab308]This strix was installed via {method};[/] "
+            f"[#eab308]This {CLI_NAME} was installed via {method};[/] "
             f"upgrade it with: [#60a5fa]{get_upgrade_command(method)}[/]"
         )
         return False
 
     latest = version or _fetch_latest_version()
     if not latest:
-        console.print("[bold red]Could not determine the latest strix version.[/]")
+        console.print(f"[bold red]Could not determine the latest {CLI_NAME} version.[/]")
         return False
 
     current = get_version()
     if current != "unknown" and not _is_newer(latest, current):
-        console.print(f"[#22c55e]strix {current} is already the latest version.[/]")
+        console.print(f"[#22c55e]{CLI_NAME} {current} is already the latest version.[/]")
         return True
 
     target = _release_target()
@@ -415,12 +439,9 @@ def self_update(console: Console | None = None, version: str | None = None) -> b
     except Exception as e:  # noqa: BLE001
         logger.debug("self-update failed", exc_info=True)
         console.print(f"[bold red]Update failed:[/] {e}")
-        console.print(
-            "[dim]You can reinstall manually with:[/] "
-            "[#60a5fa]curl -sSL https://strix.ai/install | bash[/]"
-        )
+        console.print("[dim]You can reinstall from:[/] [#60a5fa]your Recon distribution[/]")
         return False
 
     _write_cache(latest_version=latest, checked_at=time.time())
-    console.print(f"[#22c55e]✓ Updated strix to {latest}[/]")
+    console.print(f"[#22c55e]✓ Updated {CLI_NAME} to {latest}[/]")
     return True

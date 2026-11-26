@@ -1,4 +1,5 @@
-"""Tests for the `strix auth` CLI: subcommand routing and provider naming."""
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
+"""Tests for the `recon auth` CLI: subcommand routing and provider naming."""
 
 from __future__ import annotations
 

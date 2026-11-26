@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 import hashlib
 import io
 import json
@@ -15,6 +16,7 @@ from strix.interface import update_check
 def _isolated_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(update_check, "_CACHE_PATH", tmp_path / "update-check.json")
     monkeypatch.setattr(update_check, "_background_thread", None)
+    monkeypatch.setattr(update_check, "UPDATES_ENABLED", True)
     monkeypatch.delenv("STRIX_NO_UPDATE_CHECK", raising=False)
     for key in ("CI", "GITHUB_ACTIONS", "GITLAB_CI", "JENKINS_URL", "BUILDKITE", "CIRCLECI"):
         monkeypatch.delenv(key, raising=False)
@@ -133,7 +135,7 @@ def test_write_cache_preserves_existing_fields() -> None:
 
 
 def test_get_upgrade_command_all_methods() -> None:
-    assert update_check.get_upgrade_command("binary") == "strix --update"
+    assert update_check.get_upgrade_command("binary") == "recon --update"
     assert update_check.get_upgrade_command("pipx") == "pipx upgrade strix-agent"
     assert update_check.get_upgrade_command("uv") == "uv tool upgrade strix-agent"
     assert update_check.get_upgrade_command("pip") == "pip install --upgrade strix-agent"
@@ -223,3 +225,44 @@ def test_self_update_uses_linux_arm64_release(monkeypatch: pytest.MonkeyPatch) -
 
     assert update_check.self_update(Console(file=io.StringIO()), version="1.1.0") is True
     assert requested_update == [("1.1.0", "linux-arm64")]
+
+
+class _NoNetwork:
+    def __call__(self, *_args: object, **_kwargs: object) -> None:
+        raise AssertionError("update code must not reach the network in Recon builds")
+
+
+def test_updates_are_off_in_recon_builds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.undo()
+    assert update_check.UPDATES_ENABLED is False
+
+
+def test_disabled_updater_makes_no_requests_and_keeps_the_binary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(update_check, "UPDATES_ENABLED", False)
+    monkeypatch.setattr(update_check.requests, "get", _NoNetwork())
+    monkeypatch.setattr(update_check, "is_binary_install", lambda: True)
+    exe = tmp_path / "recon"
+    exe.write_bytes(b"recon-binary")
+    monkeypatch.setattr(update_check.sys, "executable", str(exe))
+
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=False, width=200)
+    assert update_check.self_update(console, version="9.9.9") is False
+    assert "Self-update is disabled" in buffer.getvalue()
+    assert exe.read_bytes() == b"recon-binary"
+
+    update_check.start_background_check()
+    assert update_check._fetch_latest_version() is None
+    with pytest.raises(RuntimeError):
+        update_check._download_and_replace("9.9.9", "linux-x86_64", console)
+
+
+def test_disabled_updater_ignores_a_cached_newer_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(update_check, "UPDATES_ENABLED", False)
+    update_check._write_cache(latest_version="9.9.9", checked_at=time.time())
+    monkeypatch.setattr(update_check, "get_version", lambda: "1.0.0")
+    assert update_check.get_available_update() is None

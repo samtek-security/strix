@@ -52,16 +52,16 @@ from strix.core.hooks import (
     ReportUsageHooks,
     recomputed_budget_flags,
 )
-from strix.core.interception import (
-    APPROVAL_GATEWAY_KEY,
-    ASK_TIMEOUT_SECONDS_KEY,
-    INTERCEPTION_RULES_KEY,
-)
 from strix.core.inputs import (
     build_root_task,
     build_scan_targets,
     build_scope_context,
     make_model_settings,
+)
+from strix.core.interception import (
+    APPROVAL_GATEWAY_KEY,
+    ASK_TIMEOUT_SECONDS_KEY,
+    INTERCEPTION_RULES_KEY,
 )
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.sessions import open_agent_session
@@ -761,7 +761,7 @@ async def _run_scan(
     except RateLimitError as exc:
         logger.warning(
             "Scan %s stopped: persistent rate limit from the LLM provider (%s). "
-            "Resume with 'strix --resume %s' once the limit clears.",
+            "Resume with 'recon --resume %s' once the limit clears.",
             scan_id,
             exc,
             scan_id,
@@ -817,7 +817,11 @@ async def _run_scan(
                 try:
                     await asyncio.wait_for(
                         _run_coverage_on_exit(
-                            scan_id, run_dir, scan_config, coverage_context, report,
+                            scan_id,
+                            run_dir,
+                            scan_config,
+                            coverage_context,
+                            report,
                         ),
                         timeout=_COVERAGE_DEADLINE_S,
                     )

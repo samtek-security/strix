@@ -292,7 +292,7 @@ def _delete_upload(upload_id: str, *, token: str | None) -> None:
 def _source_cleanup_note(upload_id: str, cleanup_error: BaseException) -> str:
     return (
         f"Cleanup of source upload {upload_id} could not be confirmed: {cleanup_error}. "
-        f"Retry with `strix cloud uploads delete {upload_id}`."
+        f"Retry with `recon cloud uploads delete {upload_id}`."
     )
 
 
@@ -327,8 +327,8 @@ def _interrupted_source_upload_error(
     retry_note = _idempotency_retry_note(idempotency_key)
     message = (
         "Interrupted while starting the scan. The launch outcome is unknown, so source upload "
-        f"{upload_id} was retained. Check `strix cloud scans list` before retrying; if no scan "
-        f"was created, run `strix cloud uploads delete {upload_id}`.{retry_note}"
+        f"{upload_id} was retained. Check `recon cloud scans list` before retrying; if no scan "
+        f"was created, run `recon cloud uploads delete {upload_id}`.{retry_note}"
     )
     payload: dict[str, Any] = {
         "error": message,
@@ -350,8 +350,8 @@ def _retained_source_upload_error(
     retry_note = _idempotency_retry_note(idempotency_key)
     message = (
         f"{error} The scan launch outcome is unknown, so source upload {upload_id} was retained. "
-        "Check `strix cloud scans list` before retrying; if no scan was created, clean it up "
-        f"with `strix cloud uploads delete {upload_id}`. Linked uploads cannot be deleted."
+        "Check `recon cloud scans list` before retrying; if no scan was created, clean it up "
+        f"with `recon cloud uploads delete {upload_id}`. Linked uploads cannot be deleted."
         f"{retry_note}"
     )
     payload: dict[str, Any] = {}

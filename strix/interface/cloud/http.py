@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """HTTP client for the managed Strix platform API (app.strix.ai)."""
 
 from __future__ import annotations
@@ -34,8 +35,8 @@ EXIT_AUTH = 4
 EXIT_PAYMENT = 5
 
 
-TOPUP_COMMAND = "strix cloud billing topup --credits <count>"
-BALANCE_COMMAND = "strix cloud billing credits"
+TOPUP_COMMAND = "recon cloud billing topup --credits <count>"
+BALANCE_COMMAND = "recon cloud billing credits"
 
 
 class CloudError(Exception):
@@ -131,7 +132,7 @@ def api_token(override: str | None = None) -> str:
                 token = stored
     if not token or not token.strip():
         raise CloudError(
-            "not signed in. Run `strix cloud login`, or set STRIX_API_TOKEN.",
+            "not signed in. Run `recon cloud login`, or set STRIX_API_TOKEN.",
             exit_code=EXIT_AUTH,
         )
     return token.strip()
@@ -142,7 +143,7 @@ def _validate_stored_token_origin(record: dict[str, Any]) -> None:
     stored_url = record.get("app_url")
     if not isinstance(stored_url, str) or not stored_url:
         raise CloudError(
-            "the stored sign-in is not bound to a trusted platform. Run `strix cloud login` "
+            "the stored sign-in is not bound to a trusted platform. Run `recon cloud login` "
             "again before using it.",
             exit_code=EXIT_AUTH,
         )
@@ -151,13 +152,13 @@ def _validate_stored_token_origin(record: dict[str, Any]) -> None:
         active_origin = _origin(_parse_origin_url(app_url(), label="configured platform URL"))
     except CloudError as exc:
         raise CloudError(
-            "the stored sign-in has an invalid platform binding. Run `strix cloud login` again.",
+            "the stored sign-in has an invalid platform binding. Run `recon cloud login` again.",
             exit_code=EXIT_AUTH,
         ) from exc
     if stored_origin != active_origin:
         raise CloudError(
             "the stored sign-in belongs to a different platform. Refusing to send its token; "
-            "run `strix cloud login` for the configured platform or supply an explicit token.",
+            "run `recon cloud login` for the configured platform or supply an explicit token.",
             exit_code=EXIT_AUTH,
         )
 

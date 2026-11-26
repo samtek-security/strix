@@ -443,7 +443,7 @@ def main() -> None:
             Console().print(_ROOT_SUBCOMMAND_HELP.format(cli=CLI_NAME).strip(), markup=False)
             raise SystemExit(exc.code) from None
 
-    # `strix view [<run>]` is a viewer-only subcommand, dispatched before the
+    # `recon view [<run>]` is a viewer-only subcommand, dispatched before the
     # scan argument parser (which requires a target) and before any scan setup.
     if len(sys.argv) > 1 and sys.argv[1] == "view":
         from strix.interface.viewer.cli import run_view
@@ -451,7 +451,7 @@ def main() -> None:
         run_view(sys.argv[2:])
         return
 
-    # `strix auth …` manages model-subscription sign-in and exits; it needs no
+    # `recon auth …` manages model-subscription sign-in and exits; it needs no
     # target, Docker, or scan setup.
     if len(sys.argv) > 1 and sys.argv[1] == "auth":
         from strix.interface.auth_cli import run_auth
@@ -464,7 +464,7 @@ def main() -> None:
 
         sys.exit(run_completions(sys.argv[2:]))
 
-    # `strix cloud …` drives the managed platform (app.strix.ai) and exits;
+    # `recon cloud …` drives the managed platform (app.strix.ai) and exits;
     # it needs no target, Docker, or scan setup.
     if len(sys.argv) > 1 and sys.argv[1] == "cloud":
         from strix.interface.cloud import run_cloud
