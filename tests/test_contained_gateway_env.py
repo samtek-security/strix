@@ -47,7 +47,7 @@ def _gateway_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> dict
     client.volumes.create.return_value = volume
     client.containers.run.side_effect = _StopError
     monkeypatch.setattr(docker, "from_env", lambda: client)
-    monkeypatch.setattr(gateway_staging, "needs_staging", lambda: False)
+    monkeypatch.setattr(gateway_staging, "needs_staging", lambda *_a, **_k: False)
     monkeypatch.delenv("RECON_GATEWAY_CAPTURE", raising=False)
     # The backend refuses to start without the control-plane escalation reporter.
     token = tmp_path / "reporter-token"

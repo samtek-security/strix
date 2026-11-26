@@ -241,12 +241,13 @@ async def _contained_docker_backend(
 
     # Checked before any Docker resource exists (fail-closed).
     reporter_url, reporter_token_host = _reporter_settings()
-    stage_for_gateway = gateway_staging.needs_staging()  # validates RECON_GATEWAY_UID up front
-    if stage_for_gateway:
-        gateway_staging.require_known_uid()
 
     dc = docker.from_env()
     host_isolation.require_isolated_gateway_support(dc)
+    # Resolved before any engagement resource exists, so a bad UID leaves nothing behind.
+    gw_image = os.environ.get("RECON_EGRESS_GATEWAY_IMAGE", "recon/egress-gateway:latest")
+    gateway_uid = gateway_staging.resolve_uid(dc, gw_image)
+    stage_for_gateway = gateway_staging.needs_staging(gateway_uid)
     # The gateway reports trips to the control plane over its own network, so the host can allow
     # the API port from that subnet alone. Verified before any engagement resource exists.
     report_net_name, report_net_subnet = report_network.settings()
@@ -254,7 +255,6 @@ async def _contained_docker_backend(
     net_name = "recon-net-" + (scan_id or "default")
     ca_name = "recon-ca-" + (scan_id or "default")
     gw_name = _gateway_name(scan_id)
-    gw_image = os.environ.get("RECON_EGRESS_GATEWAY_IMAGE", "recon/egress-gateway:latest")
     boundary_labels = {
         "recon.sandbox": "true",
         "recon.scan_id": scan_id or "",
@@ -400,6 +400,7 @@ async def _contained_docker_backend(
                 boundary_labels=boundary_labels,
                 spec_path=_gsp,
                 token_path=reporter_token_host,
+                uid=gateway_uid,
             )
         except BaseException:
             _cleanup_boundary()

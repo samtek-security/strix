@@ -61,21 +61,32 @@ def gateway_uid() -> int:
     return uid
 
 
-def require_known_uid() -> None:
-    """A custom gateway image may run as any UID, so staging needs the UID stated outright."""
+def resolve_uid(dc: Any, image: str) -> int:
+    """The UID the gateway image runs as.
+
+    An explicit ``RECON_GATEWAY_UID`` wins. With the stock image name (no override) the default
+    applies. A custom image is inspected for a numeric ``USER``; anything else must be stated.
+    """
     if (
-        os.environ.get("RECON_EGRESS_GATEWAY_IMAGE", "").strip()
-        and not os.environ.get("RECON_GATEWAY_UID", "").strip()
+        os.environ.get("RECON_GATEWAY_UID", "").strip()
+        or not os.environ.get("RECON_EGRESS_GATEWAY_IMAGE", "").strip()
     ):
-        raise ValueError(
-            "RECON_EGRESS_GATEWAY_IMAGE is set and the worker is not the gateway's user; set "
-            "RECON_GATEWAY_UID to the UID that image runs as so the staged files are readable"
-        )
+        return gateway_uid()
+    user = ""
+    with contextlib.suppress(Exception):
+        user = str(dc.images.get(image).attrs.get("Config", {}).get("User") or "")
+    first = user.split(":", 1)[0]
+    if first.isdigit() and int(first) > 0:
+        return int(first)
+    raise ValueError(
+        f"gateway image {image!r} has no numeric non-root USER (found {user!r}); set "
+        "RECON_GATEWAY_UID to the UID it runs as so the staged files are readable"
+    )
 
 
-def needs_staging() -> bool:
+def needs_staging(uid: int | None = None) -> bool:
     """True when the worker's files cannot be read by the gateway's user in place."""
-    return os.geteuid() != gateway_uid()
+    return os.geteuid() != (uid if uid is not None else gateway_uid())
 
 
 def _ttl_seconds() -> int:
@@ -139,9 +150,10 @@ def stage(
     boundary_labels: dict[str, str],
     spec_path: str | Path,
     token_path: str | Path,
+    uid: int | None = None,
 ) -> Any:
     """Create a fresh per-launch volume holding both files for the gateway's UID."""
-    uid = gateway_uid()
+    uid = uid if uid is not None else gateway_uid()
     run_id = uuid.uuid4().hex[:12]
     name = f"recon-gwstage-{boundary_labels.get('recon.scan_id') or 'default'}-{run_id}"
     volume = None

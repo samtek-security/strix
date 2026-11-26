@@ -16,7 +16,7 @@ from strix.runtime import backends, docker_client, gateway_staging, host_isolati
 
 @pytest.fixture(autouse=True)
 def _mount_in_place(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(gateway_staging, "needs_staging", lambda: False)
+    monkeypatch.setattr(gateway_staging, "needs_staging", lambda *_a, **_k: False)
 
 
 pytestmark = pytest.mark.real_report_network

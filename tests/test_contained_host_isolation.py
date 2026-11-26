@@ -19,7 +19,7 @@ from strix.runtime import backends, gateway_staging, host_isolation
 
 @pytest.fixture(autouse=True)
 def _mount_in_place(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(gateway_staging, "needs_staging", lambda: False)
+    monkeypatch.setattr(gateway_staging, "needs_staging", lambda *_a, **_k: False)
 
 
 SCAN = "scan-1"

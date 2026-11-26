@@ -75,7 +75,7 @@ def fake_docker(monkeypatch: pytest.MonkeyPatch) -> _FakeDocker:
     # Stop right after the gateway container is created; the agent is out of scope here.
     monkeypatch.setattr(backends, "_wait_gateway_ready", lambda *_a, **_k: False)
     # These tests cover the in-place mount; staging has its own file.
-    monkeypatch.setattr(gateway_staging, "needs_staging", lambda: False)
+    monkeypatch.setattr(gateway_staging, "needs_staging", lambda *_a, **_k: False)
     for name in (
         "RECON_TARGET_HEALTH_REPORTER_URL",
         "RECON_TARGET_HEALTH_REPORTER_TOKEN_FILE",
