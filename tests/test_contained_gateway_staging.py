@@ -219,7 +219,10 @@ def test_stale_staging_volumes_of_this_engagement_are_swept_on_the_next_launch(
 ) -> None:
     leftover = _Volume("recon-gwstage-s1-dead", {"recon.scan_id": "s1"})
     fake_docker.stale = [leftover]
-    dead_helper = SimpleNamespace(remove=lambda **_kw: setattr(leftover, "helper_gone", True))
+    dead_helper = SimpleNamespace(
+        attrs={"Config": {"Labels": {"recon.scan_id": "s1"}}},
+        remove=lambda **_kw: setattr(leftover, "helper_gone", True),
+    )
     fake_docker.stale_helpers = [dead_helper]
     with pytest.raises(RuntimeError, match="not ready"):
         _start(files[0])
@@ -227,10 +230,7 @@ def test_stale_staging_volumes_of_this_engagement_are_swept_on_the_next_launch(
     assert leftover.removed
     assert getattr(leftover, "helper_gone", False)
     (helper_filters,) = fake_docker.container_filters
-    assert sorted(helper_filters["label"]) == [
-        f"recon.role={gateway_staging.HELPER_ROLE}",
-        "recon.scan_id=s1",
-    ]
+    assert helper_filters["label"] == [f"recon.role={gateway_staging.HELPER_ROLE}"]
     (filters,) = fake_docker.list_filters
     assert filters["label"] == [f"recon.role={gateway_staging.STAGE_ROLE}"]
 
@@ -386,3 +386,33 @@ def test_uid_1000_worker_with_the_stock_10001_gateway_stages_for_10001(
     (gateway,) = fake_docker.gateway_calls
     assert files[0] not in gateway["volumes"]
     assert gateway["environment"]["RECON_ENGAGEMENT_SPEC"].startswith(gateway_staging.STAGE_MOUNT)
+
+
+def test_sweep_removes_expired_helpers_of_other_engagements_but_not_live_ones(
+    fake_docker: _FakeDocker,
+) -> None:
+    now = time.time()
+    gone: list[str] = []
+
+    def helper(name: str, deadline: float) -> SimpleNamespace:
+        labels = {"recon.scan_id": "other", "recon.ttl_deadline": str(int(deadline))}
+        return SimpleNamespace(
+            name=name,
+            attrs={"Config": {"Labels": labels}},
+            remove=lambda **_kw: gone.append(name),
+        )
+
+    fake_docker.stale_helpers = [helper("old", now - 5), helper("live", now + 600)]
+    gateway_staging.sweep_stale(fake_docker, {"recon.scan_id": "s1"})
+    assert gone == ["old"]
+
+
+def test_staging_helper_carries_ttl_and_run_labels(
+    fake_docker: _FakeDocker, files: tuple[str, str]
+) -> None:
+    with pytest.raises(RuntimeError, match="not ready"):
+        _start(files[0])
+    labels = fake_docker.helper_calls[0]["labels"]
+    assert labels["recon.role"] == gateway_staging.HELPER_ROLE
+    assert int(labels["recon.ttl_deadline"]) > int(labels["recon.created_at"])
+    assert labels["recon.run_id"]

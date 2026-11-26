@@ -85,35 +85,39 @@ def volume_labels(boundary_labels: dict[str, str], run_id: str) -> dict[str, str
     }
 
 
-def sweep_stale(dc: Any, boundary_labels: dict[str, str]) -> None:
-    """Remove staging volumes a crashed worker left for this engagement.
+def _expired(labels: dict[str, str], now: float) -> bool:
+    try:
+        return float(labels.get("recon.ttl_deadline", "")) < now
+    except ValueError:
+        return True
 
-    Matches the exact ``recon.scan_id`` and role labels, never a name prefix, so no other
-    engagement's volume is touched.
+
+def sweep_stale(dc: Any, boundary_labels: dict[str, str]) -> None:
+    """Remove staging helpers and volumes a crashed worker left behind.
+
+    This engagement's leftovers always go. Another engagement's go only once past their TTL, so a
+    live launch is never touched. Helpers are removed first: a stopped helper still holds its
+    volume. Matching is on exact labels, never a name prefix.
     """
     scan_id = boundary_labels.get("recon.scan_id", "")
-    if not scan_id:
-        return
-    # Helpers first: a stopped helper left by a crash still holds its volume.
-    helper_filters = {"label": [f"recon.role={HELPER_ROLE}", f"recon.scan_id={scan_id}"]}
-    for helper in dc.containers.list(all=True, filters=helper_filters):
-        with contextlib.suppress(Exception):
-            helper.remove(force=True)
-    filters = {"label": [f"recon.role={STAGE_ROLE}"]}
     now = time.time()
-    for volume in dc.volumes.list(filters=filters):
-        labels = (getattr(volume, "attrs", None) or {}).get("Labels") or {}
-        ours = labels.get("recon.scan_id") == scan_id
-        try:
-            expired = float(labels.get("recon.ttl_deadline", "")) < now
-        except ValueError:
-            expired = True
-        # This engagement's leftovers always go; any other engagement's only once past its TTL.
-        if not (ours or expired):
-            continue
-        logger.warning("Removing stale gateway staging volume %s", getattr(volume, "name", "?"))
-        with contextlib.suppress(Exception):
-            volume.remove(force=True)
+    for kind, listing, role in (
+        ("helper", lambda f: dc.containers.list(all=True, filters=f), HELPER_ROLE),
+        ("volume", lambda f: dc.volumes.list(filters=f), STAGE_ROLE),
+    ):
+        for item in listing({"label": [f"recon.role={role}"]}):
+            labels = _labels(item)
+            if not ((scan_id and labels.get("recon.scan_id") == scan_id) or _expired(labels, now)):
+                continue
+            logger.warning("Removing stale gateway staging %s %s", kind, getattr(item, "name", "?"))
+            with contextlib.suppress(Exception):
+                item.remove(force=True)
+
+
+def _labels(item: Any) -> dict[str, str]:
+    attrs = getattr(item, "attrs", None) or {}
+    labels = attrs.get("Labels") or (attrs.get("Config") or {}).get("Labels") or {}
+    return dict(labels)
 
 
 def stage(
@@ -143,7 +147,7 @@ def stage(
             security_opt=["no-new-privileges"],
             read_only=True,
             detach=True,
-            labels={**boundary_labels, "recon.role": HELPER_ROLE},
+            labels={**volume_labels(boundary_labels, run_id), "recon.role": HELPER_ROLE},
             volumes={
                 str(spec_path): {"bind": f"/src/{SPEC_NAME}", "mode": "ro"},
                 str(token_path): {"bind": f"/src/{TOKEN_NAME}", "mode": "ro"},
