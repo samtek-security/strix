@@ -41,8 +41,8 @@ from strix.core.interception import (
     ask_timeout_from_context,
     call_input,
     evaluate,
+    evaluated_for,
     gateway_from_context,
-    payload_field_of,
     rules_from_context,
 )
 from strix.core.sessions import (
@@ -280,31 +280,24 @@ _ASK_POLL_INTERVAL_S = 5.0
 _ASK_INPUT_SUMMARY_MAX_CHARS = 4000
 
 
-def _payload_field(item: Any) -> str | None:
-    """The payload field of the converted custom tool this interruption is for, if it is one.
-
-    Read from the tool object the paused agent actually holds, so a same-named ordinary
-    function tool (or another scan's tool) is never unwrapped by name.
-    """
-    agent = getattr(item, "agent", None)
-    for tool in getattr(agent, "tools", None) or ():
-        if getattr(tool, "name", None) == item.tool_name:
-            return payload_field_of(tool)
-    return None
-
-
-def _interruption_input(item: Any) -> tuple[str, bool]:
+def _interruption_input(item: Any, context: Any = None) -> tuple[str, bool]:
     """The paused call's input text and whether it is opaque (to match verbatim)."""
     raw = item.raw_item
 
     def field(name: str) -> Any:
         return raw.get(name) if isinstance(raw, dict) else getattr(raw, name, None)
 
+    # The text the rules matched when the call paused is the authority: the tool may
+    # normalise or unwrap its arguments before matching, and this item only holds what
+    # the model sent.
+    evaluated = evaluated_for(context, field("call_id") or field("id"))
+    if evaluated is not None:
+        return evaluated
     # A function call carries ``arguments``; a native custom tool call carries a
     # free-text ``input``.
     arguments = field("arguments")
     if isinstance(arguments, str):
-        return call_input(item.tool_name or "", arguments, payload_field=_payload_field(item))
+        return call_input(item.tool_name or "", arguments)
     payload = field("input")
     if isinstance(payload, str):
         return payload, True
@@ -471,7 +464,7 @@ async def _resolve_interruptions(
     outcomes: dict[str, Literal["approved", "denied"]] = {}
     for item in stream.interruptions:
         tool_name = item.tool_name or ""
-        input_text, verbatim = _interruption_input(item)
+        input_text, verbatim = _interruption_input(item, context)
         decision = evaluate(rules, tool_name, input_text, verbatim=verbatim)
         if decision is None or decision.action != "ask" or gateway is None:
             state.reject(item, rejection_message=_unexplained_pause_rejection_message(tool_name))

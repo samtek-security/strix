@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import inspect
 import json
@@ -323,7 +324,10 @@ def _interception_denied_message(decision: interception.InterceptionDecision) ->
 
 
 def _with_function_tool_interception(
-    tool: FunctionTool, *, payload_field: str | None = None
+    tool: FunctionTool,
+    *,
+    payload_field: str | None = None,
+    normalize: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> FunctionTool:
     """Gate a ``FunctionTool`` on the run's configured allow/deny/ask rules.
 
@@ -352,20 +356,34 @@ def _with_function_tool_interception(
     invoke_tool = tool.on_invoke_tool
     own_needs_approval = tool.needs_approval
 
+    def rule_text(arguments: Any) -> tuple[str, bool]:
+        # Match what the tool will run, not what the model typed: a default the tool
+        # fills in or an escape it decodes must not let a call slip past a rule.
+        if normalize is not None:
+            if isinstance(arguments, str):
+                with contextlib.suppress(ValueError):
+                    arguments = json.loads(arguments)
+            if isinstance(arguments, dict):
+                arguments = normalize(dict(arguments))
+        return interception.call_input(tool.name, arguments, payload_field=payload_field)
+
     async def invoke(ctx: Any, raw_input: str) -> Any:
         if own_needs_approval is False:
-            text, verbatim = interception.call_input(
-                tool.name, raw_input, payload_field=payload_field
-            )
+            text, verbatim = rule_text(raw_input)
             decision = _interception_decision(ctx, tool.name, text, verbatim=verbatim)
             if decision is not None and decision.action == "deny":
                 return _interception_denied_message(decision)
         return await invoke_tool(ctx, raw_input)
 
-    async def rule_needs_approval(ctx: Any, args: dict[str, Any], call_id: str) -> bool:  # noqa: ARG001
-        text, verbatim = interception.call_input(tool.name, args, payload_field=payload_field)
+    async def rule_needs_approval(ctx: Any, args: dict[str, Any], call_id: str) -> bool:
+        text, verbatim = rule_text(args)
         decision = _interception_decision(ctx, tool.name, text, verbatim=verbatim)
-        return decision is not None and decision.action == "ask"
+        if decision is not None and decision.action == "ask":
+            interception.remember_evaluated(
+                getattr(ctx, "context", None), call_id, text, verbatim=verbatim
+            )
+            return True
+        return False
 
     if own_needs_approval is False:
         combined_needs_approval = rule_needs_approval
@@ -456,7 +474,7 @@ def _custom_tool_as_function_tool(tool: CustomTool) -> FunctionTool:
         function_needs_approval = needs_approval
 
     payload_field = _custom_tool_input_field(tool)
-    wrapped = _with_function_tool_interception(
+    return _with_function_tool_interception(
         payload_field=payload_field,
         tool=FunctionTool(
             name=tool.name,
@@ -470,8 +488,6 @@ def _custom_tool_as_function_tool(tool: CustomTool) -> FunctionTool:
             needs_approval=function_needs_approval,
         ),
     )
-    setattr(wrapped, interception.PAYLOAD_FIELD_ATTR, payload_field)
-    return wrapped
 
 
 def _bound_custom_tool(tool: CustomTool) -> CustomTool:
@@ -670,6 +686,23 @@ def _wrap_write_stdin(tool: FunctionTool) -> FunctionTool:
     return tool
 
 
+def _normalize_exec_for_rules(args: dict[str, Any]) -> dict[str, Any]:
+    args.setdefault("shell", "bash")
+    return args
+
+
+def _normalize_stdin_for_rules(args: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(args.get("chars"), str):
+        args["chars"] = _decode_chars_escape(args["chars"])
+    return args
+
+
+_RULE_NORMALIZERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    "exec_command": _normalize_exec_for_rules,
+    "write_stdin": _normalize_stdin_for_rules,
+}
+
+
 def _configure_shell_tools(
     toolset: Any, *, chat_completions: bool, strict_schemas: bool = True
 ) -> None:
@@ -683,7 +716,11 @@ def _configure_shell_tools(
             wrapped = _wrap_write_stdin(wrapped)
         if chat_completions:
             wrapped = _function_tool_with_error_result(wrapped)
-        setattr(toolset, name, _with_function_tool_interception(wrapped))
+        setattr(
+            toolset,
+            name,
+            _with_function_tool_interception(wrapped, normalize=_RULE_NORMALIZERS.get(tool.name)),
+        )
 
 
 def _make_shell_configurator(*, chat_completions: bool, strict_schemas: bool) -> Any:

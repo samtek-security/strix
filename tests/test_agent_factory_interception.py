@@ -11,6 +11,7 @@ import pytest
 from agents.tool import CustomTool, FunctionTool
 
 from strix.agents import factory
+from strix.core import interception
 from strix.core.interception import INTERCEPTION_RULES_KEY, InterceptionRule
 
 
@@ -188,3 +189,38 @@ async def test_converted_tool_with_an_extra_argument_is_matched_on_the_payload()
     args = json.dumps({"patch": payload, "note": "x"})
     denied = await wrapped.on_invoke_tool(_ctx([rule]), args)
     assert cast("str", denied).startswith("Denied")
+
+
+def _input_rule(pattern: str, action: str) -> InterceptionRule:
+    return InterceptionRule(id=f"{action}-in", field="tool_input", pattern=pattern, action=action)
+
+
+@pytest.mark.asyncio
+async def test_exec_command_rules_see_the_default_shell_the_tool_will_use() -> None:
+    wrapped = factory._with_function_tool_interception(
+        _tool("exec_command"), normalize=factory._RULE_NORMALIZERS["exec_command"]
+    )
+    # The model omitted `shell`; the tool runs it under bash.
+    denied = await wrapped.on_invoke_tool(
+        _ctx([_input_rule('"shell": "bash"', "deny")]), json.dumps({"cmd": "ls"})
+    )
+    assert cast("str", denied).startswith("Denied")
+    needs = wrapped.needs_approval
+    assert callable(needs)
+    ctx = _ctx([_input_rule('"shell": "bash"', "ask")])
+    assert await needs(ctx, {"cmd": "ls"}, "call-9") is True
+    # The pause records the text the rules matched, for the resume path.
+    recorded = interception.evaluated_for(ctx.context, "call-9")
+    assert recorded is not None and '"shell": "bash"' in recorded[0]
+
+
+@pytest.mark.asyncio
+async def test_write_stdin_rules_see_decoded_escapes() -> None:
+    wrapped = factory._with_function_tool_interception(
+        _tool("write_stdin"), normalize=factory._RULE_NORMALIZERS["write_stdin"]
+    )
+    needs = wrapped.needs_approval
+    assert callable(needs)
+    # `\\x03` typed as an escape reaches the tool as the control character.
+    rule = _input_rule("\\u0003", "ask")
+    assert await needs(_ctx([rule]), {"chars": "\\x03"}, "call-1") is True

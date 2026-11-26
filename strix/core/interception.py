@@ -100,13 +100,26 @@ def canonical_tool_input(value: object) -> str:
 # carries that field's name on itself, so the identity travels with the tool object
 # and never with a process-wide name table that another scan's same-named tool could
 # share.
-PAYLOAD_FIELD_ATTR = "_strix_payload_field"
+EVALUATED_CALLS_KEY = "strix_interception_evaluated_calls"
 
 
-def payload_field_of(tool: object) -> str | None:
-    """The payload field a converted custom tool carries, or None for any other tool."""
-    field = getattr(tool, PAYLOAD_FIELD_ATTR, None)
-    return field if isinstance(field, str) else None
+def remember_evaluated(context: object, call_id: str, text: str, *, verbatim: bool) -> None:
+    """Record the exact text a rule matched for a call that is about to pause.
+
+    The pause is resolved later from the SDK's interruption item, which holds the model's
+    raw arguments and an agent that may not be the one that ran the tool. Reusing the
+    text the rules saw keeps the approval, its dedup key and its summary on what was
+    evaluated, however the tool normalised or unwrapped its arguments first.
+    """
+    if isinstance(context, dict) and call_id:
+        context.setdefault(EVALUATED_CALLS_KEY, {})[call_id] = (text, verbatim)
+
+
+def evaluated_for(context: object, call_id: object) -> tuple[str, bool] | None:
+    if not isinstance(context, dict) or not isinstance(call_id, str) or not call_id:
+        return None
+    found = (context.get(EVALUATED_CALLS_KEY) or {}).get(call_id)
+    return found if isinstance(found, tuple) else None
 
 
 def call_input(
