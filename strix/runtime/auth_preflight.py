@@ -678,7 +678,7 @@ async def preflight_role(
             if await _write_state_file(session, state_path, external_state):
                 load_ok, _ = await _run(session, "recon-browser", "--session-name", session_name,
                                         "state", "load", state_path)
-                if load_ok:
+                if load_ok and await _read_state(session, session_name, state_path):
                     # "state load" restores cookies/local-storage but leaves the browser wherever
                     # it already was (a fresh session starts blank) - navigate to the target
                     # BEFORE verifying, or success_condition's url_contains/element_present would
@@ -727,10 +727,12 @@ async def preflight_role(
                 stale = age_h > ttl_h
             except (OSError, ValueError):
                 stale = True
-            if not stale:
+            if not stale and can_prove_resume:
                 load_ok, _ = await _run(session, "recon-browser", "--session-name", session_name,
                                         "state", "load", state_path)
-                if load_ok:
+                # An empty or expired jar must not be navigated with: opening even a public page
+                # can set an anonymous cookie that would then look like a session.
+                if load_ok and await _read_state(session, session_name, state_path):
                     # Same reason as the external_state branch above: navigate before verifying.
                     await _run(session, "recon-browser", "--session-name", session_name,
                               "open", target_url)
@@ -950,6 +952,7 @@ async def run_auth_preflight(
     await _run(session, "mkdir", "-p", _STATE_DIR)
     results = []
     chosen, members = _plan_flows(auth_flows)
+    done_roles: set[str] = set()
     for flow in auth_flows:
         if not isinstance(flow, dict):
             continue
@@ -959,6 +962,9 @@ async def run_auth_preflight(
             results.append(refusal)
         if skip or refusal is not None:
             continue
+        if role in done_roles:  # the SAME flow object listed twice must not log in twice
+            continue
+        done_roles.add(role)
         try:
             # Keep the original call shape unless a state exists: a wrapper written for the
             # earlier keyword-only signature must keep working for every ordinary call.
