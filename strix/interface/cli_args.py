@@ -126,9 +126,8 @@ Strix Cloud:
     parser.add_argument(
         "--update",
         action="store_true",
-        help=f"Update {CLI_NAME} to the latest version and exit. Self-updates the "
-        "standalone binary install; for pip/pipx/uv installs, prints the "
-        "matching upgrade command instead.",
+        help="Self-update is disabled in Recon builds (exits 1 with a message). "
+        "Reinstall from your Recon distribution to upgrade.",
     )
 
     parser.add_argument(

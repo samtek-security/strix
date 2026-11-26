@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from strix.interface import update_check
+from strix.interface import cli_args, update_check
 
 
 @pytest.fixture(autouse=True)
@@ -266,3 +266,15 @@ def test_disabled_updater_ignores_a_cached_newer_version(
     update_check._write_cache(latest_version="9.9.9", checked_at=time.time())
     monkeypatch.setattr(update_check, "get_version", lambda: "1.0.0")
     assert update_check.get_available_update() is None
+
+
+def test_update_flag_exits_nonzero_with_a_message(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(update_check, "UPDATES_ENABLED", False)
+    monkeypatch.setattr(cli_args, "self_update", update_check.self_update)
+    monkeypatch.setattr("sys.argv", ["recon", "--update"])
+    with pytest.raises(SystemExit) as raised:
+        cli_args.parse_arguments()
+    assert raised.value.code == 1
+    assert "Self-update is disabled" in capsys.readouterr().out
