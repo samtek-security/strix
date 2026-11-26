@@ -284,7 +284,7 @@ async def _assess_direct_report_proof(
     the exploitation queue calls: one verified id is enough here, anything else files as a lead
     with the reason recorded. Syntactically invalid ids are rejected by the caller first.
     """
-    from strix.tools.exploitation.tool import assess_proof
+    from strix.tools.exploitation.tool import NO_EXCHANGE_SOURCE_REASON, assess_proof
 
     cited, _ = _normalize_http_exchange_ids(raw_ids)
     ids, status, reason, source = await assess_proof(ctx, list(cited or []), require_all=False)
@@ -293,6 +293,10 @@ async def _assess_direct_report_proof(
         fields["proof_status_reason"] = reason
     if source:
         fields["proof_source"] = source
+    if reason == NO_EXCHANGE_SOURCE_REASON:
+        # Nothing could check the ids, which is not the same as the ids being wrong. Keep them
+        # on the lead: they are what tells a dynamic claim from a static finding downstream.
+        return cited or None, fields, None
     warning = _HTTP_EXCHANGE_UNVERIFIED_WARNING if status == "lead" and ids else None
     return ids, fields, warning
 
