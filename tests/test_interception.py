@@ -144,12 +144,17 @@ def test_regex_rules_use_the_ascii_classes_the_control_plane_validated() -> None
     assert evaluate([rule], "t", "é", verbatim=True) is None
 
 
-def test_a_same_named_function_tool_is_not_mistaken_for_a_converted_custom_tool() -> None:
-    interception.register_custom_payload_field("foo", "input")
-    try:
-        wrapper = interception.call_input("foo", {"input": "safe"})
-        assert wrapper == ("safe", True)  # the converted wrapper's exact shape: payload, verbatim
-        other = interception.call_input("foo", {"input": "safe", "path": "/etc"})
-        assert other[1] is False and "/etc" in other[0]  # matched in full, canonical
-    finally:
-        interception._CUSTOM_PAYLOAD_FIELDS.pop("foo", None)
+def test_a_converted_tool_unwraps_its_payload_even_with_extra_arguments() -> None:
+    """The converted tool executes the payload field and ignores other arguments, so
+    that field is what a rule must see, whatever else the model sent."""
+    args = {"patch": "*** Begin Patch", "note": "extra"}
+    assert interception.call_input("apply_patch", args, payload_field="patch") == (
+        "*** Begin Patch",
+        True,
+    )
+
+
+def test_a_tool_that_is_not_converted_is_matched_in_full() -> None:
+    args = {"input": "safe", "path": "/etc"}
+    text, verbatim = interception.call_input("unregistered_tool", args)
+    assert verbatim is False and "/etc" in text

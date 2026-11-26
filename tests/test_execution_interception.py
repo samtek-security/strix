@@ -459,9 +459,8 @@ async def test_resume_unwraps_a_converted_custom_tool_payload() -> None:
         id="ask-etc", field="tool_input", pattern=r"\A\*\*\* Begin Patch", action="ask", regex=True
     )
     context = {INTERCEPTION_RULES_KEY: [rule], APPROVAL_GATEWAY_KEY: gateway}
-    item = _FakeApprovalItem(
-        tool_name="apply_patch", raw_item={"arguments": json.dumps({"patch": payload})}
-    )
+    arguments = json.dumps({"patch": payload, "note": "extra"})
+    item = _FakeApprovalItem(tool_name="apply_patch", raw_item={"arguments": arguments})
     state = await _resolve_interruptions(
         _FakeInterruptedStream(interruptions=[item]), context=context, report=None
     )

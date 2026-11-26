@@ -171,3 +171,20 @@ async def test_converted_custom_tool_rules_match_the_payload_not_the_json_wrappe
     assert await needs(_ctx([ask]), {"patch": payload}, "call-1") is True
     other = {"patch": "*** Begin Patch\n*** Add File: /tmp/x"}
     assert await needs(_ctx([ask]), other, "c2") is False
+
+
+@pytest.mark.asyncio
+async def test_converted_tool_with_an_extra_argument_is_matched_on_the_payload() -> None:
+    wrapped = factory._custom_tool_as_function_tool(_custom_tool("apply_patch"))
+    payload = "*** Begin Patch\n*** Update File: /etc/hosts"
+    rule = InterceptionRule(
+        id="deny-etc",
+        field="tool_input",
+        pattern=r"\A\*\*\* Begin Patch",
+        action="deny",
+        regex=True,
+    )
+    # The converted tool executes `patch` and ignores `note`: the rule must see `patch`.
+    args = json.dumps({"patch": payload, "note": "x"})
+    denied = await wrapped.on_invoke_tool(_ctx([rule]), args)
+    assert cast("str", denied).startswith("Denied")

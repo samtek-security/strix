@@ -105,14 +105,20 @@ def register_custom_payload_field(tool_name: str, field: str) -> None:
     _CUSTOM_PAYLOAD_FIELDS[tool_name] = field
 
 
-def call_input(tool_name: str, arguments: object) -> tuple[str, bool]:
+def call_input(
+    tool_name: str, arguments: object, *, payload_field: str | None = None
+) -> tuple[str, bool]:
     """The text a rule should match for one call, and whether it is opaque.
 
     ``arguments`` is a function call's JSON string or parsed dict. For a custom
-    tool converted to a function tool it is the payload field's text, verbatim;
-    for every other function tool it is the canonical JSON arguments.
+    tool converted to a function tool it is the payload field's text, verbatim,
+    which is exactly what the converted tool executes (it ignores any other
+    argument); for every other function tool it is the canonical JSON arguments.
+
+    ``payload_field`` is the converted tool's own identity, passed by its wrapper.
+    The resume path has only the tool's name and falls back to the registry.
     """
-    field = _CUSTOM_PAYLOAD_FIELDS.get(tool_name)
+    field = payload_field if payload_field is not None else _CUSTOM_PAYLOAD_FIELDS.get(tool_name)
     if field is not None:
         parsed = arguments
         if isinstance(arguments, str):
@@ -120,10 +126,7 @@ def call_input(tool_name: str, arguments: object) -> tuple[str, bool]:
                 parsed = json.loads(arguments)
             except ValueError:
                 parsed = None
-        # Only the converted wrapper's exact shape, one field: a different function
-        # tool that happens to share the name (the registry is process-wide) has other
-        # arguments, and those must still be matched in full.
-        if isinstance(parsed, dict) and set(parsed) == {field} and isinstance(parsed[field], str):
+        if isinstance(parsed, dict) and isinstance(parsed.get(field), str):
             return parsed[field], True
     return canonical_tool_input(arguments), False
 

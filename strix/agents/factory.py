@@ -322,7 +322,9 @@ def _interception_denied_message(decision: interception.InterceptionDecision) ->
     return message
 
 
-def _with_function_tool_interception(tool: FunctionTool) -> FunctionTool:
+def _with_function_tool_interception(
+    tool: FunctionTool, *, payload_field: str | None = None
+) -> FunctionTool:
     """Gate a ``FunctionTool`` on the run's configured allow/deny/ask rules.
 
     A rule evaluates against the tool's name and its JSON-encoded arguments,
@@ -352,14 +354,16 @@ def _with_function_tool_interception(tool: FunctionTool) -> FunctionTool:
 
     async def invoke(ctx: Any, raw_input: str) -> Any:
         if own_needs_approval is False:
-            text, verbatim = interception.call_input(tool.name, raw_input)
+            text, verbatim = interception.call_input(
+                tool.name, raw_input, payload_field=payload_field
+            )
             decision = _interception_decision(ctx, tool.name, text, verbatim=verbatim)
             if decision is not None and decision.action == "deny":
                 return _interception_denied_message(decision)
         return await invoke_tool(ctx, raw_input)
 
     async def rule_needs_approval(ctx: Any, args: dict[str, Any], call_id: str) -> bool:  # noqa: ARG001
-        text, verbatim = interception.call_input(tool.name, args)
+        text, verbatim = interception.call_input(tool.name, args, payload_field=payload_field)
         decision = _interception_decision(ctx, tool.name, text, verbatim=verbatim)
         return decision is not None and decision.action == "ask"
 
@@ -451,9 +455,11 @@ def _custom_tool_as_function_tool(tool: CustomTool) -> FunctionTool:
     else:
         function_needs_approval = needs_approval
 
-    interception.register_custom_payload_field(tool.name, _custom_tool_input_field(tool))
+    payload_field = _custom_tool_input_field(tool)
+    interception.register_custom_payload_field(tool.name, payload_field)
     return _with_function_tool_interception(
-        FunctionTool(
+        payload_field=payload_field,
+        tool=FunctionTool(
             name=tool.name,
             description=(
                 f"{tool.description}\n\n"
