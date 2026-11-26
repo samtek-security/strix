@@ -484,7 +484,8 @@ async def _verify(session: Any, flow: dict, session_name: str, state_path: str, 
     # after the navigations above, so both the gate and the state handed back to the caller for
     # cross-run persistence reflect the FINAL session - not a snapshot from before a probe that
     # could have rotated a cookie or seeded localStorage.
-    save_ok, _ = await _run(session, "recon-browser", "--session-name", session_name, "state", "save", state_path)
+    save_ok, _ = await _run(
+        session, "recon-browser", "--session-name", session_name, "state", "save", state_path)
     cat_ok, cat = await _run(session, "cat", state_path)
     cookies_ok = False
     state_text = ""
@@ -494,7 +495,8 @@ async def _verify(session: Any, flow: dict, session_name: str, state_path: str, 
         # a bogus file must not count as a session).
         try:
             data = json.loads(cat)
-            cookies_ok = isinstance(data, dict) and (bool(data.get("cookies")) or bool(data.get("origins")))
+            cookies_ok = isinstance(data, dict) and (
+                bool(data.get("cookies")) or bool(data.get("origins")))
             if cookies_ok:
                 state_text = cat
         except (json.JSONDecodeError, ValueError):
@@ -867,6 +869,61 @@ async def reverify_role(session: Any, flow: dict, *, target_url: str) -> dict:
     return result
 
 
+def _plan_flows(auth_flows: list) -> tuple[dict[str, dict], dict[str, list[str]]]:
+    """Decide, before any login, which flow runs for each role and which roles collide.
+
+    ``chosen``: ONE flow per exact role name - the first that CAN log in (has a login_url), else
+    the first. A header/api-key flow listed ahead of the browser flow for the same role must not
+    cause the usable browser flow to be skipped.
+    ``members``: the distinct role names per session slug. Roles whose names slug alike also
+    share a brokered credential env var and a browser session, so logging the first in would
+    already leave it racing the others' credential; every colliding role is refused up front."""
+    chosen: dict[str, dict] = {}
+    members: dict[str, list[str]] = {}
+    for flow in auth_flows:
+        if not isinstance(flow, dict) or not isinstance(_role_of(flow), str):
+            continue
+        name = _role_of(flow)
+        current = chosen.get(name)
+        if current is None or (not _text(current, "login_url") and _text(flow, "login_url")):
+            chosen[name] = flow
+        names = members.setdefault(_slug(name), [])
+        if name not in names:  # the same role name twice is one identity, not a collision
+            names.append(name)
+    return chosen, members
+
+
+def _pre_login_verdict(
+    flow: dict, role: Any, chosen: dict[str, dict], members: dict[str, list[str]],
+) -> tuple[bool, dict | None]:
+    """(skip, refusal) for one flow before it may log in. ``skip`` drops a duplicate flow for a
+    role (the broker holds ONE credential per role and every flow for a role shares one browser
+    session, so a second flow would overwrite the first's session and give contradictory results
+    for one role). ``refusal`` is a ready unauthenticated result for a malformed role or a
+    session-name collision."""
+    if not isinstance(role, str):
+        # A malformed flow is recorded on its own; it must not abort the other roles.
+        return False, {
+            "role": str(role), "session_name": "", "state_path": "", "authenticated": False,
+            "checks": {}, "reason": "malformed auth flow: role must be a string",
+        }
+    if chosen.get(role) is not flow:
+        logger.warning("auth preflight: ignoring a duplicate flow for role %r", role)
+        return True, None
+    slug = _slug(role)
+    if len(members[slug]) > 1:
+        others = ", ".join(f"'{r}'" for r in members[slug] if r != role) or "another role"
+        logger.error("auth preflight: role %r collides with %s on session name recon-%s",
+                     role, others, slug)
+        return False, {
+            "role": role, "session_name": f"recon-{slug}", "state_path": "",
+            "authenticated": False, "checks": {}, "session_collision": True,
+            "reason": f"role name collides with {others} on session recon-{slug}; "
+                      f"rename one of them",
+        }
+    return False, None
+
+
 async def run_auth_preflight(
     session: Any, auth_flows: list[dict], *, target_url: str,
     external_states: dict[str, str] | None = None,
@@ -885,57 +942,15 @@ async def run_auth_preflight(
     # Ensure the durable state dir exists in the container.
     await _run(session, "mkdir", "-p", _STATE_DIR)
     results = []
-    # One flow per exact role name: the first that CAN log in (has a login_url), else the first.
-    # A header/api-key flow listed ahead of the browser flow for the same role must not cause the
-    # usable browser flow to be skipped.
-    chosen: dict[str, dict] = {}
-    for flow in auth_flows:
-        if isinstance(flow, dict) and isinstance(_role_of(flow), str):
-            name = _role_of(flow)
-            current = chosen.get(name)
-            if current is None or (not _text(current, "login_url")
-                                   and _text(flow, "login_url")):
-                chosen[name] = flow
-    # Roles whose names slug to the same session name also share a brokered credential env var
-    # and a browser session, so logging the first in would already leave it racing the others'
-    # credential. Find every colliding role UP FRONT and refuse ALL of them before any login.
-    members: dict[str, list[str]] = {}
-    for flow in auth_flows:
-        if isinstance(flow, dict) and isinstance(_role_of(flow), str):
-            name = _role_of(flow)
-            names = members.setdefault(_slug(name), [])
-            if name not in names:  # the same role name twice is one identity, not a collision
-                names.append(name)
+    chosen, members = _plan_flows(auth_flows)
     for flow in auth_flows:
         if not isinstance(flow, dict):
             continue
         role = _role_of(flow)
-        if isinstance(role, str) and chosen.get(role) is not flow:
-            # The broker holds ONE credential per role and every flow for a role shares one
-            # browser session, so a second flow for the same role is the same identity. Running
-            # it would overwrite the first's session and yield contradictory results for one
-            # role: collapse to the first flow.
-            logger.warning("auth preflight: ignoring a duplicate flow for role %r", role)
-            continue
-        if not isinstance(role, str):
-            # A malformed flow is recorded on its own; it must not abort the other roles.
-            results.append({
-                "role": str(role), "session_name": "", "state_path": "",
-                "authenticated": False, "checks": {},
-                "reason": "malformed auth flow: role must be a string",
-            })
-            continue
-        slug = _slug(role)
-        if len(members[slug]) > 1:
-            others = ", ".join(f"'{r}'" for r in members[slug] if r != role) or "another role"
-            logger.error("auth preflight: role %r collides with %s on session name recon-%s",
-                         role, others, slug)
-            results.append({
-                "role": role, "session_name": f"recon-{slug}", "state_path": "",
-                "authenticated": False, "checks": {}, "session_collision": True,
-                "reason": f"role name collides with {others} on session recon-{slug}; "
-                          f"rename one of them",
-            })
+        skip, refusal = _pre_login_verdict(flow, role, chosen, members)
+        if refusal is not None:
+            results.append(refusal)
+        if skip or refusal is not None:
             continue
         try:
             ext = (external_states or {}).get(role)
@@ -980,7 +995,7 @@ def preflight_instruction(results: list[dict]) -> str:
             "the login deterministically - YOU must complete the provider sign-in yourself, in "
             "the SAME named session (do not open a new one), using recon-browser with "
             "`--session-name <that session>`. NEVER click or grant any consent or permission "
-            "screen (\"Accept\", \"Allow\", \"Consent\", \"Grant access\"): if the provider "
+            'screen ("Accept", "Allow", "Consent", "Grant access"): if the provider '
             "shows one, stop and report the role as NOT authenticated:"
         )
         lines.extend(
