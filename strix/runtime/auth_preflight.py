@@ -803,13 +803,21 @@ async def run_auth_preflight(
     # credential. Find every colliding role UP FRONT and refuse ALL of them before any login.
     members: dict[str, list[str]] = {}
     for flow in auth_flows:
-        if isinstance(flow, dict):
+        if isinstance(flow, dict) and isinstance(flow.get("role") or "user", str):
             name = flow.get("role") or "user"
             members.setdefault(_slug(name), []).append(name)
     for flow in auth_flows:
         if not isinstance(flow, dict):
             continue
         role = flow.get("role") or "user"
+        if not isinstance(role, str):
+            # A malformed flow is recorded on its own; it must not abort the other roles.
+            results.append({
+                "role": str(role), "session_name": "", "state_path": "",
+                "authenticated": False, "checks": {},
+                "reason": "malformed auth flow: role must be a string",
+            })
+            continue
         slug = _slug(role)
         if len(members[slug]) > 1:
             others = ", ".join(f"'{r}'" for r in members[slug] if r != role) or "another role"
