@@ -236,6 +236,13 @@ def _oidc_handoff_enabled() -> bool:
     return True
 
 
+def _can_prove_login(flow: dict) -> bool:
+    """Only a flow with a declared success_condition can ever be proven authenticated after an
+    agent-completed sign-in (``reverify_role`` refuses one without), so a hand-off for any other
+    flow could never end in an authenticated role and is not offered."""
+    return bool((flow.get("success_condition") or "").strip())
+
+
 def _is_approved_oidc_host(hostname: str, flow: dict) -> bool:
     """Exact match or proper subdomain match only - never a substring match against the whole
     URL, so a lookalike host (``okta.com.attacker.example``) or a path signature on an arbitrary
@@ -318,7 +325,7 @@ async def _check_oidc_handoff(
     """Check whether we are sitting on an approved external identity provider's page rather than
     just having failed. Returns an enrichment dict (``needs_agent_oidc``, ``oidc_provider_url``)
     or None when this isn't an OIDC hand-off."""
-    if not _oidc_handoff_enabled():
+    if not _oidc_handoff_enabled() or not _can_prove_login(flow):
         return None
     ok_url, cur_url = await _run(
         session, "recon-browser", "--session-name", session_name, "get", "url")
@@ -394,6 +401,19 @@ def _is_known_provider_url(url: str, flow: dict) -> bool:
 async def _verify(session: Any, flow: dict, session_name: str, state_path: str, target_url: str) -> dict:
     """Three-part fail-closed verification. Returns a checks dict + overall `authenticated`."""
     checks: dict[str, Any] = {}
+
+    # A session that is still sitting on an identity provider is not an application session, and
+    # a provider page can satisfy url_contains/element_present while provider cookies satisfy
+    # saved_state. Look BEFORE any probe navigates away, and fail everything if so.
+    on_page, current = await _run(
+        session, "recon-browser", "--session-name", session_name, "get", "url")
+    if on_page and _is_known_provider_url(current, flow):
+        return {
+            "authenticated": False, "state_text": "",
+            "checks": {
+                "on_identity_provider": True, "saved_state": False, "protected_probe": False,
+            },
+        }
 
     # (1) semantic success_condition the operator declared.
     declared = bool((flow.get("success_condition") or "").strip())
@@ -595,7 +615,8 @@ async def preflight_role(
         return result
     try:
         parsed_login = urlsplit(login_url)
-        login_is_idp = _oidc_handoff_enabled() and parsed_login.scheme.lower() == "https" and (
+        login_is_idp = (_oidc_handoff_enabled() and _can_prove_login(flow)
+                        and parsed_login.scheme.lower() == "https") and (
             _is_approved_oidc_host((parsed_login.hostname or "").lower(), flow))
     except ValueError:  # a malformed login_url just means "not an IdP" - never raise from here
         login_is_idp = False
