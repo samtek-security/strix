@@ -313,3 +313,106 @@ async def test_a_deadline_already_passed_denies_without_asking(
     )
     assert state.approved == [] and [i for i, _ in state.rejected] == [item]
     assert gateway.requests == []
+
+
+class _StalledGateway(_ScriptedGateway):
+    """request() or poll() never returns: the I/O itself outlasts the deadline."""
+
+    def __init__(self, *, stall: str) -> None:
+        super().__init__(["approved"])
+        self._stall = stall
+
+    async def request(self, **kwargs: Any) -> str:
+        if self._stall == "request":
+            await asyncio.sleep(3600)
+        return await super().request(**kwargs)
+
+    async def poll(self, approval_id: str) -> str:
+        if self._stall == "poll":
+            await asyncio.sleep(3600)
+        return await super().poll(approval_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stall", ["request", "poll"])
+async def test_a_stalled_gateway_call_cannot_hold_the_run_past_the_deadline(stall: str) -> None:
+    gateway = _StalledGateway(stall=stall)
+    decision = InterceptionDecision(rule=_ask_rule(), action="ask")
+    outcome = await asyncio.wait_for(
+        _wait_for_human_decision(
+            gateway,
+            decision=decision,
+            tool_name="exec_command",
+            input_text="{}",
+            timeout=0.2,
+            report=None,
+        ),
+        timeout=5,  # the stall is an hour: only the ask's own deadline can end this
+    )
+    assert outcome == "denied"
+
+
+@pytest.mark.asyncio
+async def test_an_approval_read_after_the_deadline_is_denied_not_honored() -> None:
+    """The poll itself returns late, with "approved": the deadline is rechecked
+    immediately before honoring it."""
+
+    class LateApproval(_ScriptedGateway):
+        async def poll(self, approval_id: str) -> str:  # noqa: ARG002
+            await asyncio.sleep(0.15)  # still inside wait_for's window, past the deadline below
+            return "approved"
+
+    gateway = LateApproval([])
+    decision = InterceptionDecision(rule=_ask_rule(), action="ask")
+    outcome = await _wait_for_human_decision(
+        gateway,
+        decision=decision,
+        tool_name="exec_command",
+        input_text="{}",
+        timeout=0.1,
+        report=None,
+    )
+    assert outcome == "denied"
+
+
+@pytest.mark.asyncio
+async def test_a_json_looking_custom_tool_payload_is_matched_verbatim() -> None:
+    """A native custom tool's input is opaque text. A rule written against that
+    exact text must match it even though it parses as JSON and would canonicalize
+    differently."""
+    payload = '{"action":"delete",  "id": 1}'  # two spaces: canonical form would change it
+    gateway = _ScriptedGateway(["denied"])
+    rule = InterceptionRule(
+        id="deny-delete", field="tool_input", pattern='"action":"delete",  "id"', action="ask"
+    )
+    context = {INTERCEPTION_RULES_KEY: [rule], APPROVAL_GATEWAY_KEY: gateway}
+    item = _FakeApprovalItem(tool_name="custom_tool", raw_item={"input": payload})
+
+    state = await _resolve_interruptions(
+        _FakeInterruptedStream(interruptions=[item]), context=context, report=None
+    )
+
+    assert gateway.requests and gateway.requests[0]["rule_id"] == "deny-delete"
+    assert [rejected for rejected, _ in state.rejected] == [item]
+
+
+@pytest.mark.asyncio
+async def test_identical_parallel_calls_are_asked_once() -> None:
+    gateway = _ScriptedGateway(["approved", "denied"])
+    context = {
+        INTERCEPTION_RULES_KEY: [_ask_rule()],
+        APPROVAL_GATEWAY_KEY: gateway,
+        ASK_TIMEOUT_SECONDS_KEY: 5.0,
+    }
+    # Same call, formatted differently: still one ask, one decision for both.
+    first = _item(arguments='{"cmd":"rm -rf /x"}')
+    second = _item(arguments='{ "cmd": "rm -rf /x" }')
+    other = _item(arguments='{"cmd":"ls"}')
+
+    state = await _resolve_interruptions(
+        _FakeInterruptedStream(interruptions=[first, second, other]), context=context, report=None
+    )
+
+    assert len(gateway.requests) == 2, "one ask per distinct call, not per call"
+    assert first in state.approved and second in state.approved
+    assert [item for item, _ in state.rejected] == [other]

@@ -104,11 +104,20 @@ def evaluate(
     rules: Sequence[InterceptionRule] | None,
     tool_name: str,
     tool_input_text: str,
+    *,
+    verbatim: bool = False,
 ) -> InterceptionDecision | None:
-    """Return the first matching rule's decision, or ``None`` for an implicit allow."""
+    """Return the first matching rule's decision, or ``None`` for an implicit allow.
+
+    Function-tool arguments are JSON and are matched in their canonical form.
+    ``verbatim=True`` is for a native custom tool's payload, which is opaque text
+    even when it happens to parse as JSON: a rule written against that exact text
+    must see that exact text.
+    """
     if not rules:
         return None
-    tool_input_text = canonical_tool_input(tool_input_text)
+    if not verbatim:
+        tool_input_text = canonical_tool_input(tool_input_text)
     for rule in rules:
         if _rule_matches(rule, tool_name, tool_input_text):
             return InterceptionDecision(rule=rule, action=rule.action)

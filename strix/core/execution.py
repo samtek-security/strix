@@ -11,7 +11,7 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -279,18 +279,21 @@ _ASK_POLL_INTERVAL_S = 5.0
 _ASK_INPUT_SUMMARY_MAX_CHARS = 4000
 
 
-def _interruption_input_text(item: Any) -> str:
+def _interruption_input(item: Any) -> tuple[str, bool]:
+    """The paused call's input text and whether it is opaque (to match verbatim)."""
     raw = item.raw_item
     def field(name: str) -> Any:
         return raw.get(name) if isinstance(raw, dict) else getattr(raw, name, None)
 
     # A function call carries ``arguments``; a native custom tool call carries a
     # free-text ``input``.
-    for name in ("arguments", "input"):
-        value = field(name)
-        if isinstance(value, str):
-            return canonical_tool_input(value)
-    return ""
+    arguments = field("arguments")
+    if isinstance(arguments, str):
+        return canonical_tool_input(arguments), False
+    payload = field("input")
+    if isinstance(payload, str):
+        return payload, True
+    return "", False
 
 
 def _dedup_key(tool_name: str, input_text: str) -> str:
@@ -315,6 +318,26 @@ def _decision_rejection_message(decision: InterceptionDecision, outcome: str) ->
     return f"{base} {decision.rule.description}".strip() if decision.rule.description else base
 
 
+class _AskDeadlineError(Exception):
+    """The ask's deadline passed while waiting on the approval gateway."""
+
+
+async def _within(deadline: float, awaitable: Awaitable[Any]) -> Any:
+    """Await ``awaitable`` for no longer than the time left before ``deadline``
+    (a ``time.monotonic()`` instant). Every gateway call goes through here, so one
+    stalled request or poll cannot hold the run past the ask's deadline."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        close = getattr(awaitable, "close", None)
+        if close is not None:
+            close()
+        raise _AskDeadlineError
+    try:
+        return await asyncio.wait_for(awaitable, timeout=remaining)
+    except TimeoutError as exc:
+        raise _AskDeadlineError from exc
+
+
 async def _wait_for_human_decision(
     gateway: ApprovalGateway,
     *,
@@ -323,8 +346,13 @@ async def _wait_for_human_decision(
     input_text: str,
     timeout: float,
     report: Callable[[str], None] | None,
-) -> Literal["approved", "denied"]:
+) -> Literal["approved", "denied"]:  # noqa: PLR0911 - one return per distinct outcome
     """Open (or join) a pending approval and poll it to a decision or a deadline.
+
+    One deadline, ``timeout`` seconds from now, bounds the whole ask: the request,
+    every poll and every sleep run inside it, and an approval that is read after
+    it has passed is denied, not honored. The engagement's budget is the reason
+    for the deadline, so a late "approved" must not run a tool past it.
 
     ``report`` is pinged every poll, mirroring ``_run_coverage_on_exit``'s
     progress pump: a legitimate multi-minute human wait must look like progress
@@ -337,37 +365,54 @@ async def _wait_for_human_decision(
     if timeout <= 0:
         logger.warning("interception ask for %s denied at once: no time left to wait", tool_name)
         return "denied"
+    deadline = time.monotonic() + timeout
     try:
-        approval_id = await gateway.request(
-            dedup_key=_dedup_key(tool_name, input_text),
-            tool_name=tool_name,
-            tool_input_summary=_bounded_summary(input_text),
-            rule_id=decision.rule.id,
-            rule_description=decision.rule.description,
-            ttl_seconds=timeout,
+        approval_id = await _within(
+            deadline,
+            gateway.request(
+                dedup_key=_dedup_key(tool_name, input_text),
+                tool_name=tool_name,
+                tool_input_summary=_bounded_summary(input_text),
+                rule_id=decision.rule.id,
+                rule_description=decision.rule.description,
+                ttl_seconds=timeout,
+            ),
         )
+    except _AskDeadlineError:
+        logger.warning("interception ask for %s: deadline passed opening the request", tool_name)
+        return "denied"
     except Exception:
         logger.exception("interception ask: could not open an approval request for %s", tool_name)
         return "denied"
 
-    deadline = time.monotonic() + max(0.0, timeout)
     while True:
         if report is not None:
             with contextlib.suppress(Exception):
                 report(f"awaiting approval for {tool_name}")
         try:
-            status = await gateway.poll(approval_id)
+            status = await _within(deadline, gateway.poll(approval_id))
+        except _AskDeadlineError:
+            status = "expired"
         except Exception:
             logger.exception("interception ask: approval poll failed for %s", approval_id)
             status = "pending"
-        if status == "approved":
+        # Recheck after the I/O, immediately before honoring anything: a poll that
+        # returned late must not turn into an approval the deadline already ended.
+        remaining = deadline - time.monotonic()
+        if status == "approved" and remaining > 0:
             return "approved"
+        if status == "approved":
+            logger.warning(
+                "interception ask: approval %s for %s arrived after the deadline; expired",
+                approval_id,
+                tool_name,
+            )
+            return "denied"
         if status == "denied":
             return "denied"
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if status == "expired" or remaining <= 0:
             logger.warning(
-                "interception ask: approval %s for %s timed out after %.0fs; defaulting to deny",
+                "interception ask: approval %s for %s expired after %.0fs; defaulting to deny",
                 approval_id,
                 tool_name,
                 timeout,
@@ -388,32 +433,40 @@ async def _resolve_interruptions(
     (rules changed mid-run), or a tool paused on its own intrinsic need with no
     rule and no approval channel configured — is rejected outright: a pause
     nothing here can account for defaults to deny, not to guessing allow.
+
+    Identical calls in one turn (same tool, same input) are asked once: the
+    first decision resolves every one of them, instead of the later calls each
+    opening an approval after the first had already closed.
     """
     state = stream.to_state()
     gateway = gateway_from_context(context)
     configured_timeout = ask_timeout_from_context(context)
     deadline_at = ask_deadline_at_from_context(context)
     rules = rules_from_context(context)
+    outcomes: dict[str, Literal["approved", "denied"]] = {}
     for item in stream.interruptions:
-        # What is left is recomputed for every ask: a late or concurrent ask must
-        # not reuse a duration measured when the run started.
-        timeout = configured_timeout
-        if deadline_at is not None:
-            timeout = min(timeout, deadline_at - time.time())
         tool_name = item.tool_name or ""
-        input_text = _interruption_input_text(item)
-        decision = evaluate(rules, tool_name, input_text)
+        input_text, verbatim = _interruption_input(item)
+        decision = evaluate(rules, tool_name, input_text, verbatim=verbatim)
         if decision is None or decision.action != "ask" or gateway is None:
             state.reject(item, rejection_message=_unexplained_pause_rejection_message(tool_name))
             continue
-        outcome = await _wait_for_human_decision(
-            gateway,
-            decision=decision,
-            tool_name=tool_name,
-            input_text=input_text,
-            timeout=timeout,
-            report=report,
-        )
+        key = _dedup_key(tool_name, input_text)
+        if key not in outcomes:
+            # What is left is measured when this ask is made, never reused from an
+            # earlier one: a late or concurrent ask must not outlast the budget.
+            timeout = configured_timeout
+            if deadline_at is not None:
+                timeout = min(timeout, deadline_at - time.time())
+            outcomes[key] = await _wait_for_human_decision(
+                gateway,
+                decision=decision,
+                tool_name=tool_name,
+                input_text=input_text,
+                timeout=timeout,
+                report=report,
+            )
+        outcome = outcomes[key]
         if outcome == "approved":
             state.approve(item)
         else:

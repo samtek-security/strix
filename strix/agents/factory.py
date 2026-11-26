@@ -308,11 +308,11 @@ def _function_tool_with_error_result(tool: FunctionTool) -> FunctionTool:
 
 
 def _interception_decision(
-    ctx: Any, tool_name: str, input_text: str
+    ctx: Any, tool_name: str, input_text: str, *, verbatim: bool = False
 ) -> interception.InterceptionDecision | None:
     context = getattr(ctx, "context", None)
     rules = interception.rules_from_context(context if isinstance(context, dict) else None)
-    return interception.evaluate(rules, tool_name, input_text)
+    return interception.evaluate(rules, tool_name, input_text, verbatim=verbatim)
 
 
 def _interception_denied_message(decision: interception.InterceptionDecision) -> str:
@@ -397,13 +397,13 @@ def _with_custom_tool_interception(tool: CustomTool) -> CustomTool:
 
     async def invoke(ctx: Any, raw_input: str) -> Any:
         if own_needs_approval is False:
-            decision = _interception_decision(ctx, tool.name, raw_input)
+            decision = _interception_decision(ctx, tool.name, raw_input, verbatim=True)
             if decision is not None and decision.action == "deny":
                 return _interception_denied_message(decision)
         return await invoke_tool(ctx, raw_input)
 
     async def rule_needs_approval(ctx: Any, raw_input: str, call_id: str) -> bool:  # noqa: ARG001
-        decision = _interception_decision(ctx, tool.name, raw_input)
+        decision = _interception_decision(ctx, tool.name, raw_input, verbatim=True)
         return decision is not None and decision.action == "ask"
 
     if own_needs_approval is False:

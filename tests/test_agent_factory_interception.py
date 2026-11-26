@@ -130,3 +130,21 @@ async def test_custom_tool_as_function_tool_is_intercepted() -> None:
         _ctx([_deny_rule("apply_patch")]), json.dumps({"patch": "the patch text"})
     )
     assert cast("str", denied).startswith("Denied")
+
+
+@pytest.mark.asyncio
+async def test_custom_tool_input_that_looks_like_json_is_matched_verbatim() -> None:
+    payload = '{"action":"delete",  "id": 1}'  # canonical JSON would change the spacing
+    rule = InterceptionRule(
+        id="deny-delete", field="tool_input", pattern='"action":"delete",  "id"', action="deny"
+    )
+    wrapped = factory._with_custom_tool_interception(_custom_tool())
+    denied = await wrapped.on_invoke_tool(_ctx([rule]), payload)
+    assert cast("str", denied).startswith("Denied")
+
+    ask = InterceptionRule(
+        id="ask-delete", field="tool_input", pattern='"action":"delete",  "id"', action="ask"
+    )
+    needs = factory._with_custom_tool_interception(_custom_tool("other")).needs_approval
+    assert callable(needs)
+    assert await needs(_ctx([ask]), payload, "call-1") is True
