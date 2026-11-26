@@ -399,12 +399,14 @@ def _is_known_provider_url(url: str, flow: dict) -> bool:
 
 
 def _landing_in_scope(url: str, flow: dict) -> bool:
-    """True when the flow carries no signed scope (behavior unchanged), or the URL's host is
-    inside it. Applied to EVERY page a verification ends on - the starting page, the protected
+    """True when the flow carries NO scope key (behavior unchanged), or the URL's host is inside
+    it; a scope that is present but not a list fails closed. Applied to EVERY page a verification ends on - the starting page, the protected
     probe's final URL and the api_ok final URL - so a redirect out of scope can never prove a
     session or have its state persisted."""
-    if not isinstance(flow.get("scope_hosts"), (list, tuple)):
+    if flow.get("scope_hosts") is None:
         return True
+    if not isinstance(flow["scope_hosts"], (list, tuple)):
+        return False  # a scope was supplied but is malformed: never read that as "no scope"
     try:
         host = (urlsplit(url or "").hostname or "").lower()
     except ValueError:
