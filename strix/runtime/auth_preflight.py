@@ -893,7 +893,7 @@ async def run_auth_preflight(
         if isinstance(flow, dict) and isinstance(_role_of(flow), str):
             name = _role_of(flow)
             current = chosen.get(name)
-            if current is None or (not (current.get("login_url") or "").strip()
+            if current is None or (not _text(current, "login_url")
                                    and _text(flow, "login_url")):
                 chosen[name] = flow
     # Roles whose names slug to the same session name also share a brokered credential env var
