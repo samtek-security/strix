@@ -352,15 +352,15 @@ def _with_function_tool_interception(tool: FunctionTool) -> FunctionTool:
 
     async def invoke(ctx: Any, raw_input: str) -> Any:
         if own_needs_approval is False:
-            decision = _interception_decision(ctx, tool.name, raw_input)
+            text, verbatim = interception.call_input(tool.name, raw_input)
+            decision = _interception_decision(ctx, tool.name, text, verbatim=verbatim)
             if decision is not None and decision.action == "deny":
                 return _interception_denied_message(decision)
         return await invoke_tool(ctx, raw_input)
 
     async def rule_needs_approval(ctx: Any, args: dict[str, Any], call_id: str) -> bool:  # noqa: ARG001
-        decision = _interception_decision(
-            ctx, tool.name, json.dumps(args, ensure_ascii=False, sort_keys=True)
-        )
+        text, verbatim = interception.call_input(tool.name, args)
+        decision = _interception_decision(ctx, tool.name, text, verbatim=verbatim)
         return decision is not None and decision.action == "ask"
 
     if own_needs_approval is False:
@@ -451,6 +451,7 @@ def _custom_tool_as_function_tool(tool: CustomTool) -> FunctionTool:
     else:
         function_needs_approval = needs_approval
 
+    interception.register_custom_payload_field(tool.name, _custom_tool_input_field(tool))
     return _with_function_tool_interception(
         FunctionTool(
             name=tool.name,

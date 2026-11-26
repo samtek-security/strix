@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,6 +22,7 @@ from strix.core.interception import (
     INTERCEPTION_RULES_KEY,
     InterceptionDecision,
     InterceptionRule,
+    register_custom_payload_field,
 )
 
 
@@ -446,3 +448,22 @@ async def test_a_gateway_timeout_before_the_deadline_is_retried_not_treated_as_e
     )
     assert outcome == "approved"
     assert gateway.polls == 2
+
+
+@pytest.mark.asyncio
+async def test_resume_unwraps_a_converted_custom_tool_payload() -> None:
+    register_custom_payload_field("apply_patch", "patch")
+    gateway = _ScriptedGateway(["denied"])
+    payload = "*** Begin Patch\n*** Update File: /etc/hosts"
+    rule = InterceptionRule(
+        id="ask-etc", field="tool_input", pattern=r"\A\*\*\* Begin Patch", action="ask", regex=True
+    )
+    context = {INTERCEPTION_RULES_KEY: [rule], APPROVAL_GATEWAY_KEY: gateway}
+    item = _FakeApprovalItem(
+        tool_name="apply_patch", raw_item={"arguments": json.dumps({"patch": payload})}
+    )
+    state = await _resolve_interruptions(
+        _FakeInterruptedStream(interruptions=[item]), context=context, report=None
+    )
+    assert gateway.requests and gateway.requests[0]["rule_id"] == "ask-etc"
+    assert [rejected for rejected, _ in state.rejected] == [item]

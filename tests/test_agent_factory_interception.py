@@ -148,3 +148,26 @@ async def test_custom_tool_input_that_looks_like_json_is_matched_verbatim() -> N
     needs = factory._with_custom_tool_interception(_custom_tool("other")).needs_approval
     assert callable(needs)
     assert await needs(_ctx([ask]), payload, "call-1") is True
+
+
+@pytest.mark.asyncio
+async def test_converted_custom_tool_rules_match_the_payload_not_the_json_wrapper() -> None:
+    """On chat-completions routes apply_patch is a function tool taking {"patch": ...}.
+    An anchored rule written against the patch text must match that text."""
+    wrapped = factory._custom_tool_as_function_tool(_custom_tool("apply_patch"))
+    payload = "*** Begin Patch\n*** Update File: /etc/hosts\n*** End Patch"
+    anchored = r"\A\*\*\* Begin Patch\n\*\*\* Update File: /etc/"
+    deny = InterceptionRule(
+        id="deny-etc", field="tool_input", pattern=anchored, action="deny", regex=True
+    )
+    denied = await wrapped.on_invoke_tool(_ctx([deny]), json.dumps({"patch": payload}))
+    assert cast("str", denied).startswith("Denied")
+
+    ask = InterceptionRule(
+        id="ask-etc", field="tool_input", pattern=anchored, action="ask", regex=True
+    )
+    needs = wrapped.needs_approval
+    assert callable(needs)
+    assert await needs(_ctx([ask]), {"patch": payload}, "call-1") is True
+    other = {"patch": "*** Begin Patch\n*** Add File: /tmp/x"}
+    assert await needs(_ctx([ask]), other, "c2") is False

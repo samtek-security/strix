@@ -39,7 +39,7 @@ from strix.core.interception import (
     InterceptionDecision,
     ask_deadline_at_from_context,
     ask_timeout_from_context,
-    canonical_tool_input,
+    call_input,
     evaluate,
     gateway_from_context,
     rules_from_context,
@@ -289,7 +289,7 @@ def _interruption_input(item: Any) -> tuple[str, bool]:
     # free-text ``input``.
     arguments = field("arguments")
     if isinstance(arguments, str):
-        return canonical_tool_input(arguments), False
+        return call_input(item.tool_name or "", arguments)
     payload = field("input")
     if isinstance(payload, str):
         return payload, True

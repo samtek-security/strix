@@ -94,6 +94,37 @@ def canonical_tool_input(value: object) -> str:
     return text
 
 
+# Native custom tools (apply_patch, ...) are offered to chat-completions routes as
+# function tools taking one JSON field that wraps the real payload. A rule written
+# against the tool's input means the payload, not the wrapper, so the factory
+# registers each converted tool here and every matching path unwraps it.
+_CUSTOM_PAYLOAD_FIELDS: dict[str, str] = {}
+
+
+def register_custom_payload_field(tool_name: str, field: str) -> None:
+    _CUSTOM_PAYLOAD_FIELDS[tool_name] = field
+
+
+def call_input(tool_name: str, arguments: object) -> tuple[str, bool]:
+    """The text a rule should match for one call, and whether it is opaque.
+
+    ``arguments`` is a function call's JSON string or parsed dict. For a custom
+    tool converted to a function tool it is the payload field's text, verbatim;
+    for every other function tool it is the canonical JSON arguments.
+    """
+    field = _CUSTOM_PAYLOAD_FIELDS.get(tool_name)
+    if field is not None:
+        parsed = arguments
+        if isinstance(arguments, str):
+            try:
+                parsed = json.loads(arguments)
+            except ValueError:
+                parsed = None
+        if isinstance(parsed, dict) and isinstance(parsed.get(field), str):
+            return parsed[field], True
+    return canonical_tool_input(arguments), False
+
+
 def _rule_matches(rule: InterceptionRule, tool_name: str, tool_input_text: str) -> bool:
     haystack = tool_name if rule.field == "tool_name" else tool_input_text
     if not rule.regex:
