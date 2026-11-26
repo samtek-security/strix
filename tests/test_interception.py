@@ -135,3 +135,10 @@ def test_deadline_helper_defaults_to_none() -> None:
     assert interception.ask_deadline_at_from_context(None) is None
     assert interception.ask_deadline_at_from_context({"ask_deadline_at": None}) is None
     assert interception.ask_deadline_at_from_context({"ask_deadline_at": 1234.5}) == 1234.5
+
+
+def test_regex_rules_use_the_ascii_classes_the_control_plane_validated() -> None:
+    """RE2's \w, \d and \b are ASCII; the engine compiles with re.ASCII to match."""
+    rule = _rule("deny-word", field="tool_input", pattern=r"^\w+$", action="deny", regex=True)
+    assert evaluate([rule], "t", "abc", verbatim=True) is not None
+    assert evaluate([rule], "t", "é", verbatim=True) is None

@@ -54,7 +54,9 @@ class InterceptionDecision:
 @lru_cache(maxsize=256)
 def _compiled(pattern: str) -> re.Pattern[str] | None:
     try:
-        return re.compile(pattern)
+        # re.ASCII: \d \s \w \b mean the ASCII classes, as in Go's RE2, which is what
+        # the control plane validated the pattern against.
+        return re.compile(pattern, re.ASCII)
     except re.error:
         logger.warning("interception rule pattern does not compile as regex: %r", pattern)
         return None
