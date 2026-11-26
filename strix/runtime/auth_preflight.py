@@ -91,6 +91,14 @@ class _ExecResult(Protocol):
 ExecFn = Callable[..., Awaitable[_ExecResult]]
 
 
+def _text(flow: dict, key: str) -> str:
+    """A flow field as stripped text. A missing, empty or non-string value (a number or list from
+    malformed config) reads as empty rather than raising, so one malformed field can never escape
+    the per-role exception boundary or abort preflight for every role."""
+    value = flow.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _role_of(flow: dict) -> Any:
     """The flow's role. Only a MISSING or empty-string role defaults to "user"; any other value,
     including falsey non-strings (0, False, [], {}), is returned as-is so callers can reject it as
@@ -241,7 +249,7 @@ def _can_prove_login(flow: dict) -> bool:
     """Only a flow with a declared success_condition can ever be proven authenticated after an
     agent-completed sign-in (``reverify_role`` refuses one without), so a hand-off for any other
     flow could never end in an authenticated role and is not offered."""
-    return bool((flow.get("success_condition") or "").strip())
+    return bool(_text(flow, "success_condition"))
 
 
 def _is_approved_oidc_host(hostname: str, flow: dict) -> bool:
@@ -264,7 +272,7 @@ def _is_approved_oidc_host(hostname: str, flow: dict) -> bool:
     def _matches(host: str) -> bool:
         return hostname == host or hostname.endswith("." + host)
 
-    declared = (flow.get("oidc_provider_host") or "").strip().lower()
+    declared = _text(flow, "oidc_provider_host").lower()
     if declared and _matches(declared):
         return True
     return any(_matches(host) for host in _KNOWN_OIDC_HOSTS)
@@ -366,7 +374,7 @@ async def _do_login(
     mailbox baseline so the email-MFA window between baseline and the code being sent is minimal.
     Returns (ran_ok, note)."""
     env = _cred_env(flow.get("role") or "")
-    login_url = (flow.get("login_url") or "").strip()
+    login_url = _text(flow, "login_url")
     # The ONLY shell (pipe) command - shlex.quote every interpolated operator value.
     save_cmd = (
         f"printenv {shlex.quote(env)} | recon-browser --session-name {shlex.quote(session_name)} "
@@ -394,7 +402,7 @@ def _is_known_provider_url(url: str, flow: dict) -> bool:
         host = (urlsplit(url or "").hostname or "").lower()
     except ValueError:
         return False
-    declared = (flow.get("oidc_provider_host") or "").strip().lower()
+    declared = _text(flow, "oidc_provider_host").lower()
     hosts = _KNOWN_OIDC_HOSTS + ((declared,) if declared else ())
     return bool(host) and any(host == h or host.endswith("." + h) for h in hosts)
 
@@ -438,8 +446,8 @@ async def _verify(session: Any, flow: dict, session_name: str, state_path: str, 
         }
 
     # (1) semantic success_condition the operator declared.
-    declared = bool((flow.get("success_condition") or "").strip())
-    kind, val = _parse_success_condition(flow.get("success_condition") or "")
+    declared = bool(_text(flow, "success_condition"))
+    kind, val = _parse_success_condition(_text(flow, "success_condition"))
     success_ok: bool | None = None
     if kind == "url_contains" and val:
         ok, url = await _run(session, "recon-browser", "--session-name", session_name, "get", "url")
@@ -550,7 +558,7 @@ async def _complete_email_mfa(
         return ok, ("email MFA: magic-link opened" if ok else "email MFA: failed to open magic-link")
     # OTP: fill the code field, then submit. A declared selector wins; otherwise fill the
     # page's single textbox (typical for a code page). Fail-closed via _verify either way.
-    selector = (flow.get("otp_selector") or "").strip()
+    selector = _text(flow, "otp_selector")
     if selector:
         ok, _ = await _run(session, "recon-browser", "--session-name", session_name, "fill", selector, factor.otp)
     else:
@@ -598,7 +606,7 @@ async def _complete_totp(session: Any, flow: dict, session_name: str, role: str)
     code = _totp_code(seed)
     if not code:
         return False, "TOTP MFA: no valid seed in RECON_TOTP_<ROLE> (set it via the data-collection form)"
-    selector = (flow.get("otp_selector") or "").strip()
+    selector = _text(flow, "otp_selector")
     if selector:
         ok, _ = await _run(session, "recon-browser", "--session-name", session_name, "fill", selector, code)
     else:
@@ -633,7 +641,7 @@ async def preflight_role(
         "role": role, "session_name": session_name, "state_path": state_path,
         "authenticated": False, "reason": "", "checks": {},
     }
-    login_url = (flow.get("login_url") or "").strip()
+    login_url = _text(flow, "login_url")
     if not login_url:
         result["reason"] = "no login_url - can't preflight; agent will handle auth"
         return result
@@ -647,7 +655,7 @@ async def preflight_role(
     # Without a declared success_condition, _verify's "semantic" check collapses to the protected
     # probe, so a stale nonempty cookie on a target that lands on a public page would pass. A
     # cross-run resume skips the credential login entirely, so it demands explicit semantic proof.
-    can_prove_resume = bool((flow.get("success_condition") or "").strip())
+    can_prove_resume = bool(_text(flow, "success_condition"))
     if external_state and can_prove_resume and _looks_like_a_session_blob(external_state):
         # Load the host-supplied blob into the live session and run the SAME 3-part check before
         # trusting it. A clearly-garbage/tampered blob is rejected before it ever reaches the
@@ -678,13 +686,13 @@ async def preflight_role(
         except Exception:  # resume is best-effort; never block the full login
             logger.exception("external-state resume failed for role %s", role)
     # username is the label half of the "<role>:<label>" cred key, surfaced on the flow.
-    username = (flow.get("username") or flow.get("label") or "").strip()
+    username = _text(flow, "username") or _text(flow, "label")
     # For an email second factor, snapshot the mailbox (UIDNEXT, UIDVALIDITY) baseline right
     # before the login SUBMIT (via the _do_login pre_submit hook, after the recipe is stored),
     # so only a message DELIVERED after is ever consumed and a spoofed Date / pre-planted message
     # can't be mistaken for this login's code. login_started is a weak secondary Date bound only.
-    is_email_mfa = (flow.get("mfa") or "").strip().lower() == "email"
-    is_totp_mfa = (flow.get("mfa") or "").strip().lower() == "totp"
+    is_email_mfa = _text(flow, "mfa").lower() == "email"
+    is_totp_mfa = _text(flow, "mfa").lower() == "totp"
     login_started = time.time()
     email_baseline = None
     pre_submit = None
@@ -747,7 +755,7 @@ async def preflight_role(
             result["oidc_provider_url"] = _origin(final_url)
             result["reason"] = _oidc_handoff_reason(_origin(final_url), session_name)
             return result
-        if opened and (flow.get("success_condition") or "").strip():
+        if opened and _text(flow, "success_condition"):
             # Opening the provider landed somewhere else (typically the target's callback because
             # an existing SSO session redirected straight back). That may already be a valid
             # session, and no login form remains to fill - run the same 3-part check on the
@@ -831,7 +839,7 @@ async def reverify_role(session: Any, flow: dict, *, target_url: str) -> dict:
     slug = _slug(role)
     session_name = f"recon-{slug}"
     state_path = f"{_STATE_DIR}/{slug}.json"
-    if not (flow.get("success_condition") or "").strip():
+    if not _text(flow, "success_condition"):
         # Without a declared success_condition, _verify's "semantic" check collapses to the
         # protected probe, and a failed provider sign-in can still pass it (provider cookies make
         # saved_state true, a public target page makes the probe true). An agent-completed login
@@ -886,7 +894,7 @@ async def run_auth_preflight(
             name = _role_of(flow)
             current = chosen.get(name)
             if current is None or (not (current.get("login_url") or "").strip()
-                                   and (flow.get("login_url") or "").strip()):
+                                   and _text(flow, "login_url")):
                 chosen[name] = flow
     # Roles whose names slug to the same session name also share a brokered credential env var
     # and a browser session, so logging the first in would already leave it racing the others'
