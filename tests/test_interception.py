@@ -138,7 +138,7 @@ def test_deadline_helper_defaults_to_none() -> None:
 
 
 def test_regex_rules_use_the_ascii_classes_the_control_plane_validated() -> None:
-    """RE2's \w, \d and \b are ASCII; the engine compiles with re.ASCII to match."""
+    r"""RE2's \w, \d and \b are ASCII; the engine compiles with re.ASCII to match."""
     rule = _rule("deny-word", field="tool_input", pattern=r"^\w+$", action="deny", regex=True)
     assert evaluate([rule], "t", "abc", verbatim=True) is not None
     assert evaluate([rule], "t", "é", verbatim=True) is None
