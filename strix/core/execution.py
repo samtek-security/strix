@@ -338,7 +338,7 @@ async def _within(deadline: float, awaitable: Awaitable[Any]) -> Any:
         raise _AskDeadlineError from exc
 
 
-async def _wait_for_human_decision(
+async def _wait_for_human_decision(  # noqa: PLR0911 - one return per distinct outcome
     gateway: ApprovalGateway,
     *,
     decision: InterceptionDecision,
@@ -346,7 +346,7 @@ async def _wait_for_human_decision(
     input_text: str,
     timeout: float,
     report: Callable[[str], None] | None,
-) -> Literal["approved", "denied"]:  # noqa: PLR0911 - one return per distinct outcome
+) -> Literal["approved", "denied"]:
     """Open (or join) a pending approval and poll it to a decision or a deadline.
 
     One deadline, ``timeout`` seconds from now, bounds the whole ask: the request,
