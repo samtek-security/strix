@@ -11,6 +11,8 @@ from strix.interface.viewer.transcript import lead_count_of, severity_counts
 from strix.report.proof import is_validated, lead_count
 from strix.report.runs import _title
 from strix.report.sarif import write_sarif
+from strix.report.state import ReportState, set_global_report_state
+from strix.tools.exploitation import tool as ex
 from strix.tools.reporting.tool import _severity_counts, _to_report_summary_entry
 
 
@@ -115,3 +117,23 @@ def test_report_summary_entry_carries_the_proof_status() -> None:
 def test_list_reports_counts_leads_apart() -> None:
     reports = [_report("critical", "lead"), _report("critical", "exploited"), _report("low")]
     assert _severity_counts(reports) == {"critical": 1, "low": 1}
+
+
+def test_queue_filed_leads_are_marked_so_they_stay_out_of_the_counts(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    monkeypatch.chdir(tmp_path)  # ReportState writes recon_runs/ under the current directory
+    rs = ReportState("run")
+    set_global_report_state(rs)
+    try:
+        ex._queue.clear()
+        ex._queue["q-0001"] = {
+            "id": "q-0001", "title": "Queued lead", "guard_evidence": "g", "minimal_witness": "w",
+            "confidence": "high", "endpoint": "/x", "status": "queued",
+        }
+        assert ex.drain_pending_to_leads("boundary") == 1
+    finally:
+        set_global_report_state(None)
+        ex._queue.clear()
+    assert [r.get("proof_status") for r in rs.vulnerability_reports] == ["lead"]
+    assert sum(severity_counts(rs.vulnerability_reports).values()) == 0
