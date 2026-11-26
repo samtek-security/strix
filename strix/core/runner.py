@@ -148,6 +148,15 @@ def _record_mcp_connections(connection_names: list[str]) -> None:
     report_state.record_mcp_connections(connection_names)
 
 
+def _budget_stop_exit_reason(coordinator: AgentCoordinator) -> str:
+    """The exit reason for a scan that ended on BudgetExceededError.
+
+    The model-dollar budget is the default. A caller that stopped the scan for another
+    cause (the engagement's elapsed budget) names it when it triggers the stop.
+    """
+    return coordinator.stop_reason or "budget_exceeded"
+
+
 def _note_exit_reason(reason: str) -> None:
     """Record why the scan stopped so the end-of-scan beacon reports it."""
     report_state = get_global_report_state()
@@ -753,7 +762,7 @@ async def _run_scan(
         return result  # noqa: TRY300
     except BudgetExceededError as exc:
         logger.info("Scan %s stopped: %s", scan_id, exc)
-        _note_exit_reason("budget_exceeded")
+        _note_exit_reason(_budget_stop_exit_reason(coordinator))
         if root_id is not None:
             with contextlib.suppress(Exception):
                 await coordinator.set_status(root_id, "stopped")

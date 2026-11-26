@@ -92,6 +92,8 @@ class AgentCoordinator:
         self.is_shutting_down = False
         self.root_finish_tool = "finish_scan"
         self._budget_stopped = False
+        # Why the scan-wide stop was raised; the first reason wins. None until a stop.
+        self._stop_reason: str | None = None
         self._reserve_stopped = False
         self._budget_paused = False
         self._operator_paused = False
@@ -110,10 +112,20 @@ class AgentCoordinator:
     def budget_stopped(self) -> bool:
         return self._budget_stopped
 
-    async def trigger_budget_stop(self) -> None:
-        """Signal a scan-wide budget stop and wake every parked agent so it exits."""
+    @property
+    def stop_reason(self) -> str | None:
+        return self._stop_reason
+
+    async def trigger_budget_stop(self, reason: str = "budget_exceeded") -> None:
+        """Signal a scan-wide stop and wake every parked agent so it exits.
+
+        ``reason`` is what the run's exit reason reports; the model-dollar budget keeps the
+        default, and the first reason to land is kept so a later stop cannot relabel it.
+        """
         async with self._lock:
             self._budget_stopped = True
+            if self._stop_reason is None:
+                self._stop_reason = reason
             for runtime in self.runtimes.values():
                 runtime.wake.set()
 
@@ -256,6 +268,8 @@ class AgentCoordinator:
     ) -> None:
         async with self._lock:
             self._budget_stopped = budget_stopped
+            if not budget_stopped:
+                self._stop_reason = None
             self._reserve_stopped = reserve_stopped
             if not budget_paused:
                 self._budget_paused = self._operator_paused
@@ -818,6 +832,7 @@ class AgentCoordinator:
                 },
                 "errors": dict(self.errors),
                 "budget_stopped": self._budget_stopped,
+                "stop_reason": self._stop_reason,
                 "reserve_stopped": self._reserve_stopped,
                 "budget_paused": self._budget_paused,
                 "operator_paused": self._operator_paused,
@@ -841,6 +856,8 @@ class AgentCoordinator:
                         runtime = self.runtimes.setdefault(aid, AgentRuntime())
                         runtime.mailbox = [dict(m) for m in msgs if isinstance(m, dict)]
             self._budget_stopped = bool(snap.get("budget_stopped", False))
+            reason = snap.get("stop_reason")
+            self._stop_reason = reason if self._budget_stopped and isinstance(reason, str) else None
             self._reserve_stopped = bool(snap.get("reserve_stopped", False))
             self._budget_paused = bool(snap.get("budget_paused", False))
             self._operator_paused = bool(snap.get("operator_paused", False))
