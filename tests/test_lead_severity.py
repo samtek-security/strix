@@ -11,7 +11,7 @@ from strix.interface.viewer.transcript import lead_count_of, severity_counts
 from strix.report.proof import is_validated, lead_count
 from strix.report.runs import _title
 from strix.report.sarif import write_sarif
-from strix.tools.reporting.tool import _severity_counts
+from strix.tools.reporting.tool import _severity_counts, _to_report_summary_entry
 
 
 if TYPE_CHECKING:
@@ -89,20 +89,24 @@ def test_sarif_lead_is_a_note_and_keeps_its_claimed_severity(tmp_path: Path) -> 
     assert proven["properties"]["security-severity"] == "9.8"
 
 
-def test_sarif_rule_shared_by_a_lead_and_a_validated_finding_takes_the_validated_level(
-    tmp_path: Path,
-) -> None:
-    # The lead is filed first, so the rule would otherwise be built from it.
+def test_sarif_gives_a_lead_its_own_rule(tmp_path: Path) -> None:
+    # Same CWE: without a separate rule the lead would show at the validated finding's severity.
     reports = [
         _report("critical", "lead", cwe="CWE-89"),
         _report("critical", "exploited", id="vuln-0002", cwe="CWE-89"),
     ]
     write_sarif(tmp_path, reports)
     run = json.loads((tmp_path / "findings.sarif").read_text(encoding="utf-8"))["runs"][0]
-    assert len(run["tool"]["driver"]["rules"]) == 1
-    rule = run["tool"]["driver"]["rules"][0]
-    assert rule["defaultConfiguration"]["level"] == "error"
-    assert rule["properties"]["security-severity"] == "9.8"
+    rules = {r["id"]: r for r in run["tool"]["driver"]["rules"]}
+    assert set(rules) == {"CWE-89", "CWE-89-lead"}
+    assert rules["CWE-89"]["defaultConfiguration"]["level"] == "error"
+    assert rules["CWE-89-lead"]["defaultConfiguration"]["level"] == "note"
+    assert rules["CWE-89-lead"]["properties"]["security-severity"] == "1.0"
+
+
+def test_report_summary_entry_carries_the_proof_status() -> None:
+    assert _to_report_summary_entry(_report("high", "lead"))["proof_status"] == "lead"
+    assert "proof_status" not in _to_report_summary_entry(_report("high"))
 
 
 def test_list_reports_counts_leads_apart() -> None:

@@ -47,6 +47,7 @@ from strix.interface.viewer.transcript import (
     read_vulnerabilities,
     severity_counts,
 )
+from strix.report.proof import is_validated
 
 
 if TYPE_CHECKING:
@@ -579,7 +580,10 @@ def _finding_flowables(
     )
 
     header: list[Flowable] = [
-        Paragraph(f"{index}. {_esc(title)}", styles["finding"]),
+        Paragraph(
+            f"{index}. {_esc(title)}" + ("" if is_validated(vuln) else " (lead, not validated)"),
+            styles["finding"],
+        ),
         Spacer(1, 4),
         _severity_badge(styles, severity),
     ]

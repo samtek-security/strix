@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from strix.core.paths import run_record_path, runs_base_dir, runtime_state_dir
-
 from strix.report.proof import is_validated
 
 

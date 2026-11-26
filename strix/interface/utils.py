@@ -20,9 +20,9 @@ from rich.panel import Panel
 from rich.text import Text
 
 from strix.config import load_settings
+from strix.report.proof import is_validated, lead_count
 from strix.telemetry import report_error
 from strix.utils.api_spec import detect_spec_format
-from strix.report.proof import is_validated, lead_count
 
 
 logger = logging.getLogger(__name__)
