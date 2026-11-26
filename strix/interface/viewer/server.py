@@ -34,6 +34,7 @@ from strix.interface.viewer.transcript import (
     primary_target,
     read_report_markdown,
     read_run_summary,
+    lead_count_of,
     read_vulnerabilities,
     severity_counts,
 )
@@ -76,6 +77,7 @@ def run_list_entry(run_dir: Path) -> dict[str, Any]:
         "end_time": record.get("end_time"),
         "finished": bool(record.get("finished")),
         "severity_counts": severity_counts(read_vulnerabilities(run_dir)),
+        "lead_count": lead_count_of(read_vulnerabilities(run_dir)),
     }
 
 

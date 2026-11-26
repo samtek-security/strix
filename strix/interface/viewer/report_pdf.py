@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Build and encrypt a branded PDF report for a run.
 
 The layout mirrors the Strix cloud pentest report (cover page, executive
@@ -40,6 +41,7 @@ from reportlab.platypus import (
 )
 
 from strix.interface.viewer.transcript import (
+    lead_count_of,
     primary_target,
     read_run_summary,
     read_vulnerabilities,
@@ -603,14 +605,22 @@ def _finding_flowables(
 
 
 def _overview_flowables(
-    styles: dict[str, ParagraphStyle], record: dict[str, Any], total: int, counts: dict[str, int]
+    styles: dict[str, ParagraphStyle],
+    record: dict[str, Any],
+    total: int,
+    counts: dict[str, int],
+    leads: int = 0,
 ) -> list[Flowable]:
     story: list[Flowable] = [
         _section(styles, "Executive Summary"),
         Spacer(1, 16),
         _severity_grid(styles, counts),
         Spacer(1, 10),
-        Paragraph(f"<b>{total}</b> total findings across this assessment.", styles["body"]),
+        Paragraph(
+            f"<b>{total - leads}</b> validated findings across this assessment"
+            + (f", plus <b>{leads}</b> leads that did not verify." if leads else "."),
+            styles["body"],
+        ),
     ]
     scan_results = record.get("scan_results")
     if not isinstance(scan_results, dict):
@@ -655,7 +665,7 @@ def generate_report_pdf(run_dir: Path) -> bytes:
 
     story: list[Flowable] = []
     story.extend(_cover(styles, record, run_name))
-    story.extend(_overview_flowables(styles, record, len(vulns), counts))
+    story.extend(_overview_flowables(styles, record, len(vulns), counts, lead_count_of(vulns)))
 
     story.append(PageBreak())
     story.append(_section(styles, "Findings"))
