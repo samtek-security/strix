@@ -154,6 +154,12 @@ def test_a_converted_tool_unwraps_its_payload_even_with_extra_arguments() -> Non
     )
 
 
+def test_an_ordinary_tool_is_never_unwrapped_even_with_a_payload_like_field() -> None:
+    args = {"patch": "harmless", "path": "/etc/hosts"}
+    text, verbatim = interception.call_input("apply_patch", args)
+    assert verbatim is False and "/etc/hosts" in text
+
+
 def test_a_tool_that_is_not_converted_is_matched_in_full() -> None:
     args = {"input": "safe", "path": "/etc"}
     text, verbatim = interception.call_input("unregistered_tool", args)

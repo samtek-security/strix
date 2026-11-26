@@ -456,8 +456,7 @@ def _custom_tool_as_function_tool(tool: CustomTool) -> FunctionTool:
         function_needs_approval = needs_approval
 
     payload_field = _custom_tool_input_field(tool)
-    interception.register_custom_payload_field(tool.name, payload_field)
-    return _with_function_tool_interception(
+    wrapped = _with_function_tool_interception(
         payload_field=payload_field,
         tool=FunctionTool(
             name=tool.name,
@@ -469,8 +468,10 @@ def _custom_tool_as_function_tool(tool: CustomTool) -> FunctionTool:
             on_invoke_tool=invoke,
             strict_json_schema=False,
             needs_approval=function_needs_approval,
-        )
+        ),
     )
+    setattr(wrapped, interception.PAYLOAD_FIELD_ATTR, payload_field)
+    return wrapped
 
 
 def _bound_custom_tool(tool: CustomTool) -> CustomTool:

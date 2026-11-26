@@ -96,38 +96,42 @@ def canonical_tool_input(value: object) -> str:
 
 # Native custom tools (apply_patch, ...) are offered to chat-completions routes as
 # function tools taking one JSON field that wraps the real payload. A rule written
-# against the tool's input means the payload, not the wrapper, so the factory
-# registers each converted tool here and every matching path unwraps it.
-_CUSTOM_PAYLOAD_FIELDS: dict[str, str] = {}
+# against the tool's input means the payload, not the wrapper. The converted tool
+# carries that field's name on itself, so the identity travels with the tool object
+# and never with a process-wide name table that another scan's same-named tool could
+# share.
+PAYLOAD_FIELD_ATTR = "_strix_payload_field"
 
 
-def register_custom_payload_field(tool_name: str, field: str) -> None:
-    _CUSTOM_PAYLOAD_FIELDS[tool_name] = field
+def payload_field_of(tool: object) -> str | None:
+    """The payload field a converted custom tool carries, or None for any other tool."""
+    field = getattr(tool, PAYLOAD_FIELD_ATTR, None)
+    return field if isinstance(field, str) else None
 
 
 def call_input(
-    tool_name: str, arguments: object, *, payload_field: str | None = None
+    tool_name: str,  # noqa: ARG001 - kept so callers read as (tool, arguments)
+    arguments: object,
+    *,
+    payload_field: str | None = None,
 ) -> tuple[str, bool]:
     """The text a rule should match for one call, and whether it is opaque.
 
     ``arguments`` is a function call's JSON string or parsed dict. For a custom
-    tool converted to a function tool it is the payload field's text, verbatim,
-    which is exactly what the converted tool executes (it ignores any other
-    argument); for every other function tool it is the canonical JSON arguments.
-
-    ``payload_field`` is the converted tool's own identity, passed by its wrapper.
-    The resume path has only the tool's name and falls back to the registry.
+    tool converted to a function tool (``payload_field`` names its wrapper field)
+    it is that field's text, verbatim, which is exactly what the converted tool
+    executes (it ignores any other argument); for every other function tool it is
+    the canonical JSON arguments.
     """
-    field = payload_field if payload_field is not None else _CUSTOM_PAYLOAD_FIELDS.get(tool_name)
-    if field is not None:
+    if payload_field is not None:
         parsed = arguments
         if isinstance(arguments, str):
             try:
                 parsed = json.loads(arguments)
             except ValueError:
                 parsed = None
-        if isinstance(parsed, dict) and isinstance(parsed.get(field), str):
-            return parsed[field], True
+        if isinstance(parsed, dict) and isinstance(parsed.get(payload_field), str):
+            return parsed[payload_field], True
     return canonical_tool_input(arguments), False
 
 

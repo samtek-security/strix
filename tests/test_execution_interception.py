@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from strix.core import interception
 from strix.core.execution import (
     _dedup_key,
     _resolve_interruptions,
@@ -22,7 +23,6 @@ from strix.core.interception import (
     INTERCEPTION_RULES_KEY,
     InterceptionDecision,
     InterceptionRule,
-    register_custom_payload_field,
 )
 
 
@@ -30,6 +30,19 @@ from strix.core.interception import (
 class _FakeApprovalItem:
     tool_name: str
     raw_item: dict[str, Any]
+    agent: Any = None
+
+
+@dataclass
+class _FakeAgent:
+    tools: list[Any]
+
+
+class _FakeTool:
+    def __init__(self, name: str, payload_field: str | None = None) -> None:
+        self.name = name
+        if payload_field is not None:
+            setattr(self, interception.PAYLOAD_FIELD_ATTR, payload_field)
 
 
 @dataclass
@@ -452,7 +465,6 @@ async def test_a_gateway_timeout_before_the_deadline_is_retried_not_treated_as_e
 
 @pytest.mark.asyncio
 async def test_resume_unwraps_a_converted_custom_tool_payload() -> None:
-    register_custom_payload_field("apply_patch", "patch")
     gateway = _ScriptedGateway(["denied"])
     payload = "*** Begin Patch\n*** Update File: /etc/hosts"
     rule = InterceptionRule(
@@ -460,12 +472,35 @@ async def test_resume_unwraps_a_converted_custom_tool_payload() -> None:
     )
     context = {INTERCEPTION_RULES_KEY: [rule], APPROVAL_GATEWAY_KEY: gateway}
     arguments = json.dumps({"patch": payload, "note": "extra"})
-    item = _FakeApprovalItem(tool_name="apply_patch", raw_item={"arguments": arguments})
+    item = _FakeApprovalItem(
+        tool_name="apply_patch",
+        raw_item={"arguments": arguments},
+        agent=_FakeAgent(tools=[_FakeTool("apply_patch", "patch")]),
+    )
     state = await _resolve_interruptions(
         _FakeInterruptedStream(interruptions=[item]), context=context, report=None
     )
     assert gateway.requests and gateway.requests[0]["rule_id"] == "ask-etc"
     assert [rejected for rejected, _ in state.rejected] == [item]
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_unwrap_a_same_named_ordinary_tool() -> None:
+    """Identity comes from the paused agent's own tool, never from the name: an ordinary
+    function tool that shares a converted tool's name keeps every argument matchable."""
+    gateway = _ScriptedGateway(["denied"])
+    rule = InterceptionRule(id="ask-etc", field="tool_input", pattern="/etc/hosts", action="ask")
+    context = {INTERCEPTION_RULES_KEY: [rule], APPROVAL_GATEWAY_KEY: gateway}
+    arguments = json.dumps({"patch": "harmless", "path": "/etc/hosts"})
+    item = _FakeApprovalItem(
+        tool_name="apply_patch",
+        raw_item={"arguments": arguments},
+        agent=_FakeAgent(tools=[_FakeTool("apply_patch")]),
+    )
+    await _resolve_interruptions(
+        _FakeInterruptedStream(interruptions=[item]), context=context, report=None
+    )
+    assert gateway.requests and gateway.requests[0]["rule_id"] == "ask-etc"
 
 
 @pytest.mark.asyncio

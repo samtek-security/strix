@@ -42,6 +42,7 @@ from strix.core.interception import (
     call_input,
     evaluate,
     gateway_from_context,
+    payload_field_of,
     rules_from_context,
 )
 from strix.core.sessions import (
@@ -279,9 +280,23 @@ _ASK_POLL_INTERVAL_S = 5.0
 _ASK_INPUT_SUMMARY_MAX_CHARS = 4000
 
 
+def _payload_field(item: Any) -> str | None:
+    """The payload field of the converted custom tool this interruption is for, if it is one.
+
+    Read from the tool object the paused agent actually holds, so a same-named ordinary
+    function tool (or another scan's tool) is never unwrapped by name.
+    """
+    agent = getattr(item, "agent", None)
+    for tool in getattr(agent, "tools", None) or ():
+        if getattr(tool, "name", None) == item.tool_name:
+            return payload_field_of(tool)
+    return None
+
+
 def _interruption_input(item: Any) -> tuple[str, bool]:
     """The paused call's input text and whether it is opaque (to match verbatim)."""
     raw = item.raw_item
+
     def field(name: str) -> Any:
         return raw.get(name) if isinstance(raw, dict) else getattr(raw, name, None)
 
@@ -289,7 +304,7 @@ def _interruption_input(item: Any) -> tuple[str, bool]:
     # free-text ``input``.
     arguments = field("arguments")
     if isinstance(arguments, str):
-        return call_input(item.tool_name or "", arguments)
+        return call_input(item.tool_name or "", arguments, payload_field=_payload_field(item))
     payload = field("input")
     if isinstance(payload, str):
         return payload, True
