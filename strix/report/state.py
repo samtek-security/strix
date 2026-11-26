@@ -96,6 +96,11 @@ UPDATABLE_REPORT_FIELDS = frozenset(
         "http_exchange_ids",
         "fix_verification",
         "fix_pr_body",
+        "proof_status",
+        "proof_status_reason",
+        "proof_source",
+        "capture_integrity_sha256",
+        "captured_at",
     }
 )
 
@@ -129,6 +134,10 @@ _DEPENDENT_REPORT_FIELDS: dict[str, tuple[str, ...]] = {
     "severity": ("severity_change_conditions",),
     "cvss": ("cvss_breakdown",),
     "code_locations": ("fix_verification",),
+    "proof_status": ("proof_source", "capture_integrity_sha256", "captured_at"),
+    # The hash and capture time belong to the cited capture, so a revision that replaces the
+    # ids and carries no new hash leaves none behind.
+    "http_exchange_ids": ("capture_integrity_sha256", "captured_at"),
 }
 
 
@@ -564,7 +573,7 @@ class ReportState:
             entry["agent_id"] = updated_by_agent_id
         if updated_by_agent_name:
             entry["agent_name"] = updated_by_agent_name
-        for key in ("severity", "cvss", "confidence"):
+        for key in ("severity", "cvss", "confidence", "proof_status"):
             if key in changed and report.get(key) is not None:
                 entry[f"previous_{key}"] = report[key]
 
