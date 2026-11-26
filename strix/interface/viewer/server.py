@@ -31,10 +31,10 @@ from strix.core.paths import run_record_path
 from strix.interface.viewer import auth
 from strix.interface.viewer.transcript import (
     build_run_state,
+    lead_count_of,
     primary_target,
     read_report_markdown,
     read_run_summary,
-    lead_count_of,
     read_vulnerabilities,
     severity_counts,
 )

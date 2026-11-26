@@ -17,8 +17,8 @@ from typing import TYPE_CHECKING, Any
 
 from agents import RunContextWrapper, function_tool
 
-from strix.tools.nullish import clean_optional
 from strix.report.proof import is_validated, lead_count
+from strix.tools.nullish import clean_optional
 from strix.tools.proxy.tools import existing_request_ids
 
 
@@ -2387,6 +2387,7 @@ _REPORT_SUMMARY_FIELDS = (
     "id",
     "title",
     "severity",
+    "proof_status",
     "cvss",
     "confidence",
     "finding_class",
