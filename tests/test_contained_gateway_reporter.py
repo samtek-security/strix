@@ -48,7 +48,9 @@ class _FakeDocker:
         self.exec_code = 0
         self.networks = SimpleNamespace(create=self._create_network, list=lambda **_: [])
         self.version = lambda: {"Version": "29.9.2"}
-        self.volumes = SimpleNamespace(create=self._create_volume, get=self._no_volume)
+        self.volumes = SimpleNamespace(
+            create=self._create_volume, get=self._no_volume, list=lambda **_: []
+        )
         self.containers = SimpleNamespace(run=self._run, list=lambda **_: [])
 
     def _no_volume(self, _name: str) -> Any:

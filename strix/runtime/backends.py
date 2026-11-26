@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
@@ -256,7 +258,7 @@ def _created_before(attrs: dict[str, Any], key: str, now: float, window: int) ->
     return now - created.timestamp() > window
 
 
-def _owners_gone(containers: list[Any], net: Any, volume: Any) -> bool:
+def _owners_gone(containers: list[Any], net: Any, volumes: list[Any]) -> bool:
     now = time.time()
     if containers:
         return all(_owner_is_dead(c, now) for c in containers)
@@ -266,7 +268,7 @@ def _owners_gone(containers: list[Any], net: Any, volume: Any) -> bool:
     window = _heartbeat_stale_sec()
     return all(
         _created_before(res.attrs, key, now, window)
-        for res, key in ((net, "Created"), (volume, "CreatedAt"))
+        for res, key in [(net, "Created"), *((v, "CreatedAt") for v in volumes)]
         if res is not None
     )
 
@@ -277,7 +279,6 @@ def _reap_orphaned_boundary(
     scan_id: str,
     engagement_id: str,
     net_name: str,
-    ca_name: str,
     gw_name: str,
 ) -> None:
     """Remove the sandbox boundary a crashed worker left behind for THIS engagement.
@@ -312,17 +313,20 @@ def _reap_orphaned_boundary(
             "Remove the extras by hand"
         )
     net = networks[0] if networks else None
-    try:
-        volume = dc.volumes.get(ca_name)
-        volume.reload()
-    except docker.errors.NotFound:
-        volume = None
+    # CA volumes are named per attempt, so they are found by this engagement's exact labels.
+    volumes = []
+    if can_reap:
+        volumes = [
+            v
+            for v in dc.volumes.list(
+                filters={"label": [f"{k}={val}" for k, val in owner.items()]}
+            )
+            if _owned_by(v.attrs.get("Labels"), {**owner, "recon.role": "gateway-ca-volume"})
+        ]
 
     foreign: list[str] = []
     if net is not None and not (can_reap and _owned_by(net.attrs.get("Labels"), owner)):
         foreign.append(f"network {net_name!r}")
-    if volume is not None and not (can_reap and _owned_by(volume.attrs.get("Labels"), owner)):
-        foreign.append(f"volume {ca_name!r}")
     containers = []
     if can_reap:
         containers = [
@@ -345,7 +349,7 @@ def _reap_orphaned_boundary(
             "refusing to touch them. Remove them by hand or retry under a new scan id"
         )
 
-    owners_gone = _owners_gone(containers, net, volume)
+    owners_gone = _owners_gone(containers, net, volumes)
     if not owners_gone:
         logger.warning(
             "Not reaping scan %s: an owning container has a fresh heartbeat or its liveness "
@@ -358,16 +362,22 @@ def _reap_orphaned_boundary(
             "Retry once the heartbeat has been stale for "
             f"{_heartbeat_stale_sec()}s"
         )
+    # The old worker's own teardown may have removed any of these since the lookup: that is the
+    # outcome wanted, not a failure.
     for c in containers:
         logger.warning("Reaping orphaned sandbox container %s for scan %s", c.name, scan_id)
-        c.remove(force=True)
-    if volume is not None:
-        logger.warning("Reaping orphaned CA volume %s for scan %s", ca_name, scan_id)
-        volume.remove(force=True)
+        with contextlib.suppress(docker.errors.NotFound):
+            c.remove(force=True)
+    for v in volumes:
+        logger.warning("Reaping orphaned CA volume %s for scan %s", v.name, scan_id)
+        with contextlib.suppress(docker.errors.NotFound):
+            v.remove(force=True)
     if net is not None:
         logger.warning("Reaping orphaned sandbox network %s for scan %s", net_name, scan_id)
         try:
             net.remove()
+        except docker.errors.NotFound:
+            pass
         except docker.errors.APIError as exc:
             raise RuntimeError(
                 f"orphaned network {net_name!r} could not be removed (a container without this "
@@ -402,11 +412,7 @@ async def _contained_docker_backend(
     import docker
     from agents.sandbox.sandboxes.docker import DockerSandboxClientOptions
 
-    from strix.runtime.docker_client import (
-        ReconDockerSandboxClient,
-        _sandbox_ttl_sec,
-        remove_volume_if_created,
-    )
+    from strix.runtime.docker_client import ReconDockerSandboxClient, _sandbox_ttl_sec
 
     # Validate gateway_spec_path before creating any Docker resources (fail-closed).
     _gsp = (gateway_spec_path or "").strip()
@@ -437,7 +443,9 @@ async def _contained_docker_backend(
     report_net_name, report_net_subnet = report_network.settings()
     report_net = report_network.ensure_network(dc, report_net_name, report_net_subnet)
     net_name = "recon-net-" + (scan_id or "default")
-    ca_name = "recon-ca-" + (scan_id or "default")
+    # Volumes have no ID and the daemon resolves them by name, so a name every attempt shares would let
+    # a stale handle delete a retry's volume. One name per attempt makes the name the identity.
+    ca_name = f"recon-ca-{scan_id or 'default'}-{uuid.uuid4().hex[:8]}"
     gw_name = _gateway_name(scan_id)
     boundary_labels = {
         "recon.sandbox": "true",
@@ -454,7 +462,6 @@ async def _contained_docker_backend(
         scan_id=scan_id,
         engagement_id=engagement_id,
         net_name=net_name,
-        ca_name=ca_name,
         gw_name=gw_name,
     )
 
@@ -510,7 +517,7 @@ async def _contained_docker_backend(
     if any((ca_volume.attrs.get("Labels") or {}).get(k) != v for k, v in expected_ca_labels.items()):
         if ca_created:
             with _suppress():
-                remove_volume_if_created(ca_volume)
+                ca_volume.remove(force=True)
         with _suppress():
             internal_net.remove()
         raise RuntimeError(
@@ -527,7 +534,7 @@ async def _contained_docker_backend(
             with _suppress():
                 stage_volume.remove(force=True)
         with _suppress():
-            remove_volume_if_created(ca_volume)
+            ca_volume.remove(force=True)
         with _suppress():
             internal_net.remove()
 

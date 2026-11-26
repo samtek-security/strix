@@ -18,7 +18,6 @@ import pytest
 from strix.core import runner
 from strix.runtime import backends, gateway_staging, host_isolation, session_manager
 from strix.runtime.backends import _BACKENDS, register_backend
-from strix.runtime.docker_client import remove_volume_if_created
 from tests.test_runner_teardown import _wire_runner
 
 
@@ -31,7 +30,7 @@ OWNER = {
     "recon.owner": "contained-egress",
 }
 NET = f"recon-net-{SCAN}"
-CA = f"recon-ca-{SCAN}"
+CA = f"recon-ca-{SCAN}-attempt0"
 GW = f"recon-egress-{SCAN}"
 
 
@@ -113,10 +112,17 @@ def _run(
     client.networks.list.side_effect = lambda names=None: [
         n for n in (nets or []) if not names or any(x in n.name for x in names)
     ]
-    if volume is None:
-        client.volumes.get.side_effect = docker.errors.NotFound("no volume")
-    else:
-        client.volumes.get.return_value = volume
+
+    # volumes.list(filters=label) is an exact key=value match in Docker; mimic it.
+    def list_volumes(**kw: Any) -> list[MagicMock]:
+        wanted = [w.partition("=") for w in (kw.get("filters") or {}).get("label", [])]
+        return [
+            v
+            for v in ([volume] if volume is not None else [])
+            if all((v.attrs.get("Labels") or {}).get(k) == val for k, _, val in wanted)
+        ]
+
+    client.volumes.list.side_effect = list_volumes
     client.containers.list.side_effect = list_containers
     fresh_net = _net()
     client.networks.create.return_value = fresh_net
@@ -222,14 +228,14 @@ def test_same_name_gateway_with_foreign_labels_is_untouched(
     client.networks.create.assert_not_called()
 
 
-def test_same_name_volume_with_foreign_labels_is_untouched(
+def test_a_volume_without_this_engagements_labels_is_never_touched(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    vol = _volume(labels={"recon.scan_id": SCAN})
-    client, error = _run(monkeypatch, tmp_path, volume=vol)
-    assert error is not None and "refusing to touch" in str(error)
+    # CA volumes are named per attempt, so a foreign one cannot collide; it is simply not ours.
+    vol = _volume(labels={"recon.scan_id": SCAN, "recon.role": "gateway-ca-volume"})
+    _, error = _run(monkeypatch, tmp_path, volume=vol)
+    assert _reached_egress(error), error
     vol.remove.assert_not_called()
-    client.networks.create.assert_not_called()
 
 
 def test_without_an_engagement_id_nothing_is_reaped(
@@ -340,13 +346,11 @@ def test_unreachable_heartbeat_skips_the_reap(
 def _reap_directly(net: MagicMock, gw: MagicMock) -> None:
     dc = MagicMock()
     dc.networks.list.return_value = [net]
-    dc.volumes.get.side_effect = docker.errors.NotFound("no volume")
+    dc.volumes.list.return_value = []
     dc.containers.list.side_effect = lambda **kw: (
         [gw] if "label" in (kw.get("filters") or {}) else []
     )
-    backends._reap_orphaned_boundary(
-        dc, scan_id=SCAN, engagement_id=ENG, net_name=NET, ca_name=CA, gw_name=GW
-    )
+    backends._reap_orphaned_boundary(dc, scan_id=SCAN, engagement_id=ENG, net_name=NET, gw_name=GW)
 
 
 def test_a_running_engagement_keeps_a_fresh_heartbeat_and_is_not_reaped(tmp_path: Any) -> None:
@@ -404,11 +408,9 @@ def test_a_heartbeat_write_failure_is_logged_and_never_raises(tmp_path: Any) -> 
 def _ownerless(net: MagicMock) -> None:
     dc = MagicMock()
     dc.networks.list.return_value = [net]
-    dc.volumes.get.side_effect = docker.errors.NotFound("no volume")
+    dc.volumes.list.return_value = []
     dc.containers.list.return_value = []
-    backends._reap_orphaned_boundary(
-        dc, scan_id=SCAN, engagement_id=ENG, net_name=NET, ca_name=CA, gw_name=GW
-    )
+    backends._reap_orphaned_boundary(dc, scan_id=SCAN, engagement_id=ENG, net_name=NET, gw_name=GW)
 
 
 def test_a_boundary_still_being_set_up_is_not_reaped() -> None:
@@ -789,11 +791,11 @@ def test_duplicate_exact_name_networks_are_skipped_and_nothing_is_reaped() -> No
     gw = _container(GW, {**OWNER, "recon.role": "egress-gateway"})
     dc = MagicMock()
     dc.networks.list.return_value = [first, second]
-    dc.volumes.get.side_effect = docker.errors.NotFound("no volume")
+    dc.volumes.list.return_value = []
     dc.containers.list.return_value = [gw]
     with pytest.raises(RuntimeError, match="2 networks are named"):
         backends._reap_orphaned_boundary(
-            dc, scan_id=SCAN, engagement_id=ENG, net_name=NET, ca_name=CA, gw_name=GW
+            dc, scan_id=SCAN, engagement_id=ENG, net_name=NET, gw_name=GW
         )
     for res in (first, second, gw):
         res.remove.assert_not_called()
@@ -861,40 +863,55 @@ async def test_a_cancelled_bring_up_keeps_the_heartbeat_until_its_teardown_ends(
         session_manager._DISCARD_TASKS.discard(discard)
 
 
-def _volume_handle(created: str | None, current: str | None) -> tuple[MagicMock, MagicMock]:
-    """A stale handle that remembers `created`, and what the daemon holds under the name now."""
-    handle = MagicMock()
-    handle.name = CA
-    handle.attrs = {"CreatedAt": created} if created else {}
-    now_there = MagicMock()
-    now_there.attrs = {"CreatedAt": current}
-    if current is None:
-        handle.client.volumes.get.side_effect = docker.errors.NotFound("gone")
-    else:
-        handle.client.volumes.get.return_value = now_there
-    return handle, now_there
+def test_each_attempt_gets_its_own_ca_volume_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    names = []
+    for _ in range(2):
+        client, _error = _run(monkeypatch, tmp_path)
+        names.append(client.volumes.create.call_args.kwargs["name"])
+    assert names[0] != names[1]
+    assert all(n.startswith(f"recon-ca-{SCAN}-") for n in names)
 
 
-def test_a_stale_handle_removes_only_the_volume_it_created() -> None:
-    handle, now_there = _volume_handle("2026-11-26T01:00:00Z", "2026-11-26T01:00:00Z")
-    remove_volume_if_created(handle)
-    now_there.remove.assert_called_once_with(force=True)
+def test_the_gateway_mounts_the_attempts_own_ca_volume(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    client, _error = _run(monkeypatch, tmp_path)
+    created = client.volumes.create.call_args.kwargs["name"]
+    assert client.containers.run.call_args.kwargs["volumes"][created] == {
+        "bind": "/ca",
+        "mode": "rw",
+    }
 
 
-def test_a_stale_handle_never_removes_a_replacement_volume() -> None:
-    handle, replacement = _volume_handle("2026-11-26T01:00:00Z", "2026-11-26T02:30:00Z")
-    remove_volume_if_created(handle)
-    replacement.remove.assert_not_called()
-    handle.remove.assert_not_called()
+def test_a_leftover_ca_volume_is_found_by_labels_not_by_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    old = _volume()
+    old.name = f"recon-ca-{SCAN}-deadbeef"
+    gw = _container(GW, _with_heartbeat(tmp_path, age=3600))
+    client, error = _run(monkeypatch, tmp_path, volume=old, containers=[gw])
+    assert _reached_egress(error), error
+    old.remove.assert_called_once_with(force=True)
+    assert client.volumes.create.call_args.kwargs["name"] != old.name
 
 
-def test_a_handle_with_no_creation_time_removes_nothing() -> None:
-    handle, now_there = _volume_handle(None, "2026-11-26T01:00:00Z")
-    remove_volume_if_created(handle)
-    now_there.remove.assert_not_called()
-    handle.remove.assert_not_called()
-
-
-def test_a_volume_that_is_already_gone_is_not_an_error() -> None:
-    handle, _ = _volume_handle("2026-11-26T01:00:00Z", None)
-    remove_volume_if_created(handle)
+def test_a_resource_already_removed_by_the_old_teardown_is_not_a_failure(
+    tmp_path: Any,
+) -> None:
+    net, vol = _net(), _volume()
+    gw = _container(GW, _with_heartbeat(tmp_path, age=3600))
+    for res in (gw, vol, net):
+        res.remove.side_effect = docker.errors.NotFound("already gone")
+    dc = MagicMock()
+    dc.networks.list.return_value = [net]
+    dc.volumes.list.return_value = [vol]
+    dc.containers.list.side_effect = lambda **kw: (
+        [gw] if "label" in (kw.get("filters") or {}) else []
+    )
+    backends._reap_orphaned_boundary(
+        dc, scan_id=SCAN, engagement_id=ENG, net_name=NET, gw_name=GW
+    )  # must not raise
+    for res in (gw, vol, net):
+        res.remove.assert_called_once()

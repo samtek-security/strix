@@ -96,7 +96,10 @@ class _FakeDocker:
         return volume
 
     def _list(self, filters: dict[str, Any] | None = None) -> list[_Volume]:
-        self.list_filters.append(filters or {})
+        filters = filters or {}
+        if filters.get("label") != [f"recon.role={gateway_staging.STAGE_ROLE}"]:
+            return []  # the orphan reaper's own lookup
+        self.list_filters.append(filters)
         return self.stale
 
     def _list_containers(self, filters: dict[str, Any] | None = None, **_kw: Any) -> list:
