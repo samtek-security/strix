@@ -175,6 +175,7 @@ _VALID_CONFIDENCE = frozenset({"high", "medium", "low"})
 # passes one, so a report without it keeps resolving by its evidence on the recon side.
 _VALID_PROOF_STATUS = frozenset({"exploited", "lead"})
 _MAX_HTTP_EXCHANGE_IDS = 10
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 _MAX_HTTP_EXCHANGE_ID_CHARS = 128
 # Under contained egress the trusted gateway, not Caido, records the traffic and
 # names each exchange ``gw-<instance>-<uuid4 hex>``.
@@ -915,6 +916,8 @@ async def _do_create(  # noqa: PLR0911
     proof_status: str | None = None,
     proof_status_reason: str | None = None,
     proof_source: str | None = None,
+    capture_integrity_sha256: str | None = None,
+    captured_at: str | None = None,
     queue_item_id: str | None = None,
     agent_id: str | None = None,
     agent_name: str | None = None,
@@ -962,6 +965,8 @@ async def _do_create(  # noqa: PLR0911
         http_exchange_ids
     )
     errors.extend(http_exchange_errors)
+    if capture_integrity_sha256 is not None and not _SHA256_HEX.fullmatch(capture_integrity_sha256):
+        errors.append("capture_integrity_sha256 must be 64 lowercase hex characters")
     if proof_status is not None and proof_status not in _VALID_PROOF_STATUS:
         errors.append(
             f"Invalid proof_status: {proof_status!r}. Must be one of: {sorted(_VALID_PROOF_STATUS)}"
@@ -1080,6 +1085,8 @@ async def _do_create(  # noqa: PLR0911
             proof_status=proof_status,
             proof_status_reason=proof_status_reason,
             proof_source=proof_source,
+            capture_integrity_sha256=capture_integrity_sha256,
+            captured_at=captured_at,
             queue_item_id=queue_item_id,
             suspected_duplicate_of=suspected_duplicate_of,
             agent_id=agent_id if isinstance(agent_id, str) else None,

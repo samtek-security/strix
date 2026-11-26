@@ -289,6 +289,10 @@ def render_vulnerability_md(report: dict[str, Any]) -> str:  # noqa: PLR0912, PL
         metadata.append(("Proof Status", str(report["proof_status"]).title()))
     if report.get("proof_source"):
         metadata.append(("Proof Source", str(report["proof_source"]).replace("_", " ")))
+    if report.get("capture_integrity_sha256"):
+        metadata.append(("Capture SHA-256", report["capture_integrity_sha256"]))
+    if report.get("captured_at"):
+        metadata.append(("Captured At", report["captured_at"]))
     if report.get("proof_status_reason"):
         metadata.append(("Proof Note", report["proof_status_reason"]))
     if report.get("confidence"):
