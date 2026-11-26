@@ -90,6 +90,8 @@ export interface CVSSBreakdown {
 
 export interface Vulnerability {
   id: string;
+  /** "exploited" or unset for a validated finding; anything else (a lead) is not counted by severity. */
+  proof_status?: string | null;
   scan_id: string | null;
   pr_review_id: string | null;
   title: string;

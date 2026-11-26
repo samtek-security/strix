@@ -18,7 +18,6 @@ from rich.text import Text
 
 from strix.config import codex, load_settings, persist_current
 from strix.core.paths import RUNS_DIR_NAME, run_dir_for
-from strix.report.proof import is_validated
 from strix.interface.cli_args import (
     FAIL_ON_SEVERITIES,
     ResumeError,
@@ -56,6 +55,7 @@ from strix.interface.utils import (
     build_final_stats_text,
 )
 from strix.llm.warmup import start_import_warmup, wait_for_import_warmup
+from strix.report.proof import is_validated
 from strix.telemetry import posthog, report_error, scarf, set_scan_phase
 from strix.telemetry.logging import setup_console_logging
 

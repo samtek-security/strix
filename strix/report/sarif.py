@@ -231,6 +231,7 @@ def build_sarif_report(
     works for them.
     """
     rules_by_id: dict[str, dict[str, Any]] = {}
+    rule_is_lead: dict[str, bool] = {}
     rule_index_by_id: dict[str, int] = {}
     results: list[dict[str, Any]] = []
     synthetic_location_count = 0
@@ -250,6 +251,11 @@ def build_sarif_report(
         if rule_id not in rules_by_id:
             rule_index_by_id[rule_id] = len(rules_by_id)
             rules_by_id[rule_id] = _build_rule(rule_id, report)
+            rule_is_lead[rule_id] = not is_validated(report)
+        elif rule_is_lead[rule_id] and is_validated(report):
+            # A rule shared by a lead and a validated finding carries the validated one's level.
+            rules_by_id[rule_id] = _build_rule(rule_id, report)
+            rule_is_lead[rule_id] = False
         results.append(
             _build_result(
                 rule_id,
