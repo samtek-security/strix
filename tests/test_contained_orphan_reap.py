@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import inspect
 import os
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -466,8 +467,8 @@ async def test_the_heartbeat_runs_until_after_sandbox_cleanup(
         return None
 
     async def _cleanup(*a: Any, **k: Any) -> None:
-        tasks = [t for t in asyncio.all_tasks() if t.get_name().startswith("heartbeat-")]
-        seen["running_during_cleanup"] = bool(tasks) and not any(t.done() for t in tasks)
+        threads = [t for t in threading.enumerate() if t.name.startswith("heartbeat-")]
+        seen["running_during_cleanup"] = bool(threads)
         await original_cleanup(*a, **k)
 
     monkeypatch.setattr(runner, "run_agent_loop", _root)
@@ -479,7 +480,7 @@ async def test_the_heartbeat_runs_until_after_sandbox_cleanup(
         coordinator=runner.AgentCoordinator(),
     )
     assert seen["running_during_cleanup"] is True
-    assert not [t for t in asyncio.all_tasks() if t.get_name().startswith("heartbeat-")]
+    assert not [t for t in threading.enumerate() if t.name.startswith("heartbeat-")]
 
 
 async def test_a_later_phase_keeps_feeding_the_file_the_cached_sandbox_is_labelled_with(
@@ -841,9 +842,7 @@ async def test_a_cancelled_bring_up_keeps_the_heartbeat_until_its_teardown_ends(
     monkeypatch.setattr(session_manager, "create_or_reuse", _cancelled_creation)
 
     def beating() -> bool:
-        return any(
-            t.get_name() == "heartbeat-scan-cx" and not t.done() for t in asyncio.all_tasks()
-        )
+        return any(t.name == "heartbeat-scan-cx" for t in threading.enumerate())
 
     with pytest.raises(asyncio.CancelledError):
         await runner._run_scan(
@@ -997,3 +996,30 @@ async def test_an_accepted_call_installs_its_liveness_callback(
         assert beat.alive is None
     finally:
         await beat.stop()
+
+
+async def test_the_heartbeat_keeps_beating_while_the_event_loop_is_blocked(tmp_path: Any) -> None:
+    # Contained setup makes blocking docker-py calls on the loop. A heartbeat that is a task on that
+    # loop would stop for the whole call and let a retry reap a live setup.
+    beat = runner._SandboxHeartbeat(tmp_path / ".heartbeat", interval=0.02)
+    beat.start("hb-blocked")
+    try:
+        await asyncio.sleep(0.1)
+        before = beat.path.stat().st_mtime_ns
+        time.sleep(0.4)  # a blocking call: the loop cannot run anything
+        after = beat.path.stat().st_mtime_ns
+        assert after > before, "the heartbeat stopped while the loop was blocked"
+    finally:
+        await beat.stop()
+    assert beat.stopped
+
+
+async def test_stopping_the_heartbeat_ends_its_thread(tmp_path: Any) -> None:
+    beat = runner._SandboxHeartbeat(tmp_path / ".heartbeat", interval=0.01)
+    beat.start("hb-end")
+    assert not beat.stopped
+    await beat.stop()
+    await asyncio.sleep(0.05)
+    frozen = beat.path.stat().st_mtime_ns
+    await asyncio.sleep(0.1)
+    assert beat.stopped and beat.path.stat().st_mtime_ns == frozen

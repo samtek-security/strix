@@ -17,6 +17,7 @@ import contextlib
 import io
 import json
 import logging
+import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -308,41 +309,55 @@ async def _heartbeat_writer(
 class _SandboxHeartbeat:
     """The heartbeat of one scan's sandbox, owned by the session cache until cleanup.
 
+    It runs on its own thread, not as a task on the event loop: the contained backend makes
+    blocking docker calls (``containers.run``, ``helper.wait``, exec probes) on that loop, and a
+    heartbeat that stops while one of them runs would let a retry reap a live setup.
+
     ``alive`` is the active phase's liveness check (the engine's progress watchdog). While it says
     the run has stalled the file stops advancing, so a retry elsewhere can reap it. Between
     phases ``alive`` is None and the writer keeps going, so a retained sandbox stays protected.
     """
 
+    _JOIN_TIMEOUT_SEC = 5.0
+
     def __init__(self, path: Path, interval: float = _HEARTBEAT_INTERVAL_SEC) -> None:
         self.path = path
         self.alive: Callable[[], bool] | None = None
         self._interval = interval
-        self.task: asyncio.Task[None] | None = None
+        self._halt = threading.Event()
+        self._thread: threading.Thread | None = None
 
     def _is_alive(self) -> bool:
-        if self.alive is None:
+        check = self.alive
+        if check is None:
             return True
         try:
-            return bool(self.alive())
+            return bool(check())
         except Exception:  # noqa: BLE001 - an unknown state keeps a live run protected
             return True
 
+    def _run(self) -> None:
+        while not self._halt.wait(self._interval):
+            if self._is_alive():
+                _touch_heartbeat(self.path)
+
     @property
     def stopped(self) -> bool:
-        return self.task is None or self.task.done()
+        return self._thread is None or not self._thread.is_alive()
 
     def start(self, name: str) -> None:
         _touch_heartbeat(self.path)
-        self.task = asyncio.create_task(
-            _heartbeat_writer(self.path, self._interval, self._is_alive), name=name
-        )
+        self._halt.clear()
+        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
+        self._thread.start()
 
     async def stop(self) -> None:
-        if self.task is None:
+        thread = self._thread
+        if thread is None:
             return
-        self.task.cancel()
+        self._halt.set()
         with contextlib.suppress(BaseException):
-            await self.task
+            await asyncio.to_thread(thread.join, self._JOIN_TIMEOUT_SEC)
 
 
 _HEARTBEAT_STOPS: set[asyncio.Task[None]] = set()
