@@ -953,9 +953,13 @@ async def run_auth_preflight(
         if skip or refusal is not None:
             continue
         try:
+            # Keep the original call shape unless a state exists: a wrapper written for the
+            # earlier keyword-only signature must keep working for every ordinary call.
+            extra = {}
             ext = (external_states or {}).get(role)
-            results.append(
-                await preflight_role(session, flow, target_url=target_url, external_state=ext))
+            if ext is not None:
+                extra["external_state"] = ext
+            results.append(await preflight_role(session, flow, target_url=target_url, **extra))
         except Exception:  # one role must never break the others / the scan
             logger.exception("auth preflight crashed for role %s", role)
             # Never let a crashed role DISAPPEAR - record it explicitly unauthenticated so the
