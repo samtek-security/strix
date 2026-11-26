@@ -25,6 +25,7 @@ from agents.tool_context import ToolContext
 
 import strix.tools.notes.tools as notes_tools
 import strix.tools.todo.tools as todo_tools
+from strix.config.settings import ActionApprovalSettings
 from strix.core import runner
 from strix.runtime import docker_client, session_manager
 from strix.runtime.backends import _BACKENDS, _BIND_MOUNT_BACKENDS, register_backend
@@ -403,6 +404,7 @@ def _wire_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, events: list[s
         ),
         runtime=types.SimpleNamespace(max_context_images=3),
         telemetry=types.SimpleNamespace(run_record_timings=False),
+        action_approvals=ActionApprovalSettings(),
     )
     monkeypatch.setattr(runner, "load_settings", lambda: settings)
     monkeypatch.setattr(runner, "configure_sdk_model_defaults", lambda _s: None)
@@ -430,7 +432,7 @@ def _wire_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, events: list[s
     monkeypatch.setattr(session_manager, "cleanup", _cleanup)
     monkeypatch.setattr(runner, "_run_coverage_on_exit", _coverage)
     monkeypatch.setattr(runner, "build_root_task", lambda _c: "task")
-    monkeypatch.setattr(runner, "build_scope_context", lambda _c: "")
+    monkeypatch.setattr(runner, "build_scope_context", lambda _c: {})
     monkeypatch.setattr(runner, "make_model_settings", lambda *_a, **_k: ModelSettings())
     monkeypatch.setattr(runner, "build_strix_agent", _build_agent)
     monkeypatch.setattr(runner, "make_child_factory", lambda **_k: lambda **_kk: object())

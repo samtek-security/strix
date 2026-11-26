@@ -9,6 +9,7 @@ from agents import ModelSettings
 
 import strix.tools.notes.tools as notes_tools
 import strix.tools.todo.tools as todo_tools
+from strix.config.settings import ActionApprovalSettings
 from strix.core import runner
 from strix.core.agents import AgentCoordinator
 from strix.runtime import session_manager
@@ -36,7 +37,7 @@ def _wire_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     monkeypatch.setattr(session_manager, "create_or_reuse", _create_or_reuse)
     monkeypatch.setattr(session_manager, "cleanup", _cleanup)
     monkeypatch.setattr(runner, "build_root_task", lambda _c: "task")
-    monkeypatch.setattr(runner, "build_scope_context", lambda _c: "")
+    monkeypatch.setattr(runner, "build_scope_context", lambda _c: {})
     monkeypatch.setattr(runner, "make_model_settings", lambda *_a, **_k: ModelSettings())
     monkeypatch.setattr(runner, "build_strix_agent", lambda **_k: object())
     monkeypatch.setattr(runner, "make_child_factory", lambda **_k: lambda **_kk: object())
@@ -45,6 +46,7 @@ def _wire_runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
 
 def _settings() -> Any:
     return types.SimpleNamespace(
+        action_approvals=ActionApprovalSettings(),
         llm=types.SimpleNamespace(
             model="openai/gpt-4o",
             reasoning_effort="high",

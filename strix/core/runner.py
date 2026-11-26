@@ -17,6 +17,7 @@ import contextlib
 import io
 import json
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
@@ -37,7 +38,12 @@ from strix.config.models import (
     supports_strict_tool_schemas,
     uses_chat_completions_tool_schema,
 )
-from strix.config.settings import DEFAULT_MAX_TURNS
+from strix.config.settings import DEFAULT_MAX_TURNS, ActionApprovalSettings
+from strix.core.action_approvals import (
+    ActionApprovalGuard,
+    ApprovalEventSink,
+    build_execution_facts,
+)
 from strix.core.agents import AgentCoordinator, BudgetPolicy
 from strix.core.execution import (
     respawn_subagents,
@@ -267,6 +273,8 @@ async def _run_scan(
     status_sink: StatusSink | None = None,
     mcp_connection_requests: list[McpConnectionRequest] | None = None,
     mcp_status_sink: McpStatusSink | None = None,
+    action_approvals: ActionApprovalSettings | None = None,
+    approval_event_sink: ApprovalEventSink | None = None,
     root_finish_tool: Tool = finish_scan,
     report_tool: Tool = create_vulnerability_report,
     coverage_tools: bool = True,
@@ -276,6 +284,7 @@ async def _run_scan(
     gateway_target_ports: tuple[int, ...] = (),
     coverage_context: Any = None,
     run_coverage_worker_on_exit: bool = False,
+    select_tools: Callable[..., Sequence[Tool]] | None = None,
     interception_rules: Sequence[InterceptionRule] | None = None,
     approval_gateway: ApprovalGateway | None = None,
     ask_timeout_seconds: float | None = None,
@@ -303,6 +312,9 @@ async def _run_scan(
     command-line default) it reads ``~/.strix/mcp-servers.json`` itself. Either
     way the engine does the connecting, so the caller passes inert configs plus
     metadata and never live sessions.
+    ``action_approvals`` overrides action approval settings for this scan.
+    ``approval_event_sink`` receives checked, requested, resolved, and automatic
+    block events. Resolve pending IDs through ``coordinator.action_approvals``.
     ``root_finish_tool`` is the tool the root agent ends the run with.
     ``report_tool`` is the tool every agent files findings with, in place of
     ``create_vulnerability_report``.
@@ -317,6 +329,7 @@ async def _run_scan(
     are documented on :func:`run_recon_scan`; they default to inert values so the
     upstream path (empty gateway policy, no coverage worker) is byte-for-byte the
     old behaviour.
+    ``select_tools`` picks each agent's tools; see ``build_strix_agent``.
     ``interception_rules`` are allow/deny/ask rules (see ``strix.core.interception``)
     evaluated against every tool call's name and JSON-encoded arguments, in list
     order, first match wins; ``None``/empty matches nothing, so a caller that never
@@ -381,17 +394,35 @@ async def _run_scan(
         raise ValueError(f"unknown budget_policy: {budget_policy!r}")
     if coordinator is None:
         coordinator = AgentCoordinator()
+    coordinator.action_approvals = ActionApprovalGuard(
+        action_approvals if action_approvals is not None else settings.action_approvals,
+        event_sink=approval_event_sink,
+        default_model=resolved_model,
+    )
+    approval_settings = coordinator.action_approvals.settings
+    if approval_settings.enabled and approval_settings.mode == "ask" and not interactive:
+        logger.warning(
+            "Action approvals are in ask mode but this scan is non-interactive; "
+            "approvals will be decided by the timeout policy (%s).",
+            approval_settings.on_timeout,
+        )
     coordinator.set_snapshot_path(agents_path)
     coordinator.set_budget_policy(budget_policy)
     coordinator.root_finish_tool = root_finish_tool.name
 
     from strix.tools.coverage.tools import hydrate_coverage_from_disk
     from strix.tools.notes.tools import hydrate_notes_from_disk
+    from strix.tools.test_objects.tools import (
+        hydrate_test_objects_from_disk,
+        seed_provisioned_accounts,
+    )
     from strix.tools.threat_model.tools import hydrate_threat_models_from_disk
     from strix.tools.todo.tools import hydrate_todos_from_disk
 
     hydrate_todos_from_disk(state_dir)
     hydrate_notes_from_disk(state_dir)
+    hydrate_test_objects_from_disk(state_dir)
+    seed_provisioned_accounts(str(scan_config.get("user_instructions") or ""))
     hydrate_coverage_from_disk(state_dir)
     hydrate_threat_models_from_disk(state_dir)
 
@@ -613,6 +644,7 @@ async def _run_scan(
             finish_tool=root_finish_tool,
             report_tool=report_tool,
             coverage_tools=coverage_tools,
+            select_tools=select_tools,
         )
 
         if not is_resume:
@@ -636,6 +668,7 @@ async def _run_scan(
             supports_images=supports_images,
             report_tool=report_tool,
             coverage_tools=coverage_tools,
+            select_tools=select_tools,
         )
 
         async def spawn_child_agent(**kwargs: Any) -> dict[str, Any]:
@@ -659,9 +692,11 @@ async def _run_scan(
             "mcp_registry": mcp_registry,
             "agent_id": root_id,
             "parent_id": None,
+            "started_at": time.monotonic(),
             "interactive": interactive,
             "spawn_child_agent": spawn_child_agent,
             "scan_targets": build_scan_targets(scan_config),
+            "approval_execution_facts": build_execution_facts(scope_context, local_sources or []),
             "max_context_images": settings.runtime.max_context_images,
             "supports_images": supports_images,
             "coverage_tools": coverage_tools,
@@ -787,6 +822,7 @@ async def _run_scan(
         # and control plane; drop the cause chain so no raw text rides along.
         raise _sanitized_failure(exc) from None
     finally:
+        coordinator.action_approvals.block_pending()
         configure_spill_writer(None)
         # Settle descendants before closing sessions: on a clean finish a child
         # can still be mid-turn, and closing its session underneath it crashes it.
@@ -977,10 +1013,13 @@ async def run_strix_scan(
     status_sink: StatusSink | None = None,
     mcp_connection_requests: list[McpConnectionRequest] | None = None,
     mcp_status_sink: McpStatusSink | None = None,
+    action_approvals: ActionApprovalSettings | None = None,
+    approval_event_sink: ApprovalEventSink | None = None,
     root_finish_tool: Tool = finish_scan,
     report_tool: Tool = create_vulnerability_report,
     coverage_tools: bool = True,
     subagent_turn_limits: Mapping[str, int] | None = None,
+    select_tools: Callable[..., Sequence[Tool]] | None = None,
     interception_rules: Sequence[InterceptionRule] | None = None,
     approval_gateway: ApprovalGateway | None = None,
     ask_timeout_seconds: float | None = None,
@@ -1001,6 +1040,9 @@ async def run_strix_scan(
     command-line default) it reads ``~/.strix/mcp-servers.json`` itself. Either
     way the engine does the connecting, so the caller passes inert configs plus
     metadata and never live sessions.
+    ``action_approvals`` overrides action approval settings for this scan.
+    ``approval_event_sink`` receives checked, requested, resolved, and automatic
+    block events. Resolve pending IDs through ``coordinator.action_approvals``.
     """
     return await _run_scan(
         scan_config=scan_config,
@@ -1022,10 +1064,13 @@ async def run_strix_scan(
         status_sink=status_sink,
         mcp_connection_requests=mcp_connection_requests,
         mcp_status_sink=mcp_status_sink,
+        action_approvals=action_approvals,
+        approval_event_sink=approval_event_sink,
         root_finish_tool=root_finish_tool,
         report_tool=report_tool,
         coverage_tools=coverage_tools,
         subagent_turn_limits=subagent_turn_limits,
+        select_tools=select_tools,
         interception_rules=interception_rules,
         approval_gateway=approval_gateway,
         ask_timeout_seconds=ask_timeout_seconds,
@@ -1053,6 +1098,8 @@ async def run_recon_scan(
     status_sink: StatusSink | None = None,
     mcp_connection_requests: list[McpConnectionRequest] | None = None,
     mcp_status_sink: McpStatusSink | None = None,
+    action_approvals: ActionApprovalSettings | None = None,
+    approval_event_sink: ApprovalEventSink | None = None,
     root_finish_tool: Tool = finish_scan,
     report_tool: Tool = create_vulnerability_report,
     coverage_tools: bool = True,
@@ -1062,6 +1109,7 @@ async def run_recon_scan(
     gateway_target_ports: tuple[int, ...] = (),
     coverage_context: Any = None,
     run_coverage_worker_on_exit: bool = False,
+    select_tools: Callable[..., Sequence[Tool]] | None = None,
     interception_rules: Sequence[InterceptionRule] | None = None,
     approval_gateway: ApprovalGateway | None = None,
     ask_timeout_seconds: float | None = None,
@@ -1115,6 +1163,8 @@ async def run_recon_scan(
         status_sink=status_sink,
         mcp_connection_requests=mcp_connection_requests,
         mcp_status_sink=mcp_status_sink,
+        action_approvals=action_approvals,
+        approval_event_sink=approval_event_sink,
         root_finish_tool=root_finish_tool,
         report_tool=report_tool,
         coverage_tools=coverage_tools,
@@ -1124,6 +1174,7 @@ async def run_recon_scan(
         gateway_target_ports=gateway_target_ports,
         coverage_context=coverage_context,
         run_coverage_worker_on_exit=run_coverage_worker_on_exit,
+        select_tools=select_tools,
         interception_rules=interception_rules,
         approval_gateway=approval_gateway,
         ask_timeout_seconds=ask_timeout_seconds,

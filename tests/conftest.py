@@ -7,6 +7,8 @@ import socket as _socket
 
 import pytest
 
+from strix.interface.tui import approval_history
+
 
 # litellm fetches its pricing table from raw.githubusercontent.com at import
 # time (``litellm/__init__.py``) unless this is set, which makes importing
@@ -124,3 +126,13 @@ def _isolate_wallet_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     for name in ("MPPX_ACCOUNT", "MPPX_STRIPE_SECRET_KEY", "MPPX_STRIPE_PAYMENT_METHOD"):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_approval_history(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Keep approval history out of the developer's real ``~/.strix``."""
+    monkeypatch.setattr(
+        approval_history, "HISTORY_DIR", tmp_path_factory.mktemp("approval-history")
+    )

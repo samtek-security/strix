@@ -13,6 +13,7 @@ from openai import RateLimitError
 
 import strix.tools.notes.tools as notes_tools
 import strix.tools.todo.tools as todo_tools
+from strix.config.settings import ActionApprovalSettings
 from strix.core import runner
 from strix.core.agents import AgentCoordinator
 from strix.runtime import session_manager
@@ -35,6 +36,7 @@ async def test_persistent_rate_limit_stops_gracefully(
     monkeypatch.setattr(runner, "set_scan_id", lambda _scan_id: None)
 
     settings = types.SimpleNamespace(
+        action_approvals=ActionApprovalSettings(),
         llm=types.SimpleNamespace(
             model="openai/gpt-4o",
             reasoning_effort="high",
@@ -67,7 +69,7 @@ async def test_persistent_rate_limit_stops_gracefully(
     monkeypatch.setattr(session_manager, "cleanup", _cleanup)
 
     monkeypatch.setattr(runner, "build_root_task", lambda _scan_config: "task")
-    monkeypatch.setattr(runner, "build_scope_context", lambda _scan_config: "")
+    monkeypatch.setattr(runner, "build_scope_context", lambda _scan_config: {})
     monkeypatch.setattr(runner, "make_model_settings", lambda *_args, **_kwargs: ModelSettings())
     monkeypatch.setattr(runner, "build_strix_agent", lambda **_kwargs: object())
     monkeypatch.setattr(runner, "make_child_factory", lambda **_kwargs: lambda **_k: object())

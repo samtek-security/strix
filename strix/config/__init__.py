@@ -18,6 +18,7 @@ from strix.config.loader import (
     persist_current,
 )
 from strix.config.settings import (
+    ActionApprovalSettings,
     ContextSettings,
     DedupeSettings,
     IntegrationSettings,
@@ -29,6 +30,7 @@ from strix.config.settings import (
 
 
 __all__ = [
+    "ActionApprovalSettings",
     "ContextSettings",
     "DedupeSettings",
     "IntegrationSettings",
