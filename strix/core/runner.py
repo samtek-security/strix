@@ -157,16 +157,25 @@ def _budget_stop_exit_reason(coordinator: AgentCoordinator) -> str:
     return coordinator.stop_reason or "budget_exceeded"
 
 
+def _save_stop_artifacts() -> None:
+    """Write the run artifacts once a scan that recorded a stop reason has fully wound down.
+
+    Recon runs the scan directly, with no CLI cleanup to save the report afterward, and
+    coverage.json carries the exit reason. Called at the very end of the scan's cleanup, so
+    ``end_time``, the agent snapshot and the coverage document include the finalization work.
+    """
+    report_state = get_global_report_state()
+    if report_state is None or report_state.scan_ended_exit_reason is None:
+        return
+    with contextlib.suppress(Exception):
+        report_state.save_run_data(status="stopped")
+
+
 def _note_exit_reason(reason: str) -> None:
     """Record why the scan stopped so the end-of-scan beacon reports it."""
     report_state = get_global_report_state()
     if report_state is not None and report_state.scan_ended_exit_reason is None:
         report_state.scan_ended_exit_reason = reason
-        # A caller that runs the scan directly (Recon's engine) has no CLI cleanup that saves
-        # the report afterward, and coverage.json carries this reason, so write it now, with the
-        # run marked stopped to match.
-        with contextlib.suppress(Exception):
-            report_state.save_run_data(status="stopped")
 
 
 def _persist_mcp_status(roster: list[dict[str, Any]]) -> None:
@@ -851,6 +860,8 @@ async def _run_scan(
             if cleanup_on_exit:
                 logger.info("Tearing down sandbox session for scan %s", scan_id)
                 await session_manager.cleanup(scan_id)
+            if not scan_cancelled:
+                _save_stop_artifacts()
             logger.info("Strix scan %s done", scan_id)
             teardown_logging()
 

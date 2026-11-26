@@ -1823,14 +1823,31 @@ async def test_stop_reason_survives_snapshot_and_clears_on_reset() -> None:
     assert older.stop_reason is None
 
 
-def test_exit_reason_is_saved_to_the_run_artifacts(monkeypatch: pytest.MonkeyPatch) -> None:
-    saved: list[str | None] = []
+def test_stop_artifacts_are_saved_once_the_scan_has_wound_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved: list[tuple[str | None, str | None]] = []
     state = SimpleNamespace(
         scan_ended_exit_reason=None,
         save_run_data=lambda status=None: saved.append((state.scan_ended_exit_reason, status)),
     )
     monkeypatch.setattr(runner, "get_global_report_state", lambda: state)
+
+    # Recording the reason does not save: finalization is still to come.
     runner._note_exit_reason("elapsed_budget")
     runner._note_exit_reason("budget_exceeded")  # the first reason stays
     assert state.scan_ended_exit_reason == "elapsed_budget"
+    assert saved == []
+
+    runner._save_stop_artifacts()
     assert saved == [("elapsed_budget", "stopped")]
+
+
+def test_no_stop_reason_means_no_stop_save(monkeypatch: pytest.MonkeyPatch) -> None:
+    saved: list[object] = []
+    state = SimpleNamespace(
+        scan_ended_exit_reason=None, save_run_data=lambda status=None: saved.append(status)
+    )
+    monkeypatch.setattr(runner, "get_global_report_state", lambda: state)
+    runner._save_stop_artifacts()
+    assert saved == []
