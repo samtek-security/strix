@@ -120,7 +120,10 @@ def call_input(tool_name: str, arguments: object) -> tuple[str, bool]:
                 parsed = json.loads(arguments)
             except ValueError:
                 parsed = None
-        if isinstance(parsed, dict) and isinstance(parsed.get(field), str):
+        # Only the converted wrapper's exact shape, one field: a different function
+        # tool that happens to share the name (the registry is process-wide) has other
+        # arguments, and those must still be matched in full.
+        if isinstance(parsed, dict) and set(parsed) == {field} and isinstance(parsed[field], str):
             return parsed[field], True
     return canonical_tool_input(arguments), False
 

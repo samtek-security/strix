@@ -142,3 +142,14 @@ def test_regex_rules_use_the_ascii_classes_the_control_plane_validated() -> None
     rule = _rule("deny-word", field="tool_input", pattern=r"^\w+$", action="deny", regex=True)
     assert evaluate([rule], "t", "abc", verbatim=True) is not None
     assert evaluate([rule], "t", "é", verbatim=True) is None
+
+
+def test_a_same_named_function_tool_is_not_mistaken_for_a_converted_custom_tool() -> None:
+    interception.register_custom_payload_field("foo", "input")
+    try:
+        wrapper = interception.call_input("foo", {"input": "safe"})
+        assert wrapper == ("safe", True)  # the converted wrapper's exact shape: payload, verbatim
+        other = interception.call_input("foo", {"input": "safe", "path": "/etc"})
+        assert other[1] is False and "/etc" in other[0]  # matched in full, canonical
+    finally:
+        interception._CUSTOM_PAYLOAD_FIELDS.pop("foo", None)
