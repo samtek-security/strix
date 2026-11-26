@@ -90,6 +90,14 @@ class _ExecResult(Protocol):
 ExecFn = Callable[..., Awaitable[_ExecResult]]
 
 
+def _role_of(flow: dict) -> Any:
+    """The flow's role. Only a MISSING or empty-string role defaults to "user"; any other value,
+    including falsey non-strings (0, False, [], {}), is returned as-is so callers can reject it as
+    malformed instead of silently verifying it under the default session."""
+    raw = flow.get("role")
+    return "user" if raw is None or raw == "" else raw
+
+
 def _slug(role: str) -> str:
     """CLI/fs-safe per-role name - MUST match activities._role_slug so the env var + session
     names line up with what the credential broker injected."""
@@ -370,6 +378,19 @@ async def _do_login(
     return login_ok, "auth login ok" if login_ok else "auth login failed (see host debug log)"
 
 
+def _is_known_provider_url(url: str, flow: dict) -> bool:
+    """True when the URL's host is a known (or flow-declared) identity provider, scope aside.
+    Used to refuse a verification that ENDED on a provider: provider cookies make saved_state true
+    and a provider page avoids the login-page pattern, but that is not an application session."""
+    try:
+        host = (urlsplit(url or "").hostname or "").lower()
+    except ValueError:
+        return False
+    declared = (flow.get("oidc_provider_host") or "").strip().lower()
+    hosts = _KNOWN_OIDC_HOSTS + ((declared,) if declared else ())
+    return bool(host) and any(host == h or host.endswith("." + h) for h in hosts)
+
+
 async def _verify(session: Any, flow: dict, session_name: str, state_path: str, target_url: str) -> dict:
     """Three-part fail-closed verification. Returns a checks dict + overall `authenticated`."""
     checks: dict[str, Any] = {}
@@ -389,7 +410,8 @@ async def _verify(session: Any, flow: dict, session_name: str, state_path: str, 
         probe = base + ("" if val.startswith("/") else "/") + val
         ok, _ = await _run(session, "recon-browser", "--session-name", session_name, "open", probe)
         _, purl = await _run(session, "recon-browser", "--session-name", session_name, "get", "url")
-        success_ok = ok and not _LOGIN_PAGE_RE.search(purl)
+        success_ok = (ok and not _LOGIN_PAGE_RE.search(purl)
+                      and not _is_known_provider_url(purl, flow))
     elif declared:
         # A condition WAS declared but we can't evaluate it (unknown kind / empty value). Fail
         # closed - never silently downgrade a declared gate to probe-only.
@@ -402,7 +424,8 @@ async def _verify(session: Any, flow: dict, session_name: str, state_path: str, 
     if target_url:
         ok, _ = await _run(session, "recon-browser", "--session-name", session_name, "open", target_url)
         got, url = await _run(session, "recon-browser", "--session-name", session_name, "get", "url")
-        probe_ok = ok and got and not _LOGIN_PAGE_RE.search(url or "")
+        probe_ok = (ok and got and not _LOGIN_PAGE_RE.search(url or "")
+                    and not _is_known_provider_url(url, flow))
     checks["protected_probe"] = probe_ok
 
     # (2) NON-EMPTY saved session state (real cookies), persisted for postmortem. Done LAST,
@@ -553,7 +576,12 @@ async def preflight_role(
     caller's concern, not this module's). Tried first via the same fail-closed ``_verify`` as
     everything else - an invalid/expired blob falls straight through to the normal login below,
     never reported authenticated on its own say-so."""
-    role = flow.get("role") or "user"
+    role = _role_of(flow)
+    if not isinstance(role, str):
+        return {
+            "role": str(role), "session_name": "", "state_path": "", "authenticated": False,
+            "checks": {}, "reason": "malformed auth flow: role must be a string",
+        }
     slug = _slug(role)
     session_name = f"recon-{slug}"
     state_path = f"{_STATE_DIR}/{slug}.json"
@@ -748,7 +776,7 @@ async def reverify_role(session: Any, flow: dict, *, target_url: str) -> dict:
     flagged with ``needs_agent_oidc``. Never trust the agent's own claim of success without this:
     it is the identical ``_verify`` used for a host-driven login, never a weaker check. Returns the
     same result shape as ``preflight_role`` (never raises)."""
-    role = flow.get("role") or "user"
+    role = _role_of(flow)
     if not isinstance(role, str):
         return {
             "role": str(role), "session_name": "", "state_path": "", "authenticated": False,
@@ -808,15 +836,15 @@ async def run_auth_preflight(
     # credential. Find every colliding role UP FRONT and refuse ALL of them before any login.
     members: dict[str, list[str]] = {}
     for flow in auth_flows:
-        if isinstance(flow, dict) and isinstance(flow.get("role") or "user", str):
-            name = flow.get("role") or "user"
+        if isinstance(flow, dict) and isinstance(_role_of(flow), str):
+            name = _role_of(flow)
             names = members.setdefault(_slug(name), [])
             if name not in names:  # the same role name twice is one identity, not a collision
                 names.append(name)
     for flow in auth_flows:
         if not isinstance(flow, dict):
             continue
-        role = flow.get("role") or "user"
+        role = _role_of(flow)
         if not isinstance(role, str):
             # A malformed flow is recorded on its own; it must not abort the other roles.
             results.append({
