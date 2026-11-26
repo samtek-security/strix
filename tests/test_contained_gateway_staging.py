@@ -366,3 +366,23 @@ def test_staging_volume_carries_a_ttl_deadline(
     (volume,) = [v for v in fake_docker.volumes_made if v.name.startswith("recon-gwstage-")]
     labels = volume.attrs["Labels"]
     assert int(labels["recon.ttl_deadline"]) > int(labels["recon.created_at"])
+
+
+def test_uid_1000_worker_with_the_stock_10001_gateway_stages_for_10001(
+    fake_docker: _FakeDocker, files: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gateway_staging, "gateway_uid", lambda: 10001)
+    # Only the staging module sees UID 1000; the worker-side file checks still use the real UID.
+    monkeypatch.setattr(
+        gateway_staging, "os", SimpleNamespace(geteuid=lambda: 1000, environ=os.environ)
+    )
+    assert gateway_staging.needs_staging() is True
+
+    with pytest.raises(RuntimeError, match="not ready"):
+        _start(files[0])
+
+    (helper,) = fake_docker.helper_calls
+    assert helper["command"][-1] == "10001"
+    (gateway,) = fake_docker.gateway_calls
+    assert files[0] not in gateway["volumes"]
+    assert gateway["environment"]["RECON_ENGAGEMENT_SPEC"].startswith(gateway_staging.STAGE_MOUNT)
