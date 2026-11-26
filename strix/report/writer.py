@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Artifact writers for Strix scan reports."""
 
 from __future__ import annotations
@@ -64,6 +65,40 @@ def safe_fence(content: str) -> str:
     """
     longest = max((len(m.group()) for m in _BACKTICK_RUN.finditer(content)), default=0)
     return "`" * max(3, longest + 1)
+
+
+_EVIDENCE_RESPONSE = "\n\nResponse:\n"
+_EVIDENCE_SHOTS = re.compile(r"\n\nScreenshots:\n((?:- [^\n]+\n?)+)\Z")
+
+
+def render_evidence_lines(evidence: str) -> list[str]:
+    """Markdown lines for a report's evidence.
+
+    A promoted report stores captured HTTP as one labeled string. That text is controlled by the
+    target, so each part renders only inside a fenced block that its own content cannot close
+    (``safe_fence``), never as live Markdown or HTML. Any other evidence string passes through as
+    before.
+    """
+    text = evidence.strip()
+    if not text.startswith("Request:\n") or _EVIDENCE_RESPONSE not in text:
+        return [evidence]
+    shots = ""
+    m = _EVIDENCE_SHOTS.search(text)
+    if m:
+        shots, text = m.group(1).strip(), text[: m.start()]
+    request, _, response = text[len("Request:\n") :].partition(_EVIDENCE_RESPONSE)
+    lines: list[str] = []
+    parts = (
+        ("Request", request, "http"),
+        ("Response", response, "http"),
+        ("Screenshots", shots, "text"),
+    )
+    for label, body, lang in parts:
+        if not body.strip():
+            continue
+        fence = safe_fence(body)
+        lines += [f"**{label}**", "", f"{fence}{lang}", body.strip(), fence, ""]
+    return lines
 
 
 def parse_fenced_code(raw: str) -> tuple[str | None, str]:
@@ -271,7 +306,7 @@ def render_vulnerability_md(report: dict[str, Any]) -> str:  # noqa: PLR0912, PL
 
     if report.get("evidence"):
         lines.append("## Evidence\n")
-        lines.append(str(report["evidence"]))
+        lines.extend(render_evidence_lines(str(report["evidence"])))
         lines.append("")
 
     if report.get("impact"):
