@@ -2841,3 +2841,128 @@ def test_code_location_rejects_a_repository_that_is_not_a_plain_name() -> None:
         [{"repo": "api", "file": "a.py", "start_line": 1, "end_line": 1}]
     )
     assert ok == []
+
+
+_HASH_A = "a" * 64
+_HASH_B = "b" * 64
+_STAMP = "2026-11-26T10:00:00Z"
+
+
+async def test_merge_carries_capture_hash_and_time_as_a_unit(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(report_state)
+    _duplicate_of(lead_id, monkeypatch)
+    await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason="verified",
+        capture_integrity_sha256=_HASH_A,
+        captured_at=_STAMP,
+        **_PROOF_TARGET,
+    )
+    report = report_state.vulnerability_reports[0]
+    assert report["proof_status"] == "exploited"
+    assert report["capture_integrity_sha256"] == _HASH_A
+    assert report["captured_at"] == _STAMP
+
+
+async def test_merge_replaces_an_older_capture_hash_and_time(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(
+        report_state, capture_integrity_sha256=_HASH_A, captured_at="2026-11-25T00:00:00Z"
+    )
+    _duplicate_of(lead_id, monkeypatch)
+    await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason="verified",
+        capture_integrity_sha256=_HASH_B,
+        captured_at=_STAMP,
+        **_PROOF_TARGET,
+    )
+    report = report_state.vulnerability_reports[0]
+    assert report["capture_integrity_sha256"] == _HASH_B
+    assert report["captured_at"] == _STAMP
+
+
+async def test_merge_without_a_hash_drops_the_old_capture_pair(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(
+        report_state, capture_integrity_sha256=_HASH_A, captured_at="2026-11-25T00:00:00Z"
+    )
+    _duplicate_of(lead_id, monkeypatch)
+    await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason="verified",
+        captured_at=_STAMP,
+        **_PROOF_TARGET,
+    )
+    report = report_state.vulnerability_reports[0]
+    assert "capture_integrity_sha256" not in report
+    assert "captured_at" not in report
+
+
+async def test_weaker_proof_never_overwrites_the_stronger_hash(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason="verified",
+        capture_integrity_sha256=_HASH_A,
+        captured_at=_STAMP,
+        **_PROOF_TARGET,
+    )
+    _duplicate_of(str(first["report_id"]), monkeypatch)
+    result = await _create_with(
+        report_state,
+        proof_status="lead",
+        capture_integrity_sha256=_HASH_B,
+        captured_at="2026-11-26T11:00:00Z",
+        **_PROOF_TARGET,
+    )
+    assert result["success"] is False
+    report = report_state.vulnerability_reports[0]
+    assert report["capture_integrity_sha256"] == _HASH_A
+    assert report["captured_at"] == _STAMP
+
+
+async def test_two_leads_merge_nothing_and_keep_the_lead_hash(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(report_state, capture_integrity_sha256=_HASH_A, captured_at=_STAMP)
+    _duplicate_of(lead_id, monkeypatch)
+    result = await _create_with(
+        report_state,
+        proof_status="lead",
+        capture_integrity_sha256=_HASH_B,
+        captured_at="2026-11-26T11:00:00Z",
+        **_PROOF_TARGET,
+    )
+    assert result["success"] is False
+    report = report_state.vulnerability_reports[0]
+    assert report["proof_status"] == "lead"
+    assert report["capture_integrity_sha256"] == _HASH_A
+
+
+async def test_repeated_merge_with_a_hash_is_idempotent(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(report_state)
+    _duplicate_of(lead_id, monkeypatch)
+    kwargs: dict[str, Any] = {
+        "proof_status": "exploited",
+        "proof_status_reason": "verified",
+        "capture_integrity_sha256": _HASH_A,
+        "captured_at": _STAMP,
+        "queue_item_id": "q-9",
+        **_PROOF_TARGET,
+    }
+    await _create_with(report_state, **kwargs)
+    after_first = json.dumps(report_state.vulnerability_reports, sort_keys=True)
+    await _create_with(report_state, **kwargs)
+    assert json.dumps(report_state.vulnerability_reports, sort_keys=True) == after_first

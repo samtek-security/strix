@@ -113,8 +113,14 @@ MERGEABLE_PROOF_FIELDS = frozenset(
         "confidence_rationale",
         "counterevidence",
         "assumptions",
+        "capture_integrity_sha256",
+        "captured_at",
     }
 )
+
+# The hash and the capture time describe one capture, so they move with the proof
+# as a unit and never one without the other.
+_CAPTURE_FIELDS = ("capture_integrity_sha256", "captured_at")
 
 _LOWERCASE_REPORT_FIELDS = frozenset({"severity", "confidence", "fix_effort"})
 
@@ -621,15 +627,28 @@ class ReportState:
             logger.warning("cannot merge proof into unknown vulnerability report %s", report_id)
             return None
 
+        incoming = dict(proof)
+        if not incoming.get("capture_integrity_sha256"):
+            # A time with no hash proves nothing about the capture.
+            incoming.pop("captured_at", None)
         changed = {
             key: value
-            for key, value in proof.items()
+            for key, value in incoming.items()
             if key in MERGEABLE_PROOF_FIELDS
             and value not in (None, "", [], {})
             and report.get(key) != value
         }
         if not changed:
             return None
+        # A hash kept from the earlier proof must not vouch for the stronger one.
+        # When the incoming hash differs or is absent, the old capture fields go
+        # (or are replaced), so the report never pairs one capture's hash with
+        # another's time.
+        stale_capture = (
+            [k for k in _CAPTURE_FIELDS if report.get(k) and not incoming.get(k)]
+            if "proof_status" in changed or "capture_integrity_sha256" in changed
+            else []
+        )
 
         entry: dict[str, Any] = {
             "timestamp": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -671,6 +690,8 @@ class ReportState:
         history.append(entry)
 
         revised = {**report, **changed, "update_history": history}
+        for key in stale_capture:
+            revised.pop(key, None)
         if (
             "confidence" in changed or "proof_status" in changed
         ) and "confidence_rationale" not in supplied:

@@ -1069,6 +1069,8 @@ async def _do_create(  # noqa: PLR0911
                     "confidence_rationale": confidence_rationale,
                     "counterevidence": counterevidence,
                     "assumptions": assumptions,
+                    "capture_integrity_sha256": capture_integrity_sha256,
+                    "captured_at": captured_at,
                 },
                 queue_item_id=queue_item_id,
                 agent_id=agent_id if isinstance(agent_id, str) else None,
