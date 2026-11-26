@@ -303,9 +303,12 @@ class AgentCoordinator:
         task: asyncio.Task[Any] | None = None,
         interrupt_on_message: bool | None = None,
         resumable: bool | None = None,
+        unsettled: bool = False,
     ) -> None:
         async with self._lock:
             runtime = self.runtimes.setdefault(agent_id, AgentRuntime())
+            if unsettled:
+                runtime.turn_settled.clear()
             if session is not None:
                 runtime.session = session
             if task is not None:

@@ -1416,13 +1416,17 @@ async def _start_child_runner(
 ) -> None:
     session = open_agent_session(child_id, agents_db_path)
     sessions_to_close.append(session)
-    await coordinator.attach_runtime(child_id, session=session, resumable=interactive)
     # The runner has not started, but it will write to this session (the seed
-    # at least). Leaving the event at its settled default would let a stop in
-    # this window report the empty session as final. run_agent_loop applies
+    # at least). Leaving turn_settled at its settled default would let a stop in
+    # this window report the empty session as final, so it is cleared in the
+    # same lock acquisition that attaches the runtime. run_agent_loop applies
     # the same condition when it starts.
-    if not (start_parked and interactive):
-        await coordinator.mark_turn_unsettled(child_id)
+    await coordinator.attach_runtime(
+        child_id,
+        session=session,
+        resumable=interactive,
+        unsettled=not (start_parked and interactive),
+    )
 
     child_ctx: dict[str, Any] = dict(parent_ctx)
     child_ctx["agent_id"] = child_id
