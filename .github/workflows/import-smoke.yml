@@ -17,11 +17,16 @@ on:
   pull_request:
     branches: [samtek-main]
 
+permissions:
+  contents: read
+
 jobs:
   import-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
 
       # Match upstream's release-build environment: Python 3.12 + uv-sync from
       # the frozen uv.lock. Skips the Go TUI sidecar toolchain (we only want an
