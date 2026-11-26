@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -65,11 +66,20 @@ def needs_staging() -> bool:
     return os.geteuid() != gateway_uid()
 
 
+def _ttl_seconds() -> int:
+    from strix.runtime.docker_client import _sandbox_ttl_sec  # noqa: PLC0415  (heavy SDK import)
+
+    return int(_sandbox_ttl_sec())
+
+
 def volume_labels(boundary_labels: dict[str, str], run_id: str) -> dict[str, str]:
     scan_id = boundary_labels.get("recon.scan_id", "")
+    now = int(time.time())
     return {
         **boundary_labels,
         "recon.role": STAGE_ROLE,
+        "recon.created_at": str(now),
+        "recon.ttl_deadline": str(now + _ttl_seconds()),
         "recon.run_id": run_id,
         "recon.engagement_id": os.environ.get("RECON_ENGAGEMENT_ID", "").strip() or scan_id,
     }
@@ -89,8 +99,18 @@ def sweep_stale(dc: Any, boundary_labels: dict[str, str]) -> None:
     for helper in dc.containers.list(all=True, filters=helper_filters):
         with contextlib.suppress(Exception):
             helper.remove(force=True)
-    filters = {"label": [f"recon.role={STAGE_ROLE}", f"recon.scan_id={scan_id}"]}
+    filters = {"label": [f"recon.role={STAGE_ROLE}"]}
+    now = time.time()
     for volume in dc.volumes.list(filters=filters):
+        labels = (getattr(volume, "attrs", None) or {}).get("Labels") or {}
+        ours = labels.get("recon.scan_id") == scan_id
+        try:
+            expired = float(labels.get("recon.ttl_deadline", "")) < now
+        except ValueError:
+            expired = True
+        # This engagement's leftovers always go; any other engagement's only once past its TTL.
+        if not (ours or expired):
+            continue
         logger.warning("Removing stale gateway staging volume %s", getattr(volume, "name", "?"))
         with contextlib.suppress(Exception):
             volume.remove(force=True)

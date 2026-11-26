@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -216,7 +217,7 @@ def test_every_launch_stages_into_a_new_labelled_volume(
 def test_stale_staging_volumes_of_this_engagement_are_swept_on_the_next_launch(
     fake_docker: _FakeDocker, files: tuple[str, str]
 ) -> None:
-    leftover = _Volume("recon-gwstage-s1-dead", {})
+    leftover = _Volume("recon-gwstage-s1-dead", {"recon.scan_id": "s1"})
     fake_docker.stale = [leftover]
     dead_helper = SimpleNamespace(remove=lambda **_kw: setattr(leftover, "helper_gone", True))
     fake_docker.stale_helpers = [dead_helper]
@@ -231,10 +232,7 @@ def test_stale_staging_volumes_of_this_engagement_are_swept_on_the_next_launch(
         "recon.scan_id=s1",
     ]
     (filters,) = fake_docker.list_filters
-    assert sorted(filters["label"]) == [
-        f"recon.role={gateway_staging.STAGE_ROLE}",
-        "recon.scan_id=s1",
-    ]
+    assert filters["label"] == [f"recon.role={gateway_staging.STAGE_ROLE}"]
 
 
 def test_staging_failure_fails_closed_before_the_gateway_exists(
@@ -344,3 +342,27 @@ def test_bad_gateway_uid_fails_before_any_docker_resource(
         _start(files[0])
     assert fake_docker.networks_made == []
     assert fake_docker.volumes_made == []
+
+
+def test_sweep_removes_expired_volumes_of_other_engagements_but_not_live_ones(
+    fake_docker: _FakeDocker,
+) -> None:
+    now = time.time()
+    expired = _Volume("old", {"recon.scan_id": "other", "recon.ttl_deadline": str(int(now - 5))})
+    live = _Volume("live", {"recon.scan_id": "other2", "recon.ttl_deadline": str(int(now + 600))})
+    fake_docker.stale = [expired, live]
+
+    gateway_staging.sweep_stale(fake_docker, {"recon.scan_id": "s1"})
+
+    assert expired.removed
+    assert not live.removed
+
+
+def test_staging_volume_carries_a_ttl_deadline(
+    fake_docker: _FakeDocker, files: tuple[str, str]
+) -> None:
+    with pytest.raises(RuntimeError, match="not ready"):
+        _start(files[0])
+    (volume,) = [v for v in fake_docker.volumes_made if v.name.startswith("recon-gwstage-")]
+    labels = volume.attrs["Labels"]
+    assert int(labels["recon.ttl_deadline"]) > int(labels["recon.created_at"])
