@@ -674,7 +674,7 @@ async def preflight_role(
             result["oidc_provider_url"] = _origin(final_url)
             result["reason"] = _oidc_handoff_reason(_origin(final_url), session_name)
             return result
-        if opened:
+        if opened and (flow.get("success_condition") or "").strip():
             # Opening the provider landed somewhere else (typically the target's callback because
             # an existing SSO session redirected straight back). That may already be a valid
             # session, and no login form remains to fill - run the same 3-part check on the
@@ -752,6 +752,16 @@ async def reverify_role(session: Any, flow: dict, *, target_url: str) -> dict:
     slug = _slug(role)
     session_name = f"recon-{slug}"
     state_path = f"{_STATE_DIR}/{slug}.json"
+    if not (flow.get("success_condition") or "").strip():
+        # Without a declared success_condition, _verify's "semantic" check collapses to the
+        # protected probe, and a failed provider sign-in can still pass it (provider cookies make
+        # saved_state true, a public target page makes the probe true). An agent-completed login
+        # is only believed on explicit semantic proof.
+        return {
+            "role": role, "session_name": session_name, "state_path": state_path,
+            "authenticated": False, "checks": {},
+            "reason": "no success_condition declared - an agent-completed login cannot be proven",
+        }
     try:
         ver = await _verify(session, flow, session_name, state_path, target_url)
     except Exception:  # best-effort; a crashed re-check is just "not authenticated"
