@@ -801,3 +801,21 @@ def test_directory_with_its_own_gitignore_counts_once(tmp_path: Path) -> None:
     manifest = source_upload.select_source(source)
 
     assert manifest.excluded["git_ignored"] == 2  # ignored.log and .pytest_cache/
+
+
+def test_self_ignoring_directory_children_are_bounded_by_the_raw_record_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _git_source(tmp_path / "repo")
+    cache = source / ".cache"
+    cache.mkdir()
+    (cache / ".gitignore").write_text("*\n", encoding="utf-8")
+    for index in range(40):
+        (cache / f"f{index}").write_text("x\n", encoding="utf-8")
+    monkeypatch.setattr(source_upload, "MAX_GIT_IGNORED_COUNT", 2)
+    monkeypatch.setattr(source_upload, "_RAW_RECORD_FACTOR", 5)
+
+    manifest = source_upload.select_source(source)
+
+    assert manifest.excluded["git_ignored_truncated"] == 1
+    assert manifest.excluded_truncated

@@ -175,12 +175,13 @@ def prepare_scan_source(
                 "--approve-sha256 <reviewed hash>; use --yes only for a deliberate "
                 "one-shot approval of the snapshot built by that invocation."
             )
+        excluded_more = "+" if bundle.manifest.excluded_truncated else ""
         console.print(
             "[bold]Local source upload[/]\n"
             f"  {len(bundle.manifest.files):,} file(s), "
             f"{_format_bytes(bundle.manifest.total_bytes)} "
             f"({_format_bytes(bundle.archive_bytes)} compressed)\n"
-            f"  {bundle.manifest.excluded_total:,} path(s) excluded\n"
+            f"  {bundle.manifest.excluded_total:,}{excluded_more} path(s) excluded\n"
             "  Only the selected files will be sent to Strix Cloud."
         )
         if getattr(args, "show_files", False):
