@@ -595,7 +595,7 @@ function FindingsList({
         <button
           key={v.id}
           onClick={() => onSelect(v.id)}
-          className="animate-card-in cursor-pointer w-full text-left rounded-lg border border-[#222] hover:border-[#444] bg-[rgba(255,255,255,0.02)] px-4 py-3 transition-colors flex items-center gap-3"
+          className="animate-card-in cursor-pointer w-full text-left rounded-lg border border-[#222] hover:border-[#444] bg-[rgba(255,255,255,0.02)] px-4 py-3 transition-colors flex flex-wrap items-center gap-x-3 gap-y-2"
         >
           <span
             className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${
@@ -603,7 +603,7 @@ function FindingsList({
             }`}
             aria-hidden="true"
           />
-          <span className="flex-1 min-w-0">
+          <span className="flex-1 min-w-[10rem]">
             <span className="block text-sm font-medium text-white truncate">{v.title}</span>
             {v.target && (
               <span className="block text-xs text-[#666] font-mono truncate">{v.target}</span>
@@ -616,7 +616,7 @@ function FindingsList({
               {v.severity}
             </span>
           ) : (
-            <span className="flex items-center gap-1.5">
+            <span className="flex flex-wrap items-center gap-1.5">
               <span className="text-xs font-semibold px-2 py-0.5 rounded-full border border-dashed border-[#777] text-[#bbb] capitalize">
                 claimed {v.severity}
               </span>
