@@ -15,6 +15,8 @@ interface IssueSeveritySummaryProps {
   className?: string;
   /** Noun for the total count (e.g. "issues", "CVEs"). Defaults to "issues". */
   unit?: string;
+  /** Leads (unvalidated candidates) counted apart from the severity buckets, by claimed severity. */
+  leads?: IssueSeveritySummaryFindings;
   /** Optional content rendered at the end of the count row (e.g. a KEV badge). */
   trailing?: React.ReactNode;
 }
@@ -30,9 +32,10 @@ export function IssueSeveritySummary({
   findings,
   className,
   unit = "issues",
+  leads,
   trailing,
 }: IssueSeveritySummaryProps) {
-  if (findings.total <= 0) return null;
+  if (findings.total <= 0 && !(leads && leads.total > 0)) return null;
 
   return (
     <div className={cn("space-y-3", className)}>
@@ -57,7 +60,27 @@ export function IssueSeveritySummary({
         </div>
         {trailing ? <div className="flex items-center gap-2">{trailing}</div> : null}
       </div>
+      {leads && leads.total > 0 ? (
+        <div
+          className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-dashed border-[#444] px-3 py-2"
+          role="group"
+          aria-label="Leads, not validated"
+        >
+          <span className="text-sm font-semibold text-[#bbb] tabular-nums">
+            {leads.total} {leads.total === 1 ? "lead" : "leads"}
+          </span>
+          <span className="text-xs text-[#888]">not validated, counted apart from the findings above</span>
+          {SEVERITIES.map(({ key, label }) =>
+            leads[key] > 0 ? (
+              <span key={key} className="text-xs text-[#aaa] tabular-nums">
+                {leads[key]} claimed {label}
+              </span>
+            ) : null
+          )}
+        </div>
+      ) : null}
 
+      {findings.total > 0 && (
       <div className="h-1.5 rounded-full bg-[#222] overflow-hidden flex">
         {SEVERITIES.map(({ key, dotClass }) => {
           const count = findings[key];
@@ -72,6 +95,7 @@ export function IssueSeveritySummary({
           );
         })}
       </div>
+      )}
     </div>
   );
 }

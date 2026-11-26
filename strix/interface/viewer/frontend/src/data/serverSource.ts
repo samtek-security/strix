@@ -161,6 +161,8 @@ export interface RunListEntry {
   end_time: string | null;
   finished: boolean;
   severity_counts: RunSeverityCounts;
+  /** Leads (unvalidated candidates), counted apart from severity_counts. */
+  lead_count?: number;
 }
 
 export interface RunsPayload {

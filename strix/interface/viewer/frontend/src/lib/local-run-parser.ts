@@ -321,6 +321,22 @@ export function leadCount(vulns: Vulnerability[]): number {
   return vulns.filter((v) => !isValidated(v)).length;
 }
 
+/** Leads by the severity they claimed, counted apart from the validated buckets. */
+export function leadSeverityCounts(
+  vulns: Vulnerability[]
+): Record<VulnerabilitySeverity, number> {
+  const counts: Record<VulnerabilitySeverity, number> = {
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+  };
+  for (const v of vulns) {
+    if (!isValidated(v)) counts[v.severity] += 1;
+  }
+  return counts;
+}
+
 export function severityCounts(
   vulns: Vulnerability[]
 ): Record<VulnerabilitySeverity, number> {

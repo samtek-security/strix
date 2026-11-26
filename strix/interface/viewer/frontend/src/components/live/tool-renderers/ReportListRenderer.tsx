@@ -23,12 +23,27 @@ interface ReportEntry {
   description?: string;
   agent_name?: string;
   by_you?: boolean;
+  proof_status?: string;
 }
 
 function authorTag(r: ReportEntry) {
   if (!r.agent_name && !r.by_you) return null;
   const label = r.by_you ? "you" : r.agent_name;
   return <span className="text-[#666] text-xs ml-1.5">({label})</span>;
+}
+
+const isLead = (r: { proof_status?: string }) => {
+  const status = String(r.proof_status ?? "").trim().toLowerCase();
+  return status !== "" && status !== "exploited";
+};
+
+function leadBadge(r: { proof_status?: string }) {
+  if (!isLead(r)) return null;
+  return (
+    <span className="ml-1.5 text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded border border-dashed border-[#777] text-[#bbb]">
+      lead, not validated
+    </span>
+  );
 }
 
 function sevBadge(severity: string | undefined) {
@@ -49,7 +64,12 @@ export default function ReportListRenderer({ toolName, result }: ToolRendererPro
         {report ? (
           <div className="mt-1.5 space-y-2">
             <div className="flex items-center gap-2 flex-wrap">
-              {sevBadge(report.severity)}
+              {isLead(report) ? (
+                <span className="font-semibold text-[13px] text-[#bbb]">CLAIMED {String(report.severity ?? "").toUpperCase() || "—"}</span>
+              ) : (
+                sevBadge(report.severity)
+              )}
+              {leadBadge(report)}
               {report.cvss != null && <span className="text-[#888] text-[13px]">CVSS {report.cvss}</span>}
               {report.id && <span className="text-[#555] font-mono text-[13px]">{report.id}</span>}
               {report.cve && <span className="text-[#888] font-mono text-[13px]">{report.cve}</span>}
@@ -83,6 +103,7 @@ export default function ReportListRenderer({ toolName, result }: ToolRendererPro
     ? (res.severity_counts as Record<string, number>)
     : {};
   const countEntries = Object.entries(counts);
+  const leadCount = ok && typeof res.lead_count === "number" ? (res.lead_count as number) : 0;
 
   return (
     <div>
@@ -94,13 +115,23 @@ export default function ReportListRenderer({ toolName, result }: ToolRendererPro
             {sevBadge(sev)}<span className="text-[#888] ml-0.5">{n}</span>
           </span>
         ))}
+        {leadCount > 0 && (
+          <span className="text-[13px] text-[#bbb] border border-dashed border-[#777] rounded px-1.5">
+            {leadCount} {leadCount === 1 ? "lead" : "leads"}, not validated
+          </span>
+        )}
       </div>
       {reports.length > 0 ? (
         <div className="mt-1.5 space-y-1">
           {reports.map((r, i) => (
             <div key={r.id ?? i} className="text-[13px]">
               <span className="text-[#555] mr-1">-</span>
-              {sevBadge(r.severity)}
+              {isLead(r) ? (
+                <span className="font-semibold text-[13px] text-[#bbb]">CLAIMED {String(r.severity ?? "").toUpperCase() || "—"}</span>
+              ) : (
+                sevBadge(r.severity)
+              )}
+              {leadBadge(r)}
               {r.id && <span className="text-[#555] font-mono ml-1.5">{r.id}</span>}
               <span className="text-[#999] ml-1.5">{r.title ?? "(untitled)"}</span>
               {authorTag(r)}

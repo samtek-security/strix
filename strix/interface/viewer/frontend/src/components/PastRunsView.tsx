@@ -20,19 +20,25 @@ const SEV = [
   { key: "low", dot: "bg-blue-500", text: "text-blue-500" },
 ] as const;
 
-function SeverityChips({ counts }: { counts: RunSeverityCounts }) {
+function SeverityChips({ counts, leads = 0 }: { counts: RunSeverityCounts; leads?: number }) {
   const shown = SEV.filter((s) => counts[s.key] > 0);
-  if (shown.length === 0) {
+  if (shown.length === 0 && leads === 0) {
     return <span className="text-xs text-[#555]">No findings</span>;
   }
   return (
     <div className="flex items-center gap-3">
+      {shown.length === 0 && <span className="text-xs text-[#555]">No validated findings</span>}
       {shown.map((s) => (
         <div key={s.key} className="flex items-center gap-1.5">
           <span className={`h-2 w-2 rounded-full ${s.dot}`} aria-hidden="true" />
           <span className={`text-xs tabular-nums ${s.text}`}>{counts[s.key]}</span>
         </div>
       ))}
+      {leads > 0 && (
+        <span className="rounded border border-dashed border-[#777] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#bbb]">
+          {leads} {leads === 1 ? "lead" : "leads"}, not validated
+        </span>
+      )}
     </div>
   );
 }
@@ -167,7 +173,7 @@ export default function PastRunsView({
                 {run.status && <span className="capitalize">{run.status}</span>}
               </div>
             </div>
-            <SeverityChips counts={run.severity_counts} />
+            <SeverityChips counts={run.severity_counts} leads={run.lead_count ?? 0} />
             <ChevronRight className="h-4 w-4 flex-shrink-0 text-[#555] transition-colors group-hover:text-[#aaa]" aria-hidden="true" />
           </button>
         );

@@ -21,7 +21,12 @@ import AgentGraph from "@/components/live/AgentGraph";
 import { buildGraphAgents } from "@/components/live/AgentTranscript";
 import AgentDetailModal from "@/components/live/AgentDetailModal";
 import { ScanPromptComposer } from "@/components/live/ScanPromptComposer";
-import { severityCounts, type ParsedRunSummary } from "@/lib/local-run-parser";
+import {
+  isValidated,
+  leadSeverityCounts,
+  severityCounts,
+  type ParsedRunSummary,
+} from "@/lib/local-run-parser";
 import {
   fetchAll,
   fetchAuthStatus,
@@ -396,7 +401,8 @@ export default function App() {
                 <OverviewTab
                   summary={run.summary}
                   counts={counts}
-                  total={run.vulnerabilities.length}
+                  total={run.vulnerabilities.filter(isValidated).length}
+                  leads={leadSeverityCounts(run.vulnerabilities)}
                   reportMarkdown={run.reportMarkdown}
                   raw={run.raw}
                   finished={run.finished}
@@ -591,18 +597,34 @@ function FindingsList({
           onClick={() => onSelect(v.id)}
           className="animate-card-in cursor-pointer w-full text-left rounded-lg border border-[#222] hover:border-[#444] bg-[rgba(255,255,255,0.02)] px-4 py-3 transition-colors flex items-center gap-3"
         >
-          <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${getSeverityDot(v.severity)}`} aria-hidden="true" />
+          <span
+            className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${
+              isValidated(v) ? getSeverityDot(v.severity) : "border border-dashed border-[#888]"
+            }`}
+            aria-hidden="true"
+          />
           <span className="flex-1 min-w-0">
             <span className="block text-sm font-medium text-white truncate">{v.title}</span>
             {v.target && (
               <span className="block text-xs text-[#666] font-mono truncate">{v.target}</span>
             )}
           </span>
-          <span
-            className={`text-xs font-semibold px-2 py-0.5 rounded-full border capitalize ${SEVERITY_COLORS[v.severity]}`}
-          >
-            {v.severity}
-          </span>
+          {isValidated(v) ? (
+            <span
+              className={`text-xs font-semibold px-2 py-0.5 rounded-full border capitalize ${SEVERITY_COLORS[v.severity]}`}
+            >
+              {v.severity}
+            </span>
+          ) : (
+            <span className="flex items-center gap-1.5">
+              <span className="text-xs font-semibold px-2 py-0.5 rounded-full border border-dashed border-[#777] text-[#bbb] capitalize">
+                claimed {v.severity}
+              </span>
+              <span className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded border border-[#444] text-[#aaa]">
+                lead, not validated
+              </span>
+            </span>
+          )}
         </button>
       ))}
     </div>
@@ -663,6 +685,7 @@ function OverviewTab({
   summary,
   counts,
   total,
+  leads,
   reportMarkdown,
   raw,
   finished,
@@ -671,11 +694,13 @@ function OverviewTab({
   summary: ParsedRunSummary;
   counts: Record<VulnerabilitySeverity, number>;
   total: number;
+  leads: Record<VulnerabilitySeverity, number>;
   reportMarkdown: string | null;
   raw: Record<string, unknown>;
   finished: boolean;
   onOpenEmail: () => void;
 }) {
+  const leadTotal = leads.critical + leads.high + leads.medium + leads.low;
   const sections = (
     [
       ["Executive Summary", summary.executiveSummary],
@@ -693,9 +718,12 @@ function OverviewTab({
         <RunDetails raw={raw} durationSeconds={summary.durationSeconds} />
       </div>
 
-      {total > 0 && (
+      {(total > 0 || leadTotal > 0) && (
         <div className="animate-card-in rounded-xl border border-[#222] bg-[rgba(255,255,255,0.02)] p-5">
-          <IssueSeveritySummary findings={{ total, ...counts }} />
+          <IssueSeveritySummary
+            findings={{ total, ...counts }}
+            leads={{ total: leadTotal, ...leads }}
+          />
         </div>
       )}
 
