@@ -250,6 +250,10 @@ def render_vulnerability_md(report: dict[str, Any]) -> str:  # noqa: PLR0912, PL
         metadata.append(("Advisory CVSS", advisory_cvss))
     if dep_meta.get("contextual_cvss_vector"):
         metadata.append(("Contextual CVSS Vector", dep_meta["contextual_cvss_vector"]))
+    if report.get("proof_status"):
+        metadata.append(("Proof Status", str(report["proof_status"]).title()))
+    if report.get("proof_status_reason"):
+        metadata.append(("Proof Note", report["proof_status_reason"]))
     if report.get("confidence"):
         metadata.append(("Confidence", str(report["confidence"]).title()))
     if report.get("fix_effort"):
