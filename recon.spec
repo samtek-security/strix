@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 # -*- mode: python ; coding: utf-8 -*-
 
 import sys
@@ -265,7 +266,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='strix',
+    name='recon',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

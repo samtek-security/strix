@@ -1,4 +1,5 @@
-"""Tests for the Stripe Link wallet setup path of `strix cloud billing topup`."""
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
+"""Tests for the Stripe Link wallet setup path of `recon cloud billing topup`."""
 
 from __future__ import annotations
 

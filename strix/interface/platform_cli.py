@@ -1,4 +1,5 @@
-"""`strix cloud login` — managed platform sign-in (app.strix.ai).
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
+"""`recon cloud login` — managed platform sign-in (app.strix.ai).
 
 Signing in runs an OAuth 2.0 device authorization flow in the browser, creates
 the Strix account and workspace when they do not exist yet, and stores a
@@ -90,7 +91,7 @@ def logout() -> bool:
 
 
 def run_login(argv: list[str]) -> int:
-    """Entry point for ``strix cloud login``. Returns a process exit code."""
+    """Entry point for ``recon cloud login``. Returns a process exit code."""
     console = Console()
     subcommand = argv[0] if argv else None
 
@@ -102,7 +103,7 @@ def run_login(argv: list[str]) -> int:
 
 
 def _login(console: Console, argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="strix cloud login", add_help=True)
+    parser = argparse.ArgumentParser(prog="recon cloud login", add_help=True)
     parser.add_argument(
         "--no-browser",
         action="store_true",
@@ -180,7 +181,7 @@ def _login(console: Console, argv: list[str]) -> int:
         )
         console.print(
             f"[dim]Check that {_terminal_markup(AUTH_PATH.parent)} is writable, "
-            "then run `strix cloud login` again.[/]"
+            "then run `recon cloud login` again.[/]"
         )
         return 1
     _revoke_replaced_legacy_session(previous_record, record)
@@ -293,7 +294,7 @@ def _run_device_flow(  # noqa: PLR0912, PLR0915
             break
         interval = min(interval + delta, _MAX_POLL_INTERVAL_S)
 
-    raise PlatformAuthError("the sign-in request expired. Run `strix cloud login` again.")
+    raise PlatformAuthError("the sign-in request expired. Run `recon cloud login` again.")
 
 
 def _handle_poll_error(poll: requests.Response) -> int | None:
@@ -647,14 +648,14 @@ def _print_success(console: Console, record: dict[str, Any]) -> None:
     console.print(f"  Token:     stored in [dim]{_terminal_markup(AUTH_PATH)}[/]")
     console.print()
     console.print(
-        "[dim]The managed platform is ready. Run `strix cloud` to list the commands. "
+        "[dim]The managed platform is ready. Run `recon cloud` to list the commands. "
         "See https://docs.app.strix.ai for the API reference.[/]"
     )
 
 
 def _status(console: Console, argv: list[str]) -> int:  # noqa: PLR0912
     parser = _SessionArgumentParser(
-        prog="strix cloud whoami",
+        prog="recon cloud whoami",
         description="Show the stored managed-platform account, workspace, scopes, and expiry.",
     )
     parser.add_argument("--json", action="store_true", help="Print the session as JSON.")
@@ -677,7 +678,7 @@ def _status(console: Console, argv: list[str]) -> int:  # noqa: PLR0912
         if as_json:
             sys.stdout.write(json.dumps({"signed_in": False, "error": "Not signed in"}) + "\n")
             return 1
-        console.print("[yellow]Not signed in.[/] Run [bold]strix cloud login[/] to sign in.")
+        console.print("[yellow]Not signed in.[/] Run [bold]recon cloud login[/] to sign in.")
         return 1
     email = record.get("email", "unknown")
     organization = record.get("organization_name") or record.get("organization_id", "")
@@ -723,7 +724,7 @@ def _scope_summary(record: dict[str, Any]) -> str:
 
 def _logout(console: Console, argv: list[str]) -> int:  # noqa: PLR0911, PLR0912
     parser = _SessionArgumentParser(
-        prog="strix cloud logout",
+        prog="recon cloud logout",
         description="Revoke this CLI session and remove its token from this machine.",
     )
     parser.add_argument("--json", action="store_true", help="Print the result as JSON.")

@@ -1,4 +1,5 @@
-"""`strix cloud` — the managed Strix platform (app.strix.ai) from the terminal.
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
+"""`recon cloud` — the managed Strix platform (app.strix.ai) from the terminal.
 
 Every command maps to one operation of the public REST API. Output is JSON
 when stdout is not a terminal, so agents can parse every result. Exit codes:
@@ -24,7 +25,7 @@ from strix.interface.platform_cli import run_login
 from strix.interface.terminal_text import sanitize_terminal_text
 
 
-_USAGE_HEADER = """[bold]Usage:[/] strix cloud <command> [arguments]
+_USAGE_HEADER = """[bold]Usage:[/] recon cloud <command> [arguments]
 
 [bold]Session commands:[/]
   login       Sign in to the managed platform and store an API token
@@ -36,7 +37,7 @@ _USAGE_HEADER = """[bold]Usage:[/] strix cloud <command> [arguments]
 [bold]Resource commands:[/]"""
 
 _USAGE_FOOTER = """
-Run [bold]strix cloud <command> help[/] to list its verbs. Common read-only
+Run [bold]recon cloud <command> help[/] to list its verbs. Common read-only
 commands may also run their default verb when no verb is given.
 Every REST resource command accepts [bold]--json[/] and [bold]--token[/]. Write
 commands accept [bold]--data[/] with a JSON object of extra request fields.
@@ -67,7 +68,7 @@ def run_cloud(argv: list[str]) -> int:
 
 
 def _run_cloud(argv: list[str]) -> int:  # noqa: PLR0911, PLR0912
-    """Entry point for ``strix cloud …``. Returns a process exit code."""
+    """Entry point for ``recon cloud …``. Returns a process exit code."""
     console = Console()
     as_json = json_mode(flag="--json" in argv)
     if not argv or _is_help_request(argv):
@@ -146,14 +147,14 @@ def _print_verbs(
         if group == "workspaces":
             verbs.append({"name": "use", "help": "Switch the stored token to another workspace."})
         payload: dict[str, object] = {
-            "command": f"strix cloud {group}",
+            "command": f"recon cloud {group}",
             "verbs": verbs,
         }
         if error:
             payload["error"] = error
         sys.stdout.write(json.dumps(payload, indent=2) + "\n")
         return
-    console.print(f"[bold]strix cloud {group}[/] verbs:")
+    console.print(f"[bold]recon cloud {group}[/] verbs:")
     for verb, cmd in SPEC[group].items():
         console.print(f"  {verb:<28}{cmd.help}")
     if group == "workspaces":
@@ -162,7 +163,7 @@ def _print_verbs(
 
 def _print_usage_json() -> None:
     payload = {
-        "command": "strix cloud",
+        "command": "recon cloud",
         "session_commands": ["login", "logout", "whoami", "session", "credits"],
         "resource_commands": [{"name": group, "help": GROUP_HELP.get(group, "")} for group in SPEC],
     }

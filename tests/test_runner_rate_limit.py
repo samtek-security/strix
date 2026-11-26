@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Tests for graceful handling of persistent RateLimitError in run_strix_scan."""
 
 from __future__ import annotations
@@ -93,5 +94,5 @@ async def test_persistent_rate_limit_stops_gracefully(
     assert len(root_ids) == 1
     assert coordinator.statuses[root_ids[0]] == "stopped"
     # the resume hint must carry the real scan id, not a literal placeholder
-    assert "strix --resume scan-test" in caplog.text
+    assert "recon --resume scan-test" in caplog.text
     assert "<run_name>" not in caplog.text

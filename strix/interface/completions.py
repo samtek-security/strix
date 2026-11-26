@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Shell completion scripts and candidates for the Strix CLI."""
 
 from __future__ import annotations
@@ -6,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from strix.interface.cli_name import CLI_NAME
 from strix.interface.cloud.spec import DEFAULT_VERBS, SPEC, Cmd
 from strix.interface.terminal_text import has_terminal_control, sanitize_terminal_text
 
@@ -33,11 +35,11 @@ def run_completions(argv: list[str]) -> int:
         return 0
     if not argv or argv[0] in ("-h", "--help", "help"):
         sys.stdout.write(
-            "Usage: strix completions <zsh|bash|fish>\n\n"
+            f"Usage: {CLI_NAME} completions <zsh|bash|fish>\n\n"
             "Enable tab completion for the current shell:\n"
-            "  zsh:  source <(strix completions zsh)\n"
-            "  bash: source <(strix completions bash)\n"
-            "  fish: strix completions fish | source\n"
+            f"  zsh:  source <({CLI_NAME} completions zsh)\n"
+            f"  bash: source <({CLI_NAME} completions bash)\n"
+            f"  fish: {CLI_NAME} completions fish | source\n"
         )
         return 0
     shell = argv[0].lower()
@@ -53,7 +55,7 @@ def run_completions(argv: list[str]) -> int:
 
 
 def completion_candidates(words: list[str]) -> list[str]:
-    """Return candidates for words after the ``strix`` executable."""
+    """Return candidates for words after the ``recon`` executable."""
     prior, current = _split_cursor(words)
     if not prior:
         candidates = _matching(_ROOT_COMMANDS, current)
@@ -331,24 +333,28 @@ def _matching(candidates: Any, prefix: str) -> list[str]:
     return sorted({str(candidate) for candidate in candidates if str(candidate).startswith(prefix)})
 
 
+def _render(template: str) -> str:
+    return template.replace("@CLI@", CLI_NAME)
+
+
 def _zsh_script() -> str:
-    return r"""#compdef strix
-_strix() {
+    return _render(r"""#compdef @CLI@
+_@CLI@() {
   local -a candidates
   candidates=("${(@f)$($words[1] completions --candidates "${words[@]:2}")}")
-  _describe 'strix' candidates
+  _describe '@CLI@' candidates
 }
-compdef _strix strix
-"""
+compdef _@CLI@ @CLI@
+""")
 
 
 def _bash_script() -> str:
-    return r"""_strix_completion() {
+    return _render(r"""_@CLI@_completion() {
   local -a candidates
   local candidate
   while IFS= read -r candidate; do
     candidates+=("$candidate")
-  done < <(strix completions --candidates "${COMP_WORDS[@]:1:$COMP_CWORD}")
+  done < <(@CLI@ completions --candidates "${COMP_WORDS[@]:1:$COMP_CWORD}")
   COMPREPLY=("${candidates[@]}")
   for candidate in "${COMPREPLY[@]}"; do
     if [[ $candidate == */ ]]; then
@@ -359,15 +365,15 @@ def _bash_script() -> str:
     fi
   done
 }
-complete -F _strix_completion strix
-"""
+complete -F _@CLI@_completion @CLI@
+""")
 
 
 def _fish_script() -> str:
-    return r"""function __strix_candidates
+    return _render(r"""function __@CLI@_candidates
   set -l words (commandline -opc)
   set -e words[1]
-  command strix completions --candidates $words (commandline -ct)
+  command @CLI@ completions --candidates $words (commandline -ct)
 end
-complete -c strix -f -a '(__strix_candidates)'
-"""
+complete -c @CLI@ -f -a '(__@CLI@_candidates)'
+""")
