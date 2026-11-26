@@ -424,6 +424,24 @@ def _landing_in_scope(url: str, flow: dict) -> bool:
     return _in_signed_scope(host, flow)
 
 
+async def _read_state(session: Any, session_name: str, state_path: str) -> str:
+    """Save the browser's storage state and return it as text, but only if it is a PARSEABLE
+    storage-state with real cookies (or localStorage origins); anything else - a failed save or
+    read, non-JSON, an empty cookie jar - returns "". No string-substring fallback: a bogus file
+    must not count as a session."""
+    save_ok, _ = await _run(
+        session, "recon-browser", "--session-name", session_name, "state", "save", state_path)
+    cat_ok, cat = await _run(session, "cat", state_path)
+    if not (save_ok and cat_ok):
+        return ""
+    try:
+        data = json.loads(cat)
+    except (json.JSONDecodeError, ValueError):
+        return ""
+    ok = isinstance(data, dict) and (bool(data.get("cookies")) or bool(data.get("origins")))
+    return cat if ok else ""
+
+
 async def _verify(session: Any, flow: dict, session_name: str, state_path: str, target_url: str) -> dict:
     """Three-part fail-closed verification. Returns a checks dict + overall `authenticated`."""
     checks: dict[str, Any] = {}
@@ -444,6 +462,14 @@ async def _verify(session: Any, flow: dict, session_name: str, state_path: str, 
                 "protected_probe": False,
             },
         }
+
+    # (2) NON-EMPTY saved session state (real cookies). This is the AUTHENTICATION GATE, so it is
+    # read BEFORE any probe navigates: opening a public target page can itself set an anonymous
+    # cookie, and a gate evaluated after that would turn "the site gave us a cookie" into proof
+    # of login. (The state handed back for persistence is refreshed after the probes, below.)
+    pre_state = await _read_state(session, session_name, state_path)
+    cookies_ok = bool(pre_state)
+    checks["saved_state"] = cookies_ok
 
     # (1) semantic success_condition the operator declared.
     declared = bool(_text(flow, "success_condition"))
@@ -480,37 +506,18 @@ async def _verify(session: Any, flow: dict, session_name: str, state_path: str, 
                     and _landing_in_scope(url, flow))
     checks["protected_probe"] = probe_ok
 
-    # (2) NON-EMPTY saved session state (real cookies), persisted for postmortem. Done LAST,
-    # after the navigations above, so both the gate and the state handed back to the caller for
-    # cross-run persistence reflect the FINAL session - not a snapshot from before a probe that
-    # could have rotated a cookie or seeded localStorage.
-    save_ok, _ = await _run(
-        session, "recon-browser", "--session-name", session_name, "state", "save", state_path)
-    cat_ok, cat = await _run(session, "cat", state_path)
-    cookies_ok = False
-    state_text = ""
-    if save_ok and cat_ok:
-        # Fail-closed: require a PARSEABLE storage-state with real cookies (or localStorage
-        # origins). A non-JSON / unparseable blob is NOT accepted (no string-substring fallback -
-        # a bogus file must not count as a session).
-        try:
-            data = json.loads(cat)
-            cookies_ok = isinstance(data, dict) and (
-                bool(data.get("cookies")) or bool(data.get("origins")))
-            if cookies_ok:
-                state_text = cat
-        except (json.JSONDecodeError, ValueError):
-            cookies_ok = False
-    checks["saved_state"] = cookies_ok
-
     # Fail-closed: require saved state AND (the declared success condition, or the probe when none
     # was declared) AND the protected probe. Any missing signal => not authenticated.
     sem_ok = checks["success_condition"] if "success_condition" in checks else probe_ok
     authenticated = bool(cookies_ok and sem_ok and probe_ok)
-    return {
-        "authenticated": authenticated, "checks": checks,
-        "state_text": state_text if authenticated else "",
-    }
+    state_text = ""
+    if authenticated:
+        # Only now that every gate has passed: re-save so the state handed back for cross-run
+        # persistence reflects the FINAL session (a probe can rotate a cookie or seed
+        # localStorage). It never feeds the gate above; if the refresh is unusable, keep the
+        # pre-probe state that did pass it.
+        state_text = await _read_state(session, session_name, state_path) or pre_state
+    return {"authenticated": authenticated, "checks": checks, "state_text": state_text}
 
 
 def _safe_mfa_timeout(raw: str | None, default: float = 90.0) -> float:
