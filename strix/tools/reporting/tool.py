@@ -1009,6 +1009,8 @@ async def _do_create(
             "report_id": report_id,
             "severity": severity,
             "cvss_score": cvss_score,
+            # A downgraded report is a lead: the card must not show its severity as validated.
+            "proof_status": proof_status,
         }
 
 

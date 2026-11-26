@@ -40,11 +40,22 @@ export default function VulnReportRenderer({ args, result }: ToolRendererProps) 
   const severity = String(rawSev).toLowerCase();
   const cvss = (res && typeof res === "object" ? (res.cvss_score as number) : null) ?? (args.cvss as number) ?? null;
   const sevColor = SEVERITY_COLORS[severity] ?? "text-yellow-400";
+  const proofStatus = String((res && typeof res === "object" ? res.proof_status : "") ?? "").trim().toLowerCase();
+  const lead = proofStatus !== "" && proofStatus !== "exploited";
 
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2 flex-wrap">
-        <span className={`font-semibold text-sm ${sevColor}`}>{severity.toUpperCase()}</span>
+        {lead ? (
+          <>
+            <span className="font-semibold text-sm text-[#bbb]">CLAIMED {severity.toUpperCase()}</span>
+            <span className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded border border-dashed border-[#777] text-[#bbb]">
+              lead, not validated
+            </span>
+          </>
+        ) : (
+          <span className={`font-semibold text-sm ${sevColor}`}>{severity.toUpperCase()}</span>
+        )}
         {cvss != null && <span className="text-[#888] text-[13px]">CVSS {cvss}</span>}
         {cve && <span className="text-[#888] font-mono text-[13px]">{cve}</span>}
         {cwe && <span className="text-[#888] font-mono text-[13px]">{cwe}</span>}

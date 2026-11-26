@@ -277,7 +277,8 @@ export default function App() {
           if (v === "history") openHistory();
           else userSetView(v);
         }}
-        issuesCount={run?.vulnerabilities.length ?? 0}
+        issuesCount={run?.vulnerabilities.filter(isValidated).length ?? 0}
+        leadsCount={run?.vulnerabilities.filter((v) => !isValidated(v)).length ?? 0}
         agentCount={agentCount}
         mcpConnections={mcpConnections}
         mcpInUse={mcpInUse}
@@ -388,7 +389,14 @@ export default function App() {
                   Pentest Overview
                 </TabButton>
                 <TabButton active={view === "issues"} onClick={() => userSetView("issues")}>
-                  Issues{run.vulnerabilities.length > 0 ? ` (${run.vulnerabilities.length})` : ""}
+                  Issues
+                  {run.vulnerabilities.length > 0
+                    ? ` (${run.vulnerabilities.filter(isValidated).length}${
+                        run.vulnerabilities.some((v) => !isValidated(v))
+                          ? ` + ${run.vulnerabilities.filter((v) => !isValidated(v)).length} leads`
+                          : ""
+                      })`
+                    : ""}
                 </TabButton>
                 {agentCount > 0 && (
                   <TabButton active={view === "agents"} onClick={() => userSetView("agents")}>

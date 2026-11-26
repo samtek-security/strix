@@ -280,3 +280,12 @@ async def test_a_no_source_report_without_ids_stores_none(report_state: ReportSt
     assert report["proof_status"] == "lead"
     assert report["proof_status_reason"] == NO_EXCHANGE_SOURCE_REASON
     assert not report.get("http_exchange_ids")
+
+
+@pytest.mark.asyncio
+async def test_the_create_result_carries_the_proof_status(report_state: ReportState) -> None:
+    exploited = await _file(_Capture({_GOOD}), http_exchange_ids=[_GOOD])
+    assert exploited["proof_status"] == "exploited"
+    report_state.vulnerability_reports.clear()
+    lead = await _file(_Capture(set()), http_exchange_ids=[])
+    assert lead["proof_status"] == "lead"

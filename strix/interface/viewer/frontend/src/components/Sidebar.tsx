@@ -37,6 +37,8 @@ interface SidebarProps {
   view: View;
   onSelectView: (view: View) => void;
   issuesCount: number;
+  /** Leads, counted apart from the validated issues. */
+  leadsCount?: number;
   agentCount: number;
   mcpConnections: McpConnectionStatus[];
   mcpInUse: Set<string>;
@@ -63,6 +65,7 @@ export default function Sidebar({
   view,
   onSelectView,
   issuesCount,
+  leadsCount = 0,
   agentCount,
   mcpConnections,
   mcpInUse,
@@ -238,7 +241,8 @@ export default function Sidebar({
             <NavItem
               icon={<AlertTriangle className="h-4 w-4" />}
               label="Issues"
-              count={issuesCount > 0 ? issuesCount : undefined}
+              count={issuesCount > 0 || leadsCount > 0 ? issuesCount : undefined}
+              suffix={leadsCount > 0 ? `+ ${leadsCount} ${leadsCount === 1 ? "lead" : "leads"}` : undefined}
               active={view === "issues"}
               onClick={() => onSelectView("issues")}
             />
@@ -403,9 +407,11 @@ interface NavItemProps {
   active: boolean;
   onClick: () => void;
   count?: number;
+  /** Text after the count, e.g. "+ 2 leads". */
+  suffix?: string;
 }
 
-function NavItem({ icon, label, active, onClick, count }: NavItemProps) {
+function NavItem({ icon, label, active, onClick, count, suffix }: NavItemProps) {
   return (
     <button
       onClick={onClick}
@@ -423,6 +429,7 @@ function NavItem({ icon, label, active, onClick, count }: NavItemProps) {
       {count != null && (
         <span className="mr-2 flex-none rounded-full border border-white/10 px-2 py-0.5 text-[10px] tabular-nums leading-none text-[#777]">
           {count}
+          {suffix ? <span className="ml-1 text-[#999]">{suffix}</span> : null}
         </span>
       )}
     </button>

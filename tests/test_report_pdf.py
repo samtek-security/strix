@@ -77,6 +77,21 @@ def test_generate_report_pdf_has_pdf_header(tmp_path: Path) -> None:
     assert len(pdf) > 1000
 
 
+def test_a_lead_reads_as_claimed_and_unvalidated_in_the_pdf(tmp_path: Path) -> None:
+    run_dir = _make_run(tmp_path)
+    vulns = json.loads((run_dir / "vulnerabilities.json").read_text(encoding="utf-8"))
+    vulns[0]["proof_status"] = "lead"
+    (run_dir / "vulnerabilities.json").write_text(json.dumps(vulns), encoding="utf-8")
+    text = _pdf_text(generate_report_pdf(run_dir))
+    assert "CLAIMED CRITICAL" in text
+    assert "lead, not validated" in text
+
+
+def test_a_validated_finding_keeps_its_plain_severity_pill(tmp_path: Path) -> None:
+    text = _pdf_text(generate_report_pdf(_make_run(tmp_path)))
+    assert "CLAIMED" not in text
+
+
 def test_generate_password_is_long_and_random() -> None:
     first = generate_password()
     second = generate_password()

@@ -291,12 +291,19 @@ def _normalize_severity(value: Any) -> str:
     return severity if severity in {*_SEVERITY_COLORS, "info"} else "low"
 
 
-def _severity_badge(styles: dict[str, ParagraphStyle], severity: Any) -> Table:
-    """A colored pill matching .severity-badge in the cloud report."""
+def _severity_badge(
+    styles: dict[str, ParagraphStyle], severity: Any, *, lead: bool = False
+) -> Table:
+    """A colored pill matching .severity-badge in the cloud report.
+
+    A lead gets a neutral pill reading ``CLAIMED <SEVERITY>``, so a claimed severity never
+    shows the colour of a validated one.
+    """
     severity = _normalize_severity(severity)
-    color = _SEVERITY_COLORS.get(severity, _MUTED)
-    cell = Paragraph(_esc(severity.upper()), styles["badge"])
-    table = Table([[cell]], colWidths=[len(severity) * 6.5 + 20])
+    color = _MUTED if lead else _SEVERITY_COLORS.get(severity, _MUTED)
+    label = f"CLAIMED {severity.upper()}" if lead else severity.upper()
+    cell = Paragraph(_esc(label), styles["badge"])
+    table = Table([[cell]], colWidths=[len(label) * 6.5 + 20])
     table.setStyle(
         TableStyle(
             [
@@ -585,7 +592,7 @@ def _finding_flowables(
             styles["finding"],
         ),
         Spacer(1, 4),
-        _severity_badge(styles, severity),
+        _severity_badge(styles, severity, lead=not is_validated(vuln)),
     ]
     if meta_bits:
         header.append(Paragraph("&nbsp;&nbsp;".join(meta_bits), styles["meta_inline"]))
