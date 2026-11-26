@@ -28,7 +28,8 @@ test("a location naming no repository is unchanged", () => {
 test("a repository matches its URL by exact name, not by substring", () => {
   assert.equal(repoMatchesUrl("acme/api", "https://github.com/acme/api"), true);
   assert.equal(repoMatchesUrl("acme/api", "https://github.com/acme/api.git"), true);
-  assert.equal(repoMatchesUrl("acme__api", "git@github.com:acme/api.git"), true);
+  assert.equal(repoMatchesUrl("acme/api", "git@github.com:acme/api.git"), true);
+  assert.equal(repoMatchesUrl("acme__api", "https://github.com/acme/api"), false);
   assert.equal(repoMatchesUrl("API", "https://github.com/acme/api"), true);
   assert.equal(repoMatchesUrl("api", "https://github.com/acme/web-api"), false);
   assert.equal(repoMatchesUrl("acme/api", "https://github.com/acme/api-gateway"), false);

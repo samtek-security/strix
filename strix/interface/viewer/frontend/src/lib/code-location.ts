@@ -16,10 +16,9 @@ export function formatCodeLocation(loc: LocationRef, withLines = true): string {
     : `${where}:${loc.start_line}`;
 }
 
-// True when `repo` names the repository `repoUrl` points at. Matches owner/name, owner__name or a bare
-// name against the URL's path segments exactly, so `api` never matches `acme/web-api`.
+// True when `repo` names the repository `repoUrl` points at. Matches owner/name or a bare name against the URL's path segments exactly, so `api` never matches `acme/web-api`.
 export function repoMatchesUrl(repo: string, repoUrl: string): boolean {
-  const want = repo.trim().toLowerCase().replace(/__/g, "/").replace(/\.git$/, "");
+  const want = repo.trim().toLowerCase().replace(/\.git$/, "");
   if (!want) return false;
   const path = repoUrl.trim().toLowerCase().replace(/^[a-z+]+:\/\/[^/]+\//, "").replace(/^[^@/]+@[^:]+:/, "");
   const parts = path.replace(/\.git$/, "").split("/").filter(Boolean);
