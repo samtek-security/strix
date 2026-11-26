@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Local HTTP server that serves the viewer SPA and a run's data from disk.
 
 Design notes:
@@ -123,7 +124,7 @@ class _ViewerState:
     ) -> None:
         self.run_dir = run_dir
         self.assets_dir = assets_dir
-        # The strix_runs directory that holds the launched run; used to
+        # The recon_runs directory that holds the launched run; used to
         # enumerate and resolve other runs for the history list.
         self.base_dir = run_dir.parent
         # Set only when the viewer runs inside a live scan process (the TUI

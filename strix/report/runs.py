@@ -1,4 +1,5 @@
-"""Summaries of the runs under ./strix_runs, for pickers and listings."""
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
+"""Summaries of the runs under ./recon_runs, for pickers and listings."""
 
 from __future__ import annotations
 

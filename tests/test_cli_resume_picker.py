@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from strix.core.paths import RUNS_DIR_NAME
+
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -46,7 +48,7 @@ def test_bare_resume_defers_to_the_picker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flag: str
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    _write_run(tmp_path / "strix_runs", "example-com_1111")
+    _write_run(tmp_path / RUNS_DIR_NAME, "example-com_1111")
     monkeypatch.setattr(sys, "argv", ["strix", flag])
 
     args = cli_main.parse_arguments()
@@ -61,7 +63,7 @@ def test_bare_resume_keeps_the_new_instruction_as_resume_guidance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    _write_run(tmp_path / "strix_runs", "example-com_1111")
+    _write_run(tmp_path / RUNS_DIR_NAME, "example-com_1111")
     monkeypatch.setattr(sys, "argv", ["strix", "--resume", "--instruction", "focus on auth"])
 
     args = cli_main.parse_arguments()
@@ -79,15 +81,15 @@ def test_bare_resume_with_no_runs_is_an_error(
     with pytest.raises(SystemExit):
         cli_main.parse_arguments()
 
-    assert "no runs in ./strix_runs" in capsys.readouterr().err
+    assert f"no runs in ./{RUNS_DIR_NAME}" in capsys.readouterr().err
 
 
 def test_bare_resume_headless_lists_the_runs_instead_of_prompting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    _write_run(tmp_path / "strix_runs", "example-com_1111")
-    _write_run(tmp_path / "strix_runs", "example-com_2222", state=False)
+    _write_run(tmp_path / RUNS_DIR_NAME, "example-com_1111")
+    _write_run(tmp_path / RUNS_DIR_NAME, "example-com_2222", state=False)
     monkeypatch.setattr(sys, "argv", ["strix", "-n", "--resume"])
 
     with pytest.raises(SystemExit):
@@ -104,7 +106,7 @@ def test_bare_resume_still_rejects_targets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    _write_run(tmp_path / "strix_runs", "example-com_1111")
+    _write_run(tmp_path / RUNS_DIR_NAME, "example-com_1111")
     monkeypatch.setattr(sys, "argv", ["strix", "--resume", "-t", "https://example.com"])
 
     with pytest.raises(SystemExit):
@@ -117,7 +119,7 @@ def test_named_resume_without_agent_state_is_an_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    _write_run(tmp_path / "strix_runs", "example-com_1111", state=False)
+    _write_run(tmp_path / RUNS_DIR_NAME, "example-com_1111", state=False)
     monkeypatch.setattr(sys, "argv", ["strix", "--resume", "example-com_1111"])
 
     with pytest.raises(SystemExit):

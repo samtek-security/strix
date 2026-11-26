@@ -6,7 +6,7 @@ import type {
 
 /**
  * Pure, dependency-free parsers that turn a Strix CLI local run
- * (`strix_runs/<run>/{run.json,vulnerabilities.json}`) into the app's own
+ * (`recon_runs/<run>/{run.json,vulnerabilities.json}`) into the app's own
  * types, so the /results view can reuse the dashboard's finding components.
  *
  * These run entirely client-side against files the user picked from disk —

@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from strix.core.paths import RUNS_DIR_NAME
+
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -104,7 +106,7 @@ def test_resume_restores_a_target_less_workspace_mount(
     work.mkdir()
     monkeypatch.chdir(tmp_path)
     _write_run_record(
-        tmp_path / "strix_runs",
+        tmp_path / RUNS_DIR_NAME,
         "pentest_abcd",
         {
             "run_name": "pentest_abcd",
@@ -138,7 +140,7 @@ def test_resume_revalidates_persisted_workspace_files(
     kept.write_text("admin\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     _write_run_record(
-        tmp_path / "strix_runs",
+        tmp_path / RUNS_DIR_NAME,
         "pentest_abcd",
         {
             "run_name": "pentest_abcd",
@@ -170,7 +172,7 @@ def test_resume_rejects_an_edited_workspace_file_path(
     source.write_text("admin\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     _write_run_record(
-        tmp_path / "strix_runs",
+        tmp_path / RUNS_DIR_NAME,
         "pentest_abcd",
         {
             "run_name": "pentest_abcd",
@@ -195,7 +197,7 @@ def test_resume_reports_a_missing_workspace_directory(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     _write_run_record(
-        tmp_path / "strix_runs",
+        tmp_path / RUNS_DIR_NAME,
         "pentest_abcd",
         {
             "run_name": "pentest_abcd",
@@ -217,7 +219,7 @@ def test_resume_still_requires_targets_or_a_workspace(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     _write_run_record(
-        tmp_path / "strix_runs",
+        tmp_path / RUNS_DIR_NAME,
         "pentest_abcd",
         {"run_name": "pentest_abcd", "targets_info": [], "local_sources": []},
     )
@@ -233,7 +235,7 @@ def test_resume_non_object_run_json_exits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    run_dir = tmp_path / "strix_runs" / "pentest_abcd"
+    run_dir = tmp_path / RUNS_DIR_NAME / "pentest_abcd"
     run_dir.mkdir(parents=True)
     (run_dir / "run.json").write_text("[]", encoding="utf-8")
 
