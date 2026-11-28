@@ -1,4 +1,5 @@
 # Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
+import functools
 import json
 import logging
 import re
@@ -232,6 +233,21 @@ def set_global_report_state(report_state: Optional["ReportState"]) -> None:
     streamed_openrouter_costs.clear()
 
 
+def _one_writer[**P, R](method: Callable[P, R]) -> Callable[P, R]:
+    """Run a revision of a filed report alone.
+
+    Tools revise from worker threads while merges run on the event loop. Without this, a write
+    built from an older report lands over a newer one after its checks have passed.
+    """
+
+    @functools.wraps(method)
+    def locked(*args: P.args, **kwargs: P.kwargs) -> R:
+        with cast("ReportState", args[0])._revision_lock:
+            return method(*args, **kwargs)
+
+    return locked
+
+
 class ReportState:
     """Per-scan product artifact state plus artifact writer.
 
@@ -250,6 +266,7 @@ class ReportState:
         self.end_time: str | None = None
 
         self.vulnerability_reports: list[dict[str, Any]] = []
+        self._revision_lock = threading.RLock()
         self.final_scan_result: str | None = None
 
         self.scan_results: dict[str, Any] | None = None
@@ -531,6 +548,7 @@ class ReportState:
                 used = max(used, int(match.group(1)))
         return f"vuln-{used + 1:04d}"
 
+    @_one_writer
     def update_vulnerability_report(
         self,
         report_id: str,
@@ -654,6 +672,7 @@ class ReportState:
         self.save_run_data()
         return report
 
+    @_one_writer
     def merge_proof_into_report(
         self,
         report_id: str,
@@ -764,6 +783,7 @@ class ReportState:
         self.save_run_data()
         return report
 
+    @_one_writer
     def delete_vulnerability_report(
         self,
         report_id: str,

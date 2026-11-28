@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -193,6 +194,30 @@ async def test_a_signal_checked_before_another_revision_is_refused(
     assert _update(report_id, **change)["success"]
     assert not _update(report_id, checked, proof_signal=_SIGNAL)["success"]
     assert "proof_signal" not in report_state.vulnerability_reports[0]
+
+
+async def test_a_second_revision_waits_for_the_first_to_commit(report_state: ReportState) -> None:
+    report_id = (await _create())["report_id"]
+    second = threading.Thread(
+        target=report_state.update_vulnerability_report, args=(report_id, {"endpoint": "/b"})
+    )
+    blocked: list[bool] = []
+
+    def start_second_mid_write(_report: dict[str, Any]) -> None:
+        if not blocked:
+            second.start()
+            second.join(0.2)
+            blocked.append(second.is_alive())
+
+    report_state.vulnerability_updated_callback = start_second_mid_write
+    assert _update(report_id, proof_signal={"reflection": "root"})["success"]
+    second.join(5)
+
+    assert blocked == [True]
+    report = report_state.vulnerability_reports[0]
+    # The later revision saw the committed signal, so its new endpoint dropped it.
+    assert report["endpoint"] == "/b"
+    assert "proof_signal" not in report
 
 
 async def test_an_unchecked_signal_is_never_written(report_state: ReportState) -> None:
