@@ -33,7 +33,7 @@ from strix.runtime.deferred_session import DeferredSandboxClient, DeferredSandbo
 
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Callable
 
     from agents.sandbox.session import BaseSandboxSession
 
@@ -363,46 +363,75 @@ async def _resolve_extra_file_archive(
     return build_extra_file_archive(files, local_sources) if files else None
 
 
+def _source_mount_enabled() -> bool:
+    return os.environ.get("RECON_MOUNT_SOURCE", "1") not in ("0", "false", "no")
+
+
+def _source_member_filter(
+    arcname: str, host_path: Path
+) -> Callable[[tarfile.TarInfo], tarfile.TarInfo | None]:
+    """Drop skipped directories and make links that stay inside the source relative.
+
+    An absolute target, or one that leaves the tree and comes back by the host
+    directory's name, means nothing once the tree sits at another path.
+    """
+
+    def _filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        if set(info.name.split("/")) & _K8S_SOURCE_SKIP:
+            return None
+        if info.issym():
+            link = host_path / info.name[len(arcname) + 1 :]
+            target = link.resolve()
+            if target == host_path or host_path in target.parents:
+                info.linkname = os.path.relpath(target, link.parent.resolve())
+        return info
+
+    return _filter
+
+
 async def _hydrate_k8s_sources(session: Any, local_sources: list[dict[str, Any]]) -> None:
-    """Tar each local source into ``/workspace/<subdir>`` of a Kubernetes sandbox.
+    """Tar every local source into ``/workspace/<subdir>`` of a Kubernetes sandbox.
 
     The Docker backends copy manifest ``LocalDir`` entries at ``session.start()``;
     the Kubernetes backend has no source materialization, so a white-box run
-    would otherwise reach the agent without its tree. Best-effort: a copy
-    failure never breaks the run (route, GraphQL and SAST intel still reach the
-    agent as text). Gated on ``RECON_MOUNT_SOURCE`` (default on).
+    would otherwise reach the agent without its tree. All sources travel in one
+    tar stream. Any failure raises: a run that expects source must not start
+    without it. Gated on ``RECON_MOUNT_SOURCE`` (default on).
     """
-    if os.environ.get("RECON_MOUNT_SOURCE", "1") in ("0", "false", "no"):
+    if not _source_mount_enabled():
         return
 
-    def _skip_vcs(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
-        if set(info.name.split("/")) & _K8S_SOURCE_SKIP:
-            return None
-        return info
-
-    for src in local_sources:
-        ws = str(src.get("workspace_subdir") or "").strip()
-        host = str(src.get("source_path") or "").strip()
-        if not ws or not host:
-            continue
-        host_path = Path(host).expanduser().resolve()
-        if not host_path.exists():
-            logger.warning("source materialization: host path missing for %s: %s", ws, host)
-            continue
-        buf = io.BytesIO()
-        try:
-            with tarfile.open(fileobj=buf, mode="w") as tf:
-                tf.add(str(host_path), arcname=ws, filter=_skip_vcs)
-            nbytes = buf.getbuffer().nbytes
-            buf.seek(0)
-            await session.hydrate_workspace(buf)
-            logger.info("Materialized source into k8s pod: /workspace/%s (%d bytes)", ws, nbytes)
-        except Exception:  # noqa: BLE001 - best-effort; the run continues either way
-            logger.warning(
-                "source materialization failed for %s; continuing without mounted source",
-                ws,
-                exc_info=True,
+    subdirs: list[str] = []
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for src in local_sources:
+            ws = str(src.get("workspace_subdir") or "").strip()
+            host = str(src.get("source_path") or "").strip()
+            if not ws or not host:
+                continue
+            host_path = Path(host).expanduser().resolve()
+            if not host_path.exists():
+                raise FileNotFoundError(
+                    f"source materialization: host path missing for {ws}: {host}"
+                )
+            # A hard link into an earlier source would point outside this one's tree.
+            tf.inodes.clear()  # type: ignore[attr-defined]
+            tf.add(
+                str(host_path), arcname=ws, filter=_source_member_filter(ws.strip("/"), host_path)
             )
+            subdirs.append(ws)
+    if not subdirs:
+        return
+    nbytes = buf.getbuffer().nbytes
+    buf.seek(0)
+    hydrate = getattr(session, "hydrate_sources", None) or getattr(
+        getattr(session, "_inner", None), "hydrate_sources", None
+    )
+    if hydrate is not None:
+        await hydrate(buf, subdirs)
+    else:
+        await session.hydrate_workspace(buf)
+    logger.info("Materialized %d source tree(s) into k8s pod (%d bytes)", len(subdirs), nbytes)
 
 
 def _gateway_capture_client(client: Any, session: Any, scan_id: str) -> Any:
@@ -598,6 +627,11 @@ async def create_or_reuse(  # noqa: PLR0915
 
     async def _bring_up() -> tuple[Any, Any]:
         report("Starting sandbox container")
+        # Only the Kubernetes backend takes sources, so it can size-check them
+        # before it creates any cluster object.
+        source_kwargs: dict[str, Any] = (
+            {"local_sources": local_sources} if is_k8s and _source_mount_enabled() else {}
+        )
         client, session = await _create_or_discard(
             backend(
                 image=image,
@@ -610,6 +644,7 @@ async def create_or_reuse(  # noqa: PLR0915
                 gateway_spec_json=gateway_spec_json,
                 gateway_target_ports=normalized_ports,
                 **_engagement_kwargs(backend, engagement_id),
+                **source_kwargs,
             )
         )
         try:
