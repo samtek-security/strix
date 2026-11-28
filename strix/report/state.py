@@ -893,8 +893,12 @@ class ReportState:
 
         logger.info("Updated scan final fields")
         self.save_run_data(mark_complete=True)
-        posthog.end(self, exit_reason="finished_by_tool")
-        scarf.end(self, exit_reason="finished_by_tool")
+
+    def record_scan_end(self) -> None:
+        """Send the end-of-scan beacons for the recorded exit reason and save it."""
+        self.save_run_data()
+        posthog.end(self)
+        scarf.end(self)
 
     def record_mcp_connections(self, names: list[str]) -> None:
         """Note the MCP servers this run connected, and persist it.

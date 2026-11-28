@@ -6,11 +6,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agents import RunContextWrapper, function_tool
 
 from strix.core.agents import coordinator_from_context
+
+
+if TYPE_CHECKING:
+    from strix.core.agents import AgentCoordinator
 
 
 logger = logging.getLogger(__name__)
@@ -82,6 +86,25 @@ def _do_finish(
         }
         result.update(coverage_summary)
         return result
+
+
+async def _record_scan_end(coordinator: AgentCoordinator | None) -> None:
+    """Record why a finished scan ended: a scan-wide stop that landed first, else the tool.
+
+    The reason is chosen on the event loop, where stops are raised, and only after the report
+    is written, so a stop cannot land between the choice and the report being complete.
+    """
+    from strix.report.state import get_global_report_state
+
+    report_state = get_global_report_state()
+    if report_state is None:
+        return
+    if report_state.scan_ended_exit_reason is None:
+        reason = "finished_by_tool"
+        if coordinator is not None and coordinator.budget_stopped:
+            reason = coordinator.stop_reason or "budget_exceeded"
+        report_state.scan_ended_exit_reason = reason
+    await asyncio.to_thread(report_state.record_scan_end)
 
 
 def _coverage_summary(agent_graph: dict[str, Any]) -> dict[str, Any]:
@@ -344,6 +367,8 @@ async def finish_scan(
         recommendations=recommendations,
         agent_graph=await coordinator.snapshot() if coordinator is not None else {},
     )
+    if result.get("success") and result.get("scan_completed"):
+        await _record_scan_end(coordinator)
     if (
         result.get("success")
         and result.get("scan_completed")
