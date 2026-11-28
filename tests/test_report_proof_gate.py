@@ -200,7 +200,12 @@ _PROMOTE_FIELDS = {
 
 
 async def _promote(
-    client: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exchange_id: str | None
+    client: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exchange_id: str | None,
+    *,
+    control_id: str | None = None,
 ) -> dict[str, Any]:
     monkeypatch.chdir(tmp_path)
     state = ReportState(run_name="parity-promote")
@@ -222,6 +227,7 @@ async def _promote(
         "request": "GET /a?id=1%27",
         "response": "HTTP 500 SQL syntax error",
         "caido_request_id": exchange_id,
+        "control_request_id": control_id,
         **_PROMOTE_FIELDS,
     }
     ctx = _ctx(client, "promote_finding")
@@ -283,3 +289,56 @@ async def test_a_no_source_report_without_ids_stores_none(report_state: ReportSt
     assert report["proof_status"] == "lead"
     assert report["proof_status_reason"] == NO_EXCHANGE_SOURCE_REASON
     assert not report.get("http_exchange_ids")
+
+
+_MARKER = "captured-only-marker-7f3a"
+
+
+class _Marked(_Capture):
+    async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+        result = await super().view_request(request_id, part=part)
+        if result is not None:
+            result.response.raw = f"HTTP/1.1 200\r\n\r\n{_MARKER}".encode()
+        return result
+
+
+@pytest.mark.asyncio
+async def test_a_verified_filing_keeps_the_captured_pair_out_of_the_run_files(
+    report_state: ReportState, tmp_path: Path
+) -> None:
+    await _file(_Marked({_GOOD}), http_exchange_ids=[_OTHER, _GOOD])
+    report = _filed(report_state)
+    pairs = report_state.proof_captures[report["id"]]
+    assert list(pairs) == [_GOOD]
+    assert _MARKER in pairs[_GOOD]["response"]
+    assert pairs[_GOOD]["request"].startswith("GET /a")
+    report_state.save_run_data()
+    written = [p for p in tmp_path.rglob("*") if p.is_file()]
+    assert any(p.name == "vulnerabilities.json" for p in written)
+    assert not [p for p in written if _MARKER.encode() in p.read_bytes()]
+
+
+@pytest.mark.asyncio
+async def test_a_lead_keeps_no_capture(report_state: ReportState) -> None:
+    await _file(_Marked({_GOOD}, down=True), http_exchange_ids=[_GOOD])
+    assert _filed(report_state)["proof_status"] == "lead"
+    assert report_state.proof_captures == {}
+
+
+@pytest.mark.asyncio
+async def test_a_promotion_keeps_only_its_control_exchange(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    states: list[ReportState] = []
+    make = ReportState
+
+    def tracked(*args: Any, **kwargs: Any) -> ReportState:
+        states.append(make(*args, **kwargs))
+        return states[-1]
+
+    monkeypatch.setattr(f"{__name__}.ReportState", tracked)
+    report = await _promote(
+        _Marked({_GOOD, _OTHER}), tmp_path, monkeypatch, _GOOD, control_id=_OTHER
+    )
+    assert report["proof_status"] == "exploited"
+    assert list(states[0].proof_captures[report["id"]]) == [_OTHER]

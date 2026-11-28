@@ -230,6 +230,10 @@ class ReportState:
         self.end_time: str | None = None
 
         self.vulnerability_reports: list[dict[str, Any]] = []
+        # Captured exchanges behind a report's proof, by report id then exchange id, for an
+        # embedding host to read. Held in memory only: no run file, record or checkpoint has them,
+        # so a resumed run starts empty.
+        self.proof_captures: dict[str, dict[str, dict[str, str]]] = {}
         self.final_scan_result: str | None = None
 
         self.scan_results: dict[str, Any] | None = None

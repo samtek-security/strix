@@ -1636,6 +1636,10 @@ async def create_vulnerability_report(
         agent_id=agent_id,
         agent_name=agent_name,
     )
+    if result.get("success") and proof_fields.get("proof_status") == "exploited":
+        from strix.tools.exploitation.tool import keep_proof_captures
+
+        await keep_proof_captures(ctx, result.get("report_id"), http_exchange_ids or [])
     return json.dumps(_with_warning(result, http_exchange_warning), ensure_ascii=False, default=str)
 
 
