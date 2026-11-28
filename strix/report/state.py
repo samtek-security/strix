@@ -268,6 +268,8 @@ class ReportState:
         self.vulnerability_reports: list[dict[str, Any]] = []
         self._revision_lock = threading.RLock()
         self.final_scan_result: str | None = None
+        # agent id -> the vulnerability class its parent spawned it to work on
+        self.agent_class_keys: dict[str, str] = {}
 
         self.scan_results: dict[str, Any] | None = None
         self.scan_config: dict[str, Any] | None = None
@@ -518,6 +520,8 @@ class ReportState:
             report["agent_id"] = agent_id
         if agent_name:
             report["agent_name"] = agent_name
+        if agent_id and (class_key := self.agent_class_keys.get(agent_id)):
+            report["class_key"] = class_key
 
         if self.vulnerability_found_callback:
             self.vulnerability_found_callback(report)
@@ -673,6 +677,22 @@ class ReportState:
         return report
 
     @_one_writer
+    def attribute_report(self, report_id: str, class_key: str) -> None:
+        """Name the class of a report that has none."""
+        report = next((r for r in self.vulnerability_reports if r.get("id") == report_id), None)
+        if report is None or report.get("class_key"):
+            return
+        if self.vulnerability_updated_callback:
+            try:
+                self.vulnerability_updated_callback({**report, "class_key": class_key})
+            except Exception:
+                # Callers are part-way through resolving a queue item. The run's own record still
+                # takes the class, so the finding is not lost from it.
+                logger.exception("could not announce the class of report %s", report_id)
+        report["class_key"] = class_key
+        self.save_run_data()
+
+    @_one_writer
     def merge_proof_into_report(
         self,
         report_id: str,
@@ -760,6 +780,9 @@ class ReportState:
         history.append(entry)
 
         revised = {**report, **changed, "update_history": history}
+        class_key = self.agent_class_keys.get(merged_by_agent_id or "")
+        if class_key and not revised.get("class_key"):
+            revised["class_key"] = class_key
         for key in stale_capture:
             revised.pop(key, None)
         if (
