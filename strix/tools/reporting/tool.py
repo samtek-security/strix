@@ -687,13 +687,10 @@ def _cited_ids(report_id: str) -> list[str]:
 async def _capture_added_proof(ctx: RunContextWrapper, report_id: str, added: list[str]) -> None:
     """A proven report can gain an exchange by update, usually the control. Its pair is kept
     only if it passes the same check a filing does."""
-    from strix.tools.exploitation.tool import assess_proof, keep_proof_captures
+    from strix.tools.exploitation.tool import keep_proof_captures
 
-    if not added or _report_by_id(report_id).get("proof_status") != "exploited":
-        return
-    ids, status, _, _ = await assess_proof(ctx, list(added), require_all=False)
-    if status == "exploited":
-        await keep_proof_captures(ctx, report_id, ids or [])
+    if added and _report_by_id(report_id).get("proof_status") == "exploited":
+        await keep_proof_captures(ctx, report_id, added, check=True)
 
 
 def _do_update(

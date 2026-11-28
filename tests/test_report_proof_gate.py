@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import types
 from typing import TYPE_CHECKING, Any
@@ -386,7 +387,8 @@ async def test_a_capture_that_fails_its_check_when_kept_is_left_out(
 ) -> None:
     await _file(_AlteredOnRefetch({_GOOD}), http_exchange_ids=[_GOOD])
     assert _filed(report_state)["proof_status"] == "exploited"
-    assert report_state.proof_captures == {}
+    entry = report_state.proof_captures[_filed(report_state)["id"]][_GOOD]
+    assert list(entry) == ["unavailable"]
 
 
 @pytest.mark.asyncio
@@ -399,3 +401,28 @@ async def test_an_id_dropped_while_fetching_is_not_kept(report_state: ReportStat
 
     await _file(_Dropped({_GOOD}), http_exchange_ids=[_GOOD])
     assert report_state.proof_captures == {}
+
+
+@pytest.mark.asyncio
+async def test_a_hung_capture_fetch_hits_the_deadline_and_the_report_still_files(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _HangsOnSecond(_Marked):
+        async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+            # The proof check reads _OTHER once; the fetch that keeps its bytes never returns.
+            if request_id == _OTHER:
+                self.other_reads += 1
+                if self.other_reads > 1:
+                    await asyncio.Event().wait()
+            return await super().view_request(request_id, part=part)
+
+    client = _HangsOnSecond({_GOOD, _OTHER})
+    client.other_reads = 0
+    monkeypatch.setattr(exploitation, "CAPTURE_DEADLINE_SECONDS", 0.2)
+    async with asyncio.timeout(5):
+        await _file(client, http_exchange_ids=[_GOOD, _OTHER])
+    report = _filed(report_state)
+    assert report["proof_status"] == "exploited"
+    pairs = report_state.proof_captures[report["id"]]
+    assert _MARKER in pairs[_GOOD]["response"]
+    assert list(pairs[_OTHER]) == ["unavailable"]
