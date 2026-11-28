@@ -2904,6 +2904,9 @@ async def test_merge_without_a_hash_drops_the_old_capture_pair(
     report = report_state.vulnerability_reports[0]
     assert "capture_integrity_sha256" not in report
     assert "captured_at" not in report
+    replaced = report["update_history"][-1]["replaced"]
+    assert replaced["capture_integrity_sha256"] == _HASH_A
+    assert replaced["captured_at"] == "2026-11-25T00:00:00Z"
 
 
 async def test_weaker_proof_never_overwrites_the_stronger_hash(
@@ -2983,3 +2986,15 @@ async def test_unverified_gateway_proof_leaves_the_matched_lead_a_lead(
     )
     assert result["success"] is False
     assert json.dumps(report_state.vulnerability_reports, sort_keys=True) == before
+
+
+@pytest.mark.parametrize("half", [{"capture_integrity_sha256": _HASH_B}, {"captured_at": _STAMP}])
+async def test_merge_never_takes_half_a_capture_pair(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch, half: dict[str, str]
+) -> None:
+    lead_id = await _file_lead(report_state)
+    _duplicate_of(lead_id, monkeypatch)
+    await _create_with(report_state, proof_status="exploited", **half, **_PROOF_TARGET)
+    report = report_state.vulnerability_reports[0]
+    assert "capture_integrity_sha256" not in report
+    assert "captured_at" not in report

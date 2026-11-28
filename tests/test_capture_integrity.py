@@ -13,6 +13,7 @@ from agents.tool_context import ToolContext
 from strix.report.state import ReportState, set_global_report_state
 from strix.report.writer import render_vulnerability_md
 from strix.tools.exploitation import tool as ex
+from strix.tools.reporting.tool import create_vulnerability_report
 
 
 if TYPE_CHECKING:
@@ -114,3 +115,46 @@ async def test_a_capture_with_no_recorded_hash_files_a_lead(
     out, rs = await _promote(_Gateway(verified=True, sha=None), tmp_path, monkeypatch)
     assert out["verdict"] == "lead", out
     assert "capture_integrity_sha256" not in rs.vulnerability_reports[0]
+
+
+@pytest.mark.asyncio
+async def test_a_verified_direct_report_promotes_the_matched_lead_with_its_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    rs = ReportState("run")
+    set_global_report_state(rs)
+    duplicate: dict[str, Any] = {"is_duplicate": False}
+
+    async def judge(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return duplicate
+
+    monkeypatch.setattr("strix.report.dedupe.check_duplicate", judge)
+    args = {
+        "title": "SQLi", "description": "D", "impact": "I", "target": "https://t.example",
+        "technical_analysis": "TA", "poc_description": "P", "poc_script_code": "curl x",
+        "remediation_steps": "fix", "evidence": "E", "assumptions": "A", "counterevidence": "C",
+        "confidence": "high", "severity_change_conditions": "S", "fix_effort": "low",
+        "cvss_breakdown": _CVSS, "endpoint": "/x", "method": "GET", "cwe": "CWE-89",
+    }
+    ctx = ToolContext(
+        context={"caido_client": _Gateway(verified=True)},
+        tool_name="create_vulnerability_report", tool_call_id="c", tool_arguments="{}",
+    )
+    try:
+        first = json.loads(
+            await create_vulnerability_report.on_invoke_tool(ctx, json.dumps(args))
+        )
+        duplicate.update(is_duplicate=True, duplicate_id=first["report_id"])
+        merged = json.loads(
+            await create_vulnerability_report.on_invoke_tool(
+                ctx, json.dumps({**args, "http_exchange_ids": [_ID]})
+            )
+        )
+    finally:
+        set_global_report_state(None)
+    assert merged["merged_into"] == first["report_id"], merged
+    report = rs.vulnerability_reports[0]
+    assert report["proof_status"] == "exploited"
+    assert report["capture_integrity_sha256"] == _SHA
+    assert report["captured_at"] == _STAMP

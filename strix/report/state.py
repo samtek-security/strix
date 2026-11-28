@@ -628,9 +628,10 @@ class ReportState:
             return None
 
         incoming = dict(proof)
-        if not incoming.get("capture_integrity_sha256"):
-            # A time with no hash proves nothing about the capture.
-            incoming.pop("captured_at", None)
+        if not all(incoming.get(k) for k in _CAPTURE_FIELDS):
+            # Half a pair says nothing about which capture it describes.
+            for key in _CAPTURE_FIELDS:
+                incoming.pop(key, None)
         changed = {
             key: value
             for key, value in incoming.items()
@@ -640,10 +641,8 @@ class ReportState:
         }
         if not changed:
             return None
-        # A hash kept from the earlier proof must not vouch for the stronger one.
-        # When the incoming hash differs or is absent, the old capture fields go
-        # (or are replaced), so the report never pairs one capture's hash with
-        # another's time.
+        # A hash kept from the earlier proof must not vouch for the stronger one,
+        # so a stronger proof that brings no pair detaches the old one.
         stale_capture = (
             [k for k in _CAPTURE_FIELDS if report.get(k) and not incoming.get(k)]
             if "proof_status" in changed or "capture_integrity_sha256" in changed
@@ -674,6 +673,8 @@ class ReportState:
             and report.get("confidence_rationale")
         ):
             replaced["confidence_rationale"] = report["confidence_rationale"]
+        for key in stale_capture:
+            replaced[key] = report[key]
         if replaced:
             entry["replaced"] = replaced
         if merged_from_queue_item:

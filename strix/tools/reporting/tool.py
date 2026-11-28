@@ -296,15 +296,24 @@ async def _assess_direct_report_proof(
 ) -> tuple[list[str] | None, dict[str, Any], str | None]:
     """Hold a directly filed report to the proof bar ``promote_finding`` applies.
 
-    Returns ``(ids, proof_fields, warning)``. The decision is ``assess_proof``, the same function
-    the exploitation queue calls: one verified id is enough here, anything else files as a lead
-    with the reason recorded. Syntactically invalid ids are rejected by the caller first.
+    Returns ``(ids, proof_fields, warning)``. The decision is ``assess_proof_with_integrity``, the
+    same function the exploitation queue calls: one verified id is enough here, anything else files
+    as a lead with the reason recorded. Syntactically invalid ids are rejected by the caller first.
     """
-    from strix.tools.exploitation.tool import NO_EXCHANGE_SOURCE_REASON, assess_proof
+    from strix.tools.exploitation.tool import (
+        NO_EXCHANGE_SOURCE_REASON,
+        assess_proof_with_integrity,
+    )
 
     cited, _ = _normalize_http_exchange_ids(raw_ids)
-    ids, status, reason, source = await assess_proof(ctx, list(cited or []), require_all=False)
+    ids, status, reason, source, sha, captured_at = await assess_proof_with_integrity(
+        ctx, list(cited or []), require_all=False
+    )
     fields: dict[str, Any] = {"proof_status": status}
+    if sha:
+        fields["capture_integrity_sha256"] = sha
+    if captured_at:
+        fields["captured_at"] = captured_at
     if reason:
         fields["proof_status_reason"] = reason
     if source:
@@ -882,7 +891,9 @@ def _merge_stronger_proof(
     if matched is None or not _proof_is_stronger(proof.get("proof_status"), matched):
         return None, None
     # A gateway capture proves nothing until its hash verified, so it cannot promote a lead.
-    if proof.get("proof_source") == "gateway_capture" and not proof.get("capture_integrity_sha256"):
+    if proof.get("proof_source") == "gateway_capture" and not (
+        proof.get("capture_integrity_sha256") and proof.get("captured_at")
+    ):
         return None, None
     if not _same_identity(report_fields, report_fields.get("cwe"), matched):
         return None, duplicate_id
