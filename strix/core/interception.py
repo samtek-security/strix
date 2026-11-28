@@ -13,11 +13,12 @@ implicit allow, matching every tool's behaviour before this module existed.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 
 if TYPE_CHECKING:
@@ -53,10 +54,111 @@ class InterceptionDecision:
 @lru_cache(maxsize=256)
 def _compiled(pattern: str) -> re.Pattern[str] | None:
     try:
-        return re.compile(pattern)
+        # re.ASCII: \d \s \w \b mean the ASCII classes, as in Go's RE2, which is what
+        # the control plane validated the pattern against.
+        return re.compile(pattern, re.ASCII)
     except re.error:
         logger.warning("interception rule pattern does not compile as regex: %r", pattern)
         return None
+
+
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def canonical_tool_input(value: object) -> str:
+    """One text form of a tool call's input, whichever path produced it.
+
+    The deny check sees the raw argument string, the ask check sees the parsed
+    arguments, and the resume path sees the raw string again. Matching each of
+    those directly lets whitespace, key order or unicode escapes make a rule fire
+    in one place and not another, so every path goes through this first. JSON is
+    re-encoded with sorted keys; anything that is not JSON (a custom tool's
+    free-text payload) is returned unchanged.
+    """
+    parsed = value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return value
+        if not isinstance(parsed, (dict, list)):
+            return value
+    elif not isinstance(value, (dict, list)):
+        return str(value)
+    # Sorted keys, default separators: the form the tool wrapper always matched
+    # against, so a pattern written for it (`"command": "rm -rf`) keeps matching.
+    text = json.dumps(parsed, ensure_ascii=False, sort_keys=True)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        # A JSON-escaped lone surrogate decodes to text that cannot be encoded
+        # (the dedup key and the broker body both encode it). Escape only those,
+        # so non-ASCII text a rule matches stays as written.
+        text = _LONE_SURROGATE.sub(lambda m: f"\\u{ord(m.group()):04x}", text)
+    return text
+
+
+# Native custom tools (apply_patch, ...) are offered to chat-completions routes as
+# function tools taking one JSON field that wraps the real payload. A rule written
+# against the tool's input means the payload, not the wrapper. The converted tool
+# carries that field's name on itself, so the identity travels with the tool object
+# and never with a process-wide name table that another scan's same-named tool could
+# share.
+EVALUATED_CALLS_KEY = "strix_interception_evaluated_calls"
+
+
+def _evaluated_key(context: dict[str, Any], call_id: str) -> tuple[str, str]:
+    # Child contexts are shallow copies that share this map, and tool-call ids are
+    # only unique within one agent's responses, so the agent is part of the key.
+    return (str(context.get("agent_id") or ""), call_id)
+
+
+def remember_evaluated(context: object, call_id: str, text: str, *, verbatim: bool) -> None:
+    """Record the exact text a rule matched for a call that is about to pause.
+
+    The pause is resolved later from the SDK's interruption item, which holds the model's
+    raw arguments and an agent that may not be the one that ran the tool. Reusing the
+    text the rules saw keeps the approval, its dedup key and its summary on what was
+    evaluated, however the tool normalised or unwrapped its arguments first.
+    """
+    if isinstance(context, dict) and call_id:
+        context.setdefault(EVALUATED_CALLS_KEY, {})[_evaluated_key(context, call_id)] = (
+            text,
+            verbatim,
+        )
+
+
+def evaluated_for(context: object, call_id: object) -> tuple[str, bool] | None:
+    if not isinstance(context, dict) or not isinstance(call_id, str) or not call_id:
+        return None
+    found = (context.get(EVALUATED_CALLS_KEY) or {}).get(_evaluated_key(context, call_id))
+    return found if isinstance(found, tuple) else None
+
+
+def call_input(
+    tool_name: str,  # noqa: ARG001 - kept so callers read as (tool, arguments)
+    arguments: object,
+    *,
+    payload_field: str | None = None,
+) -> tuple[str, bool]:
+    """The text a rule should match for one call, and whether it is opaque.
+
+    ``arguments`` is a function call's JSON string or parsed dict. For a custom
+    tool converted to a function tool (``payload_field`` names its wrapper field)
+    it is that field's text, verbatim, which is exactly what the converted tool
+    executes (it ignores any other argument); for every other function tool it is
+    the canonical JSON arguments.
+    """
+    if payload_field is not None:
+        parsed = arguments
+        if isinstance(arguments, str):
+            try:
+                parsed = json.loads(arguments)
+            except ValueError:
+                parsed = None
+        if isinstance(parsed, dict) and isinstance(parsed.get(payload_field), str):
+            return parsed[payload_field], True
+    return canonical_tool_input(arguments), False
 
 
 def _rule_matches(rule: InterceptionRule, tool_name: str, tool_input_text: str) -> bool:
@@ -71,10 +173,20 @@ def evaluate(
     rules: Sequence[InterceptionRule] | None,
     tool_name: str,
     tool_input_text: str,
+    *,
+    verbatim: bool = False,
 ) -> InterceptionDecision | None:
-    """Return the first matching rule's decision, or ``None`` for an implicit allow."""
+    """Return the first matching rule's decision, or ``None`` for an implicit allow.
+
+    Function-tool arguments are JSON and are matched in their canonical form.
+    ``verbatim=True`` is for a native custom tool's payload, which is opaque text
+    even when it happens to parse as JSON: a rule written against that exact text
+    must see that exact text.
+    """
     if not rules:
         return None
+    if not verbatim:
+        tool_input_text = canonical_tool_input(tool_input_text)
     for rule in rules:
         if _rule_matches(rule, tool_name, tool_input_text):
             return InterceptionDecision(rule=rule, action=rule.action)
@@ -115,6 +227,10 @@ class ApprovalGateway(Protocol):
 INTERCEPTION_RULES_KEY = "interception_rules"
 APPROVAL_GATEWAY_KEY = "approval_gateway"
 ASK_TIMEOUT_SECONDS_KEY = "ask_timeout_seconds"
+# Absolute epoch second past which no ask may still be waiting (the engagement's
+# elapsed-budget deadline less a closeout margin). Read per ask, not once per run:
+# an ask late in a run, or several concurrent ones, must each see what is left now.
+ASK_DEADLINE_AT_KEY = "ask_deadline_at"
 
 DEFAULT_ASK_TIMEOUT_SECONDS = 300.0
 
@@ -134,9 +250,21 @@ def gateway_from_context(context: dict[str, object] | None) -> ApprovalGateway |
 
 
 def ask_timeout_from_context(context: dict[str, object] | None) -> float:
+    """Seconds an "ask" may wait. Absent or non-numeric means the default; a
+    number is taken as given, floored at 0, because 0 is meaningful: the caller
+    has no budget left, so the ask must deny at once instead of waiting."""
     if not context:
         return DEFAULT_ASK_TIMEOUT_SECONDS
     value = context.get(ASK_TIMEOUT_SECONDS_KEY)
-    return float(value) if isinstance(value, (int, float)) and value > 0 else (
-        DEFAULT_ASK_TIMEOUT_SECONDS
-    )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return DEFAULT_ASK_TIMEOUT_SECONDS
+    return max(0.0, float(value))
+
+
+def ask_deadline_at_from_context(context: dict[str, object] | None) -> float | None:
+    if not context:
+        return None
+    value = context.get(ASK_DEADLINE_AT_KEY)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)

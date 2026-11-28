@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import inspect
 import json
@@ -307,18 +308,27 @@ def _function_tool_with_error_result(tool: FunctionTool) -> FunctionTool:
     return tool
 
 
-def _interception_decision(ctx: Any, tool_name: str, input_text: str) -> interception.InterceptionDecision | None:
+def _interception_decision(
+    ctx: Any, tool_name: str, input_text: str, *, verbatim: bool = False
+) -> interception.InterceptionDecision | None:
     context = getattr(ctx, "context", None)
     rules = interception.rules_from_context(context if isinstance(context, dict) else None)
-    return interception.evaluate(rules, tool_name, input_text)
+    return interception.evaluate(rules, tool_name, input_text, verbatim=verbatim)
 
 
 def _interception_denied_message(decision: interception.InterceptionDecision) -> str:
     message = f"Denied by interception rule {decision.rule.id!r}."
-    return f"{message} {decision.rule.description}".strip() if decision.rule.description else message
+    if decision.rule.description:
+        return f"{message} {decision.rule.description}".strip()
+    return message
 
 
-def _with_function_tool_interception(tool: FunctionTool) -> FunctionTool:
+def _with_function_tool_interception(
+    tool: FunctionTool,
+    *,
+    payload_field: str | None = None,
+    normalize: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> FunctionTool:
     """Gate a ``FunctionTool`` on the run's configured allow/deny/ask rules.
 
     A rule evaluates against the tool's name and its JSON-encoded arguments,
@@ -346,16 +356,34 @@ def _with_function_tool_interception(tool: FunctionTool) -> FunctionTool:
     invoke_tool = tool.on_invoke_tool
     own_needs_approval = tool.needs_approval
 
+    def rule_text(arguments: Any) -> tuple[str, bool]:
+        # Match what the tool will run, not what the model typed: a default the tool
+        # fills in or an escape it decodes must not let a call slip past a rule.
+        if normalize is not None:
+            if isinstance(arguments, str):
+                with contextlib.suppress(ValueError):
+                    arguments = json.loads(arguments)
+            if isinstance(arguments, dict):
+                arguments = normalize(dict(arguments))
+        return interception.call_input(tool.name, arguments, payload_field=payload_field)
+
     async def invoke(ctx: Any, raw_input: str) -> Any:
         if own_needs_approval is False:
-            decision = _interception_decision(ctx, tool.name, raw_input)
+            text, verbatim = rule_text(raw_input)
+            decision = _interception_decision(ctx, tool.name, text, verbatim=verbatim)
             if decision is not None and decision.action == "deny":
                 return _interception_denied_message(decision)
         return await invoke_tool(ctx, raw_input)
 
-    async def rule_needs_approval(ctx: Any, args: dict[str, Any], call_id: str) -> bool:  # noqa: ARG001
-        decision = _interception_decision(ctx, tool.name, json.dumps(args, ensure_ascii=False, sort_keys=True))
-        return decision is not None and decision.action == "ask"
+    async def rule_needs_approval(ctx: Any, args: dict[str, Any], call_id: str) -> bool:
+        text, verbatim = rule_text(args)
+        decision = _interception_decision(ctx, tool.name, text, verbatim=verbatim)
+        if decision is not None and decision.action == "ask":
+            interception.remember_evaluated(
+                getattr(ctx, "context", None), call_id, text, verbatim=verbatim
+            )
+            return True
+        return False
 
     if own_needs_approval is False:
         combined_needs_approval = rule_needs_approval
@@ -391,13 +419,13 @@ def _with_custom_tool_interception(tool: CustomTool) -> CustomTool:
 
     async def invoke(ctx: Any, raw_input: str) -> Any:
         if own_needs_approval is False:
-            decision = _interception_decision(ctx, tool.name, raw_input)
+            decision = _interception_decision(ctx, tool.name, raw_input, verbatim=True)
             if decision is not None and decision.action == "deny":
                 return _interception_denied_message(decision)
         return await invoke_tool(ctx, raw_input)
 
     async def rule_needs_approval(ctx: Any, raw_input: str, call_id: str) -> bool:  # noqa: ARG001
-        decision = _interception_decision(ctx, tool.name, raw_input)
+        decision = _interception_decision(ctx, tool.name, raw_input, verbatim=True)
         return decision is not None and decision.action == "ask"
 
     if own_needs_approval is False:
@@ -445,8 +473,10 @@ def _custom_tool_as_function_tool(tool: CustomTool) -> FunctionTool:
     else:
         function_needs_approval = needs_approval
 
+    payload_field = _custom_tool_input_field(tool)
     return _with_function_tool_interception(
-        FunctionTool(
+        payload_field=payload_field,
+        tool=FunctionTool(
             name=tool.name,
             description=(
                 f"{tool.description}\n\n"
@@ -456,7 +486,7 @@ def _custom_tool_as_function_tool(tool: CustomTool) -> FunctionTool:
             on_invoke_tool=invoke,
             strict_json_schema=False,
             needs_approval=function_needs_approval,
-        )
+        ),
     )
 
 
@@ -656,6 +686,23 @@ def _wrap_write_stdin(tool: FunctionTool) -> FunctionTool:
     return tool
 
 
+def _normalize_exec_for_rules(args: dict[str, Any]) -> dict[str, Any]:
+    args.setdefault("shell", "bash")
+    return args
+
+
+def _normalize_stdin_for_rules(args: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(args.get("chars"), str):
+        args["chars"] = _decode_chars_escape(args["chars"])
+    return args
+
+
+_RULE_NORMALIZERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    "exec_command": _normalize_exec_for_rules,
+    "write_stdin": _normalize_stdin_for_rules,
+}
+
+
 def _configure_shell_tools(
     toolset: Any, *, chat_completions: bool, strict_schemas: bool = True
 ) -> None:
@@ -669,7 +716,11 @@ def _configure_shell_tools(
             wrapped = _wrap_write_stdin(wrapped)
         if chat_completions:
             wrapped = _function_tool_with_error_result(wrapped)
-        setattr(toolset, name, _with_function_tool_interception(wrapped))
+        setattr(
+            toolset,
+            name,
+            _with_function_tool_interception(wrapped, normalize=_RULE_NORMALIZERS.get(tool.name)),
+        )
 
 
 def _make_shell_configurator(*, chat_completions: bool, strict_schemas: bool) -> Any:
@@ -910,7 +961,9 @@ def build_strix_agent(
     _ensure_unique_tool_names(tools)
     tools = [
         _with_function_tool_interception(
-            _with_bounded_result(_with_strictness(_with_coerced_arguments(tool), strict_tool_schemas))
+            _with_bounded_result(
+                _with_strictness(_with_coerced_arguments(tool), strict_tool_schemas)
+            )
         )
         if isinstance(tool, FunctionTool)
         else tool
