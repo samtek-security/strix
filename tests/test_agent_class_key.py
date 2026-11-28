@@ -14,6 +14,7 @@ from strix.core import execution
 from strix.core.agents import AgentCoordinator
 from strix.report.state import ReportState, set_global_report_state
 from strix.tools.agents_graph.tools import create_agent
+from strix.tools.exploitation import tool as exploitation
 
 
 if TYPE_CHECKING:
@@ -94,6 +95,44 @@ def test_a_keyed_specialists_proof_merge_attributes_an_unkeyed_report(
         assert merged is not None
         # the first keyed merge names the class; a later one does not move it
         assert merged["class_key"] == "sqli"
+
+
+@pytest.mark.asyncio
+async def test_a_queued_candidate_keeps_its_class_through_promotion_by_the_root(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(exploitation, "_queue", {})
+    monkeypatch.setattr(exploitation, "_persist", lambda: None)
+    report_state.agent_class_keys["specialist"] = "sqli"
+
+    async def _invoke(tool: Any, agent_id: str, args: dict[str, Any]) -> dict[str, Any]:
+        ctx = ToolContext(
+            context={"agent_id": agent_id},
+            tool_name=tool.name,
+            tool_call_id="call-1",
+            tool_arguments="{}",
+        )
+        return cast("dict[str, Any]", json.loads(await tool.on_invoke_tool(ctx, json.dumps(args))))
+
+    queued = await _invoke(
+        exploitation.queue_finding,
+        "specialist",
+        {
+            "title": "login",
+            "vuln_class": "SQL injection",
+            "guard_evidence": "no bind",
+            "minimal_witness": "quote",
+            "confidence": "high",
+        },
+    )
+    promoted = await _invoke(
+        exploitation.promote_finding,
+        "root",
+        {"item_id": queued["item_id"], "status": "lead", "reason": "blocked"},
+    )
+
+    report = next(r for r in report_state.vulnerability_reports if r["id"] == promoted["report_id"])
+    assert report["class_key"] == "sqli"
 
 
 @pytest.mark.asyncio
