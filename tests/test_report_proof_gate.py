@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import types
 from typing import TYPE_CHECKING, Any
@@ -16,6 +17,7 @@ from strix.tools.exploitation.tool import NO_EXCHANGE_SOURCE_REASON, PROOF_FAILE
 from strix.tools.reporting.tool import (
     _HTTP_EXCHANGE_UNVERIFIED_WARNING,
     create_vulnerability_report,
+    update_vulnerability_report,
 )
 
 
@@ -200,7 +202,12 @@ _PROMOTE_FIELDS = {
 
 
 async def _promote(
-    client: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exchange_id: str | None
+    client: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exchange_id: str | None,
+    *,
+    control_id: str | None = None,
 ) -> dict[str, Any]:
     monkeypatch.chdir(tmp_path)
     state = ReportState(run_name="parity-promote")
@@ -222,6 +229,7 @@ async def _promote(
         "request": "GET /a?id=1%27",
         "response": "HTTP 500 SQL syntax error",
         "caido_request_id": exchange_id,
+        "control_request_id": control_id,
         **_PROMOTE_FIELDS,
     }
     ctx = _ctx(client, "promote_finding")
@@ -283,3 +291,138 @@ async def test_a_no_source_report_without_ids_stores_none(report_state: ReportSt
     assert report["proof_status"] == "lead"
     assert report["proof_status_reason"] == NO_EXCHANGE_SOURCE_REASON
     assert not report.get("http_exchange_ids")
+
+
+_MARKER = "captured-only-marker-7f3a"
+
+
+class _Marked(_Capture):
+    async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+        result = await super().view_request(request_id, part=part)
+        if result is not None:
+            result.response.raw = f"HTTP/1.1 200\r\n\r\n{_MARKER}".encode()
+        return result
+
+
+@pytest.mark.asyncio
+async def test_a_verified_filing_keeps_the_captured_pair_out_of_the_run_files(
+    report_state: ReportState, tmp_path: Path
+) -> None:
+    await _file(_Marked({_GOOD}), http_exchange_ids=[_OTHER, _GOOD])
+    report = _filed(report_state)
+    pairs = report_state.proof_captures[report["id"]]
+    assert list(pairs) == [_GOOD]
+    assert _MARKER in pairs[_GOOD]["response"]
+    assert pairs[_GOOD]["request"].startswith("GET /a")
+    report_state.save_run_data()
+    written = [p for p in tmp_path.rglob("*") if p.is_file()]
+    assert any(p.name == "vulnerabilities.json" for p in written)
+    assert not [p for p in written if _MARKER.encode() in p.read_bytes()]
+
+
+@pytest.mark.asyncio
+async def test_a_lead_keeps_no_capture(report_state: ReportState) -> None:
+    await _file(_Marked({_GOOD}, down=True), http_exchange_ids=[_GOOD])
+    assert _filed(report_state)["proof_status"] == "lead"
+    assert report_state.proof_captures == {}
+
+
+@pytest.mark.asyncio
+async def test_a_promotion_keeps_only_its_control_exchange(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    states: list[ReportState] = []
+    make = ReportState
+
+    def tracked(*args: Any, **kwargs: Any) -> ReportState:
+        states.append(make(*args, **kwargs))
+        return states[-1]
+
+    monkeypatch.setattr(f"{__name__}.ReportState", tracked)
+    report = await _promote(
+        _Marked({_GOOD, _OTHER}), tmp_path, monkeypatch, _GOOD, control_id=_OTHER
+    )
+    assert report["proof_status"] == "exploited"
+    assert list(states[0].proof_captures[report["id"]]) == [_OTHER]
+
+
+@pytest.mark.asyncio
+async def test_captures_follow_updates_and_deletion(report_state: ReportState) -> None:
+    client = _Marked({_GOOD, _OTHER})
+    await _file(client, http_exchange_ids=[_GOOD])
+    report_id = _filed(report_state)["id"]
+
+    async def cite(ids: list[str]) -> None:
+        out = await update_vulnerability_report.on_invoke_tool(
+            _ctx(client, "update_vulnerability_report"),
+            json.dumps(
+                {"report_id": report_id, "update_reason": "baseline", "http_exchange_ids": ids}
+            ),
+        )
+        assert json.loads(out)["success"] is True, out
+
+    await cite([_GOOD, _OTHER])
+    assert set(report_state.proof_captures[report_id]) == {_GOOD, _OTHER}
+    await cite([_OTHER])
+    assert set(report_state.proof_captures[report_id]) == {_OTHER}
+    report_state.delete_vulnerability_report(report_id, delete_reason="withdrawn")
+    assert report_state.proof_captures == {}
+
+
+class _AlteredOnRefetch(_Marked):
+    """Passes its integrity check for the proof decision, then fails it."""
+
+    fetches = 0
+
+    async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+        result = await super().view_request(request_id, part=part)
+        self.fetches += 1
+        result.integrity_verified = self.fetches == 1
+        return result
+
+
+@pytest.mark.asyncio
+async def test_a_capture_that_fails_its_check_when_kept_is_left_out(
+    report_state: ReportState,
+) -> None:
+    await _file(_AlteredOnRefetch({_GOOD}), http_exchange_ids=[_GOOD])
+    assert _filed(report_state)["proof_status"] == "exploited"
+    entry = report_state.proof_captures[_filed(report_state)["id"]][_GOOD]
+    assert list(entry) == ["unavailable"]
+
+
+@pytest.mark.asyncio
+async def test_an_id_dropped_while_fetching_is_not_kept(report_state: ReportState) -> None:
+    class _Dropped(_Marked):
+        async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+            for report in report_state.vulnerability_reports:
+                report["http_exchange_ids"] = [_OTHER]
+            return await super().view_request(request_id, part=part)
+
+    await _file(_Dropped({_GOOD}), http_exchange_ids=[_GOOD])
+    assert report_state.proof_captures == {}
+
+
+@pytest.mark.asyncio
+async def test_a_hung_capture_fetch_hits_the_deadline_and_the_report_still_files(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _HangsOnSecond(_Marked):
+        async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+            # The proof check reads _OTHER once; the fetch that keeps its bytes never returns.
+            if request_id == _OTHER:
+                self.other_reads += 1
+                if self.other_reads > 1:
+                    await asyncio.Event().wait()
+            return await super().view_request(request_id, part=part)
+
+    client = _HangsOnSecond({_GOOD, _OTHER})
+    client.other_reads = 0
+    monkeypatch.setattr(exploitation, "CAPTURE_DEADLINE_SECONDS", 0.2)
+    async with asyncio.timeout(5):
+        await _file(client, http_exchange_ids=[_GOOD, _OTHER])
+    report = _filed(report_state)
+    assert report["proof_status"] == "exploited"
+    pairs = report_state.proof_captures[report["id"]]
+    assert _MARKER in pairs[_GOOD]["response"]
+    assert list(pairs[_OTHER]) == ["unavailable"]

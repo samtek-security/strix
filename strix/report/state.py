@@ -230,6 +230,10 @@ class ReportState:
         self.end_time: str | None = None
 
         self.vulnerability_reports: list[dict[str, Any]] = []
+        # Captured exchanges behind a report's proof, by report id then exchange id, for an
+        # embedding host to read. Held in memory only: no run file, record or checkpoint has them,
+        # so a resumed run starts empty.
+        self.proof_captures: dict[str, dict[str, dict[str, str]]] = {}
         self.final_scan_result: str | None = None
 
         self.scan_results: dict[str, Any] | None = None
@@ -586,6 +590,8 @@ class ReportState:
             self.vulnerability_updated_callback(revised)
         report.clear()
         report.update(revised)
+        if "http_exchange_ids" in changed:
+            self._prune_captures(report_id, changed["http_exchange_ids"])
 
         # The markdown on disk still shows the superseded evidence, so let the
         # writer re-render it.
@@ -599,6 +605,11 @@ class ReportState:
 
         self.save_run_data()
         return report
+
+    def _prune_captures(self, report_id: str, exchange_ids: list[str]) -> None:
+        pairs = self.proof_captures.get(report_id, {})
+        for exchange_id in set(pairs) - set(exchange_ids):
+            del pairs[exchange_id]
 
     def merge_proof_into_report(
         self,
@@ -684,6 +695,8 @@ class ReportState:
             self.vulnerability_updated_callback(revised)
         report.clear()
         report.update(revised)
+        if "http_exchange_ids" in changed:
+            self._prune_captures(report_id, changed["http_exchange_ids"])
         self._saved_vuln_ids.discard(report_id)
 
         logger.info("Merged stronger proof into vulnerability report %s", report_id)
@@ -769,6 +782,7 @@ class ReportState:
         except OSError:
             logger.exception("could not remove %s", md_path)
 
+        self.proof_captures.pop(report_id, None)
         logger.info("Deleted vulnerability report %s - %s", report_id, report.get("title"))
         return report
 
