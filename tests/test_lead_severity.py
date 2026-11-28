@@ -5,8 +5,16 @@ from __future__ import annotations
 
 import importlib
 import json
+from io import BytesIO
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+import pytest
+from pypdf import PdfReader
+
+from strix.interface.utils import build_final_stats_text, build_live_stats_text
+from strix.interface.viewer.report_pdf import generate_report_pdf
+from strix.interface.viewer.server import run_list_entry
 from strix.interface.viewer.transcript import lead_count_of, severity_counts
 from strix.report.proof import is_validated, lead_count
 from strix.report.runs import _title
@@ -128,8 +136,13 @@ def test_queue_filed_leads_are_marked_so_they_stay_out_of_the_counts(
     try:
         ex._queue.clear()
         ex._queue["q-0001"] = {
-            "id": "q-0001", "title": "Queued lead", "guard_evidence": "g", "minimal_witness": "w",
-            "confidence": "high", "endpoint": "/x", "status": "queued",
+            "id": "q-0001",
+            "title": "Queued lead",
+            "guard_evidence": "g",
+            "minimal_witness": "w",
+            "confidence": "high",
+            "endpoint": "/x",
+            "status": "queued",
         }
         assert ex.drain_pending_to_leads("boundary") == 1
     finally:
@@ -137,3 +150,41 @@ def test_queue_filed_leads_are_marked_so_they_stay_out_of_the_counts(
         ex._queue.clear()
     assert [r.get("proof_status") for r in rs.vulnerability_reports] == ["lead"]
     assert sum(severity_counts(rs.vulnerability_reports).values()) == 0
+
+
+def _mixed_run(base: Path) -> Path:
+    run_dir = base / "strix_runs" / "mixed"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(json.dumps({"run_name": "mixed"}), encoding="utf-8")
+    reports = [
+        _report("critical", "lead", title="Unproven injection"),
+        _report("critical", "exploited", id="vuln-0002", title="Proven injection"),
+    ]
+    (run_dir / "vulnerabilities.json").write_text(json.dumps(reports), encoding="utf-8")
+    return run_dir
+
+
+def test_pdf_summary_counts_leads_apart_and_marks_the_lead_heading(tmp_path: Path) -> None:
+    pdf = PdfReader(BytesIO(generate_report_pdf(_mixed_run(tmp_path))))
+    text = " ".join(" ".join(page.extract_text() for page in pdf.pages).split())
+    assert "1 validated findings across this assessment, plus 1 leads that did not verify" in text
+    assert "Unproven injection (lead, not validated)" in text
+    assert text.count("(lead, not validated)") == 1
+
+
+def test_viewer_run_entry_counts_leads_apart(tmp_path: Path) -> None:
+    entry = run_list_entry(_mixed_run(tmp_path))
+    assert entry["severity_counts"]["critical"] == 1
+    assert sum(entry["severity_counts"].values()) == 1
+    assert entry["lead_count"] == 1
+
+
+@pytest.mark.parametrize("build", [build_final_stats_text, build_live_stats_text])
+def test_cli_summaries_count_leads_apart(build: Any) -> None:
+    state = SimpleNamespace(
+        vulnerability_reports=[_report("critical", "lead"), _report("critical", "exploited")],
+        get_total_llm_usage=dict,
+    )
+    text = build(state).plain
+    assert "CRITICAL: 1" in text
+    assert "LEADS: 1" in text
