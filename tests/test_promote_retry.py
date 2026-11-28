@@ -409,3 +409,45 @@ async def test_a_retry_after_a_filed_report_resolves_to_it_and_files_no_second(
     assert again["report_id"] == filed["report_id"]
     assert [r["id"] for r in state.vulnerability_reports] == [filed["report_id"]]
     assert ex._queue["q-0001"]["status"] == "exploited"
+
+
+class _IntegrityTimesOut(_Capture):
+    """The raw capture reads fine; the later integrity read of the same record times out."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+        self.integrity_down = True
+
+    async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+        self.reads += 1
+        if self.integrity_down and self.reads % 2 == 0:
+            raise TimeoutError("capture integrity fetch timed out")
+        return await super().view_request(request_id, part=part)
+
+
+@pytest.mark.asyncio
+async def test_an_integrity_fetch_failure_is_retried_not_filed(state: ReportState) -> None:
+    client = _IntegrityTimesOut()
+    first = await _promote(client)
+    assert first["transient"] is True
+    assert ex._queue["q-0001"]["status"] == "queued"
+    assert ex._queue["q-0001"]["cited_ids"] == [_GOOD]
+    assert state.vulnerability_reports == []
+
+    _due()
+    client.integrity_down = False
+    assert (await _promote(client))["verdict"] == "exploited"
+
+
+@pytest.mark.asyncio
+async def test_a_capture_that_fails_its_hash_is_not_retried(state: ReportState) -> None:
+    class _Tampered(_Capture):
+        async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+            record = await super().view_request(request_id, part=part)
+            record.integrity_verified = False
+            return record
+
+    result = await _promote(_Tampered())
+    assert result["verdict"] == "lead"
+    assert "http_exchange_ids" not in state.vulnerability_reports[0]
