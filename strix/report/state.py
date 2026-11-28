@@ -1,4 +1,5 @@
 # Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
+import functools
 import json
 import logging
 import re
@@ -96,6 +97,9 @@ UPDATABLE_REPORT_FIELDS = frozenset(
         "http_exchange_ids",
         "fix_verification",
         "fix_pr_body",
+        "proof_signal",
+        "auth_role",
+        "authz_bypass",
     }
 )
 
@@ -115,12 +119,19 @@ MERGEABLE_PROOF_FIELDS = frozenset(
         "assumptions",
         "capture_integrity_sha256",
         "captured_at",
+        "proof_signal",
+        "auth_role",
+        "authz_bypass",
     }
 )
 
 # The hash and the capture time describe one capture, so they move with the proof
 # as a unit and never one without the other.
 _CAPTURE_FIELDS = ("capture_integrity_sha256", "captured_at")
+
+# What a retest compares a replay against. The three describe one proof: they are written
+# together, with the signal, and none of them outlives it.
+_PROOF_BOUND_FIELDS = ("proof_signal", "auth_role", "authz_bypass")
 
 _LOWERCASE_REPORT_FIELDS = frozenset({"severity", "confidence", "fix_effort"})
 
@@ -135,6 +146,10 @@ _DEPENDENT_REPORT_FIELDS: dict[str, tuple[str, ...]] = {
     "severity": ("severity_change_conditions",),
     "cvss": ("cvss_breakdown",),
     "code_locations": ("fix_verification",),
+    **dict.fromkeys(
+        ("target", "endpoint", "method", "poc_description", "poc_script_code", "evidence"),
+        _PROOF_BOUND_FIELDS,
+    ),
 }
 
 
@@ -218,6 +233,21 @@ def set_global_report_state(report_state: Optional["ReportState"]) -> None:
     streamed_openrouter_costs.clear()
 
 
+def _one_writer[**P, R](method: Callable[P, R]) -> Callable[P, R]:
+    """Run a revision of a filed report alone.
+
+    Tools revise from worker threads while merges run on the event loop. Without this, a write
+    built from an older report lands over a newer one after its checks have passed.
+    """
+
+    @functools.wraps(method)
+    def locked(*args: P.args, **kwargs: P.kwargs) -> R:
+        with cast("ReportState", args[0])._revision_lock:
+            return method(*args, **kwargs)
+
+    return locked
+
+
 class ReportState:
     """Per-scan product artifact state plus artifact writer.
 
@@ -236,6 +266,7 @@ class ReportState:
         self.end_time: str | None = None
 
         self.vulnerability_reports: list[dict[str, Any]] = []
+        self._revision_lock = threading.RLock()
         self.final_scan_result: str | None = None
 
         self.scan_results: dict[str, Any] | None = None
@@ -388,6 +419,9 @@ class ReportState:
         http_exchange_ids: list[str] | None = None,
         fix_verification: str | None = None,
         fix_pr_body: str | None = None,
+        proof_signal: dict[str, Any] | None = None,
+        auth_role: str | None = None,
+        authz_bypass: bool | None = None,
         finding_class: str | None = None,
         dependency_metadata: dict[str, str] | None = None,
         proof_status: str | None = None,
@@ -457,6 +491,12 @@ class ReportState:
             report["fix_verification"] = fix_verification.strip()
         if fix_pr_body:
             report["fix_pr_body"] = fix_pr_body.strip()
+        if proof_signal:
+            report["proof_signal"] = proof_signal
+        if auth_role:
+            report["auth_role"] = auth_role
+        if authz_bypass:
+            report["authz_bypass"] = True
         report["finding_class"] = (finding_class or "dynamic").strip().lower()
         if dependency_metadata:
             report["dependency_metadata"] = dependency_metadata
@@ -508,6 +548,7 @@ class ReportState:
                 used = max(used, int(match.group(1)))
         return f"vuln-{used + 1:04d}"
 
+    @_one_writer
     def update_vulnerability_report(
         self,
         report_id: str,
@@ -516,6 +557,7 @@ class ReportState:
         update_reason: str | None = None,
         updated_by_agent_id: str | None = None,
         updated_by_agent_name: str | None = None,
+        signal_checked_against: tuple[str, int] | None = None,
     ) -> dict[str, Any] | None:
         """Apply a revision to an existing report, keeping its id.
 
@@ -546,13 +588,29 @@ class ReportState:
                 continue
             changed[key] = value
 
+        replaced_primaries = set(changed)
+        # Appending a baseline keeps the proof; dropping or swapping an exchange replaces it.
+        cited = report.get("http_exchange_ids") or []
+        new_ids = changed.get("http_exchange_ids")
+        if new_ids is not None and new_ids[: len(cited)] != cited:
+            replaced_primaries.add("target")
         superseded = {
             dependent
             for primary, dependents in _DEPENDENT_REPORT_FIELDS.items()
-            if primary in changed
+            if primary in replaced_primaries
             for dependent in dependents
-            if dependent not in changed and report.get(dependent) not in (None, "", [], {})
+            if dependent not in changed
+            # Restating the signal says it still describes the new proof.
+            and not (dependent in _PROOF_BOUND_FIELDS and fields.get("proof_signal"))
+            and report.get(dependent) not in (None, "", [], {})
         }
+        # A signal write states the whole proof: a role or bypass it leaves out does not apply.
+        if fields.get("proof_signal"):
+            superseded |= {
+                key
+                for key in ("auth_role", "authz_bypass")
+                if fields.get(key) is None and report.get(key)
+            }
 
         if not changed and not superseded:
             logger.info("update for %s carried no new content; keeping it as is", report_id)
@@ -586,6 +644,14 @@ class ReportState:
         revised["update_history"] = history
         revised["updated_at"] = entry["timestamp"]
 
+        # The signal was checked before this write, as (proving exchange, revisions so far).
+        # Any revision or merge since then may have changed the proof it was checked for.
+        if fields.get("proof_signal") and signal_checked_against != (
+            (revised.get("http_exchange_ids") or [None])[0],
+            len(history) - 1,
+        ):
+            raise ValueError("proof_signal was not checked against the report as it now stands")
+
         # Persistence must accept the revision before local state changes. A
         # failed callback leaves the old evidence intact and the update retryable.
         if self.vulnerability_updated_callback:
@@ -606,6 +672,7 @@ class ReportState:
         self.save_run_data()
         return report
 
+    @_one_writer
     def merge_proof_into_report(
         self,
         report_id: str,
@@ -675,6 +742,8 @@ class ReportState:
             replaced["confidence_rationale"] = report["confidence_rationale"]
         for key in stale_capture:
             replaced[key] = report[key]
+        stale = [key for key in _PROOF_BOUND_FIELDS if key not in supplied and report.get(key)]
+        replaced.update({key: report[key] for key in stale})
         if replaced:
             entry["replaced"] = replaced
         if merged_from_queue_item:
@@ -697,6 +766,8 @@ class ReportState:
             "confidence" in changed or "proof_status" in changed
         ) and "confidence_rationale" not in supplied:
             revised.pop("confidence_rationale", None)
+        for key in stale:
+            revised.pop(key)
         if "proof_status" in changed and "proof_status_reason" not in changed:
             # The old reason explained why the earlier status fell short.
             revised.pop("proof_status_reason", None)
@@ -712,6 +783,7 @@ class ReportState:
         self.save_run_data()
         return report
 
+    @_one_writer
     def delete_vulnerability_report(
         self,
         report_id: str,
