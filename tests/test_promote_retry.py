@@ -457,6 +457,7 @@ async def test_a_capture_that_fails_its_hash_is_not_retried(state: ReportState) 
 async def test_a_direct_report_keeps_its_ids_when_the_integrity_fetch_fails() -> None:
     class _Unreadable(_Capture):
         async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+            del request_id, part
             raise TimeoutError("capture integrity fetch timed out")
 
     ctx = ToolContext(
