@@ -366,3 +366,36 @@ async def test_captures_follow_updates_and_deletion(report_state: ReportState) -
     assert set(report_state.proof_captures[report_id]) == {_OTHER}
     report_state.delete_vulnerability_report(report_id, delete_reason="withdrawn")
     assert report_state.proof_captures == {}
+
+
+class _AlteredOnRefetch(_Marked):
+    """Passes its integrity check for the proof decision, then fails it."""
+
+    fetches = 0
+
+    async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+        result = await super().view_request(request_id, part=part)
+        self.fetches += 1
+        result.integrity_verified = self.fetches == 1
+        return result
+
+
+@pytest.mark.asyncio
+async def test_a_capture_that_fails_its_check_when_kept_is_left_out(
+    report_state: ReportState,
+) -> None:
+    await _file(_AlteredOnRefetch({_GOOD}), http_exchange_ids=[_GOOD])
+    assert _filed(report_state)["proof_status"] == "exploited"
+    assert report_state.proof_captures == {}
+
+
+@pytest.mark.asyncio
+async def test_an_id_dropped_while_fetching_is_not_kept(report_state: ReportState) -> None:
+    class _Dropped(_Marked):
+        async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+            for report in report_state.vulnerability_reports:
+                report["http_exchange_ids"] = [_OTHER]
+            return await super().view_request(request_id, part=part)
+
+    await _file(_Dropped({_GOOD}), http_exchange_ids=[_GOOD])
+    assert report_state.proof_captures == {}
