@@ -20,7 +20,11 @@ from agents import RunContextWrapper, function_tool
 from strix.report.origin import origin_of
 from strix.tools.nullish import clean_optional
 from strix.tools.proxy.tools import existing_request_ids
-from strix.tools.reporting.proof_signal import normalize_auth_role, normalize_proof_signal
+from strix.tools.reporting.proof_signal import (
+    normalize_auth_role,
+    normalize_proof_signal,
+    observed_proof_signal,
+)
 
 
 if TYPE_CHECKING:
@@ -1663,7 +1667,9 @@ async def create_vulnerability_report(
             "tolerance_ms": 1000}}``. Pick something a fixed endpoint
             would not return. Never put a credential, token or personal
             data in it; omit the field when only such a value would prove
-            the finding.
+            the finding. Cite the proving exchange first in
+            ``http_exchange_ids``: the signal is stored only when that
+            captured response shows it.
         auth_role: The role the proving request was authenticated as
             (for example ``"member"``). Omit for an unauthenticated proof.
         authz_bypass: True when the finding is an authorization bypass, so
@@ -1680,9 +1686,14 @@ async def create_vulnerability_report(
             ensure_ascii=False,
             default=str,
         )
+    cited, _ = _normalize_http_exchange_ids(http_exchange_ids)
     http_exchange_ids, proof_fields, http_exchange_warning = await _assess_direct_report_proof(
         ctx, http_exchange_ids
     )
+    signal_warning = None
+    if proof_fields.get("proof_status") == "exploited":
+        proving = cited[0] if cited and cited[0] in (http_exchange_ids or []) else None
+        proof_signal, signal_warning = await observed_proof_signal(ctx, proof_signal, proving)
 
     agent_id, agent_name = _caller_identity(ctx)
 
@@ -1718,7 +1729,37 @@ async def create_vulnerability_report(
         agent_id=agent_id,
         agent_name=agent_name,
     )
-    return json.dumps(_with_warning(result, http_exchange_warning), ensure_ascii=False, default=str)
+    warnings = " ".join(w for w in (http_exchange_warning, signal_warning) if w)
+    return json.dumps(_with_warning(result, warnings), ensure_ascii=False, default=str)
+
+
+async def _reject_unobserved_signal(
+    ctx: RunContextWrapper,
+    report_id: str,
+    proof_signal: dict[str, Any] | None,
+    http_exchange_ids: list[str] | None,
+) -> dict[str, Any] | None:
+    """Refuse a revised signal that the proving exchange of a proven report does not show."""
+    from strix.report.state import get_global_report_state
+
+    report_state = get_global_report_state()
+    reports = report_state.get_existing_vulnerabilities() if report_state else []
+    matched = next((r for r in reports if r.get("id") == (report_id or "").strip()), None)
+    # Any other report is refused by the revision itself.
+    if not proof_signal or matched is None or matched.get("proof_status") != "exploited":
+        return None
+    ids = matched.get("http_exchange_ids") if http_exchange_ids is None else http_exchange_ids
+    _, warning = await observed_proof_signal(ctx, proof_signal, ids[0] if ids else None)
+    if warning is None:
+        return None
+    return {
+        "success": False,
+        "error": (
+            "proof_signal does not appear in the captured response of the report's first "
+            "cited exchange, so nothing was revised."
+        ),
+        "report_id": report_id,
+    }
 
 
 @function_tool(timeout=60, strict_mode=False)
@@ -1890,6 +1931,10 @@ async def update_vulnerability_report(
             ensure_ascii=False,
             default=str,
         )
+
+    rejection = await _reject_unobserved_signal(ctx, report_id, proof_signal, http_exchange_ids)
+    if rejection is not None:
+        return json.dumps(rejection, ensure_ascii=False, default=str)
 
     agent_id, agent_name = _caller_identity(ctx)
     result = await asyncio.to_thread(

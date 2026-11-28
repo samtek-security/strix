@@ -4,14 +4,22 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from agents.tool_context import ToolContext
 
 from strix.report.state import ReportState, set_global_report_state
 from strix.tools.exploitation import tool as ex
-from strix.tools.reporting.proof_signal import normalize_auth_role, normalize_proof_signal
-from strix.tools.reporting.tool import _do_create, _do_update
+from strix.tools.proxy import tools as proxy_tools
+from strix.tools.reporting.proof_signal import (
+    UNOBSERVED_WARNING,
+    normalize_auth_role,
+    normalize_proof_signal,
+    observed_proof_signal,
+)
+from strix.tools.reporting.tool import _do_create, _do_update, update_vulnerability_report
 from tests.test_promotion_code_locations import _exploited, _promote
 
 
@@ -72,6 +80,72 @@ async def _create(**extra: Any) -> dict[str, Any]:
         code_locations=None,
         **extra,
     )
+
+
+_RESPONSE = b"HTTP/1.1 200 OK\r\nX-Debug: full stack\r\n\r\nroot:x:0:0:root:/root"
+
+
+def _capture(monkeypatch: pytest.MonkeyPatch, raw: bytes = _RESPONSE, roundtrip: int = 0) -> None:
+    async def client(_ctx: Any) -> object:
+        return object()
+
+    async def call(_client: Any, _fn: Any) -> Any:
+        return SimpleNamespace(response=SimpleNamespace(raw=raw, roundtrip_time=roundtrip))
+
+    monkeypatch.setattr(proxy_tools, "resolve_proxy_client", client)
+    monkeypatch.setattr(proxy_tools, "_call", call)
+
+
+@pytest.mark.parametrize(
+    ("signal", "roundtrip", "kept"),
+    [
+        (_SIGNAL, 0, True),
+        ({"reflection": "root:/root"}, 0, True),
+        ({"body_marker": "root:x:0:1"}, 0, False),
+        ({"body_marker": "full stack"}, 0, False),
+        ({"header": {"name": "x-debug", "contains": "stack"}}, 0, True),
+        ({"header": {"name": "X-Debug"}}, 0, True),
+        ({"header": {"name": "X-Other"}}, 0, False),
+        ({"timing": _TIMING}, 5100, True),
+        ({"timing": _TIMING}, 200, False),
+        ({"timing": _TIMING}, 0, False),
+        ({"body_marker": "root:x:0:0", "header": {"name": "X-Other"}}, 0, False),
+    ],
+)
+async def test_a_signal_is_kept_only_when_the_capture_shows_it(
+    monkeypatch: pytest.MonkeyPatch, signal: dict[str, Any], roundtrip: int, kept: bool
+) -> None:
+    _capture(monkeypatch, roundtrip=roundtrip)
+    expected = (signal, None) if kept else (None, UNOBSERVED_WARNING)
+    assert await observed_proof_signal(cast("Any", None), signal, "1") == expected
+
+
+async def test_no_proving_exchange_keeps_no_signal() -> None:
+    result = await observed_proof_signal(cast("Any", None), _SIGNAL, None)
+    assert result == (None, UNOBSERVED_WARNING)
+
+
+async def test_the_update_tool_refuses_a_signal_the_capture_lacks(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report_id = (await _create(http_exchange_ids=["1"]))["report_id"]
+    _capture(monkeypatch)
+    ctx = ToolContext(
+        context={}, tool_name="update_vulnerability_report", tool_call_id="c", tool_arguments="{}"
+    )
+
+    async def revise(marker: str) -> dict[str, Any]:
+        args = {
+            "report_id": report_id,
+            "update_reason": "retested",
+            "proof_signal": {"body_marker": marker},
+        }
+        return json.loads(await update_vulnerability_report.on_invoke_tool(ctx, json.dumps(args)))
+
+    assert not (await revise("never seen"))["success"]
+    assert "proof_signal" not in report_state.vulnerability_reports[0]
+    assert (await revise("root:x:0:0"))["success"]
+    assert report_state.vulnerability_reports[0]["proof_signal"] == _SIGNAL
 
 
 def _update(report_id: str, **fields: Any) -> dict[str, Any]:
@@ -232,7 +306,10 @@ async def test_promotion_carries_the_signal_onto_the_report(
         return ["1"], "exploited", None, "caido", None, None
 
     monkeypatch.setattr(ex, "assess_proof_with_integrity", verified)
-    args = _exploited(proof_signal=_SIGNAL, auth_role="member", authz_bypass=True)
+    _capture(monkeypatch)
+    args = _exploited(
+        proof_signal=_SIGNAL, auth_role="member", authz_bypass=True, caido_request_id="1"
+    )
     out, rs = await _promote(args, {}, tmp_path, monkeypatch)
     assert out["success"], out
     report = rs.vulnerability_reports[0]
