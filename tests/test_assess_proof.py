@@ -137,7 +137,7 @@ async def test_a_verified_capture_returns_its_hash_and_time() -> None:
 async def test_assess_proof_itself_refuses_a_capture_that_does_not_verify(
     verified: bool | None,
 ) -> None:
-    # Direct reports call assess_proof, so the integrity check has to live behind it.
+    # The integrity check lives behind assess_proof, so every caller gets it.
     ids, status, reason, source = await assess_proof(
         _ctx(_Signed({_GOOD}, verified=verified)), [_GOOD], require_all=False
     )

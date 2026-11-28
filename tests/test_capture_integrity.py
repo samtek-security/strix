@@ -13,6 +13,7 @@ from agents.tool_context import ToolContext
 from strix.report.state import ReportState, set_global_report_state
 from strix.report.writer import render_vulnerability_md
 from strix.tools.exploitation import tool as ex
+from strix.tools.reporting.tool import create_vulnerability_report
 
 
 if TYPE_CHECKING:
@@ -22,9 +23,14 @@ _ID = "gw-0123456789ab-" + "a" * 32
 _SHA = "b" * 64
 _STAMP = "2026-11-26T10:00:00Z"
 _CVSS = {
-    "attack_vector": "N", "attack_complexity": "L", "privileges_required": "N",
-    "user_interaction": "N", "scope": "U", "confidentiality": "H",
-    "integrity": "H", "availability": "H",
+    "attack_vector": "N",
+    "attack_complexity": "L",
+    "privileges_required": "N",
+    "user_interaction": "N",
+    "scope": "U",
+    "confidentiality": "H",
+    "integrity": "H",
+    "availability": "H",
 }
 
 
@@ -58,20 +64,35 @@ async def _promote(
     monkeypatch.chdir(tmp_path)  # ReportState writes recon_runs/ under the current directory
     ex.hydrate_queue_from_disk(tmp_path)
     ex._queue["q-0001"] = {
-        "id": "q-0001", "title": "SQLi", "guard_evidence": "raw concat", "minimal_witness": "id=1",
-        "confidence": "high", "endpoint": "/x", "status": "queued",
+        "id": "q-0001",
+        "title": "SQLi",
+        "guard_evidence": "raw concat",
+        "minimal_witness": "id=1",
+        "confidence": "high",
+        "endpoint": "/x",
+        "status": "queued",
     }
     rs = ReportState("run")
     set_global_report_state(rs)
     args = {
-        "item_id": "q-0001", "status": "exploited", "caido_request_id": _ID,
-        "impact": "I", "technical_analysis": "TA", "poc_script_code": "curl x",
-        "remediation_steps": "fix", "assumptions": "A", "counterevidence": "C",
-        "severity_change_conditions": "S", "fix_effort": "low", "cvss_breakdown": _CVSS,
+        "item_id": "q-0001",
+        "status": "exploited",
+        "caido_request_id": _ID,
+        "impact": "I",
+        "technical_analysis": "TA",
+        "poc_script_code": "curl x",
+        "remediation_steps": "fix",
+        "assumptions": "A",
+        "counterevidence": "C",
+        "severity_change_conditions": "S",
+        "fix_effort": "low",
+        "cvss_breakdown": _CVSS,
     }
     ctx = ToolContext(
-        context={"caido_client": client}, tool_name="promote_finding",
-        tool_call_id="c", tool_arguments="{}",
+        context={"caido_client": client},
+        tool_name="promote_finding",
+        tool_call_id="c",
+        tool_arguments="{}",
     )
     try:
         out = await ex.promote_finding.on_invoke_tool(ctx, json.dumps(args))
@@ -114,3 +135,83 @@ async def test_a_capture_with_no_recorded_hash_files_a_lead(
     out, rs = await _promote(_Gateway(verified=True, sha=None), tmp_path, monkeypatch)
     assert out["verdict"] == "lead", out
     assert "capture_integrity_sha256" not in rs.vulnerability_reports[0]
+
+
+async def _file_lead_then_cite_capture(
+    gateway: _Gateway, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict[str, Any], dict[str, Any], ReportState]:
+    """File a lead, then a duplicate of it that cites a gateway capture."""
+    monkeypatch.chdir(tmp_path)
+    rs = ReportState("run")
+    set_global_report_state(rs)
+    duplicate: dict[str, Any] = {"is_duplicate": False}
+
+    async def judge(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return duplicate
+
+    monkeypatch.setattr("strix.report.dedupe.check_duplicate", judge)
+    args = {
+        "title": "SQLi",
+        "description": "D",
+        "impact": "I",
+        "target": "https://t.example",
+        "technical_analysis": "TA",
+        "poc_description": "P",
+        "poc_script_code": "curl x",
+        "remediation_steps": "fix",
+        "evidence": "E",
+        "assumptions": "A",
+        "counterevidence": "C",
+        "confidence": "high",
+        "severity_change_conditions": "S",
+        "fix_effort": "low",
+        "cvss_breakdown": _CVSS,
+        "endpoint": "/x",
+        "method": "GET",
+        "cwe": "CWE-89",
+    }
+    ctx = ToolContext(
+        context={"caido_client": gateway},
+        tool_name="create_vulnerability_report",
+        tool_call_id="c",
+        tool_arguments="{}",
+    )
+    try:
+        first = json.loads(await create_vulnerability_report.on_invoke_tool(ctx, json.dumps(args)))
+        duplicate.update(is_duplicate=True, duplicate_id=first["report_id"])
+        merged = json.loads(
+            await create_vulnerability_report.on_invoke_tool(
+                ctx, json.dumps({**args, "http_exchange_ids": [_ID]})
+            )
+        )
+    finally:
+        set_global_report_state(None)
+    return first, merged, rs
+
+
+@pytest.mark.asyncio
+async def test_a_verified_direct_report_promotes_the_matched_lead_with_its_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, merged, rs = await _file_lead_then_cite_capture(
+        _Gateway(verified=True), tmp_path, monkeypatch
+    )
+    assert merged["merged_into"] == first["report_id"], merged
+    report = rs.vulnerability_reports[0]
+    assert report["proof_status"] == "exploited"
+    assert report["capture_integrity_sha256"] == _SHA
+    assert report["captured_at"] == _STAMP
+
+
+@pytest.mark.asyncio
+async def test_a_hash_mismatch_leaves_the_matched_lead_a_lead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, second, rs = await _file_lead_then_cite_capture(
+        _Gateway(verified=False), tmp_path, monkeypatch
+    )
+    assert second["duplicate_of"] == first["report_id"], second
+    [report] = rs.vulnerability_reports
+    assert report["proof_status"] == "lead"
+    assert "capture_integrity_sha256" not in report
+    assert "captured_at" not in report
