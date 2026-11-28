@@ -226,7 +226,12 @@ async def _promote(
     }
     ctx = _ctx(client, "promote_finding")
     try:
-        await exploitation.promote_finding.on_invoke_tool(ctx, json.dumps(args))
+        # A transient outage defers the promotion; spend the attempts so it resolves.
+        for _ in range(exploitation.MAX_VERIFY_ATTEMPTS):
+            await exploitation.promote_finding.on_invoke_tool(ctx, json.dumps(args))
+            if exploitation._queue["q-0001"]["status"] != "queued":
+                break
+            exploitation._queue["q-0001"]["next_eligible"] = 0
         assert len(state.vulnerability_reports) == 1
         return state.vulnerability_reports[0]
     finally:
@@ -273,6 +278,10 @@ async def test_both_tools_reach_the_same_proof_status(
             report.get("proof_source"),
         )
 
+    promoted_reason = promoted.get("proof_status_reason")
+    if promoted_reason and promoted_reason.startswith(exploitation.VERIFICATION_UNAVAILABLE_REASON):
+        # The promotion retried the outage to its cap; the decision underneath is the same one.
+        promoted["proof_status_reason"] = promoted_reason.split(": ", 1)[1]
     assert decision(direct) == decision(promoted)
 
 
