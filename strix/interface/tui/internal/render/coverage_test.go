@@ -219,3 +219,16 @@ func TestVulnerabilityReportUpdateRendersReportAndReason(t *testing.T) {
 		"9.3",
 	)
 }
+
+func TestCodeLocationNamesItsRepository(t *testing.T) {
+	var b strings.Builder
+	renderCodeLocations(&b, []any{
+		map[string]any{"repo": "acme/api", "file": "app/views.py", "start_line": float64(3)},
+		map[string]any{"file": "app/views.py", "start_line": float64(1), "end_line": float64(4)},
+	})
+	out := ansi.Strip(b.String())
+	requireContains(t, out, "acme/api: app/views.py:3", "app/views.py:1-4")
+	if strings.Contains(out, "acme/api: app/views.py:1") {
+		t.Fatalf("a location naming no repository must not borrow one: %q", out)
+	}
+}

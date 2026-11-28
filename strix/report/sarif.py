@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """SARIF 2.1.0 output for Strix vulnerability reports.
 
 Builds a GitHub code-scanning compatible SARIF document from Strix findings
@@ -275,6 +276,10 @@ def build_sarif_report(
 
     if coverage:
         run["invocations"] = [_coverage_invocation(coverage)]
+
+    repo_bases = _repo_base_ids(results)
+    if repo_bases:
+        run["originalUriBaseIds"] = repo_bases
 
     run_properties: dict[str, Any] = {}
     if synthetic_location_count:
@@ -618,7 +623,7 @@ def _build_fixes(report: dict[str, Any]) -> list[dict[str, Any]] | None:
 
         artifact_changes.append(
             {
-                "artifactLocation": {"uri": uri},
+                "artifactLocation": _artifact_location(location, uri),
                 "replacements": [
                     {
                         "deletedRegion": deleted_region,
@@ -829,7 +834,7 @@ def _build_physical_locations(raw_locations: Any) -> tuple[list[dict[str, Any]],
             region["snippet"] = {"text": snippet}
 
         physical_location: dict[str, Any] = {
-            "artifactLocation": {"uri": uri},
+            "artifactLocation": _artifact_location(location, uri),
             "region": region,
         }
         entry: dict[str, Any] = {"physicalLocation": physical_location}
@@ -841,6 +846,41 @@ def _build_physical_locations(raw_locations: Any) -> tuple[list[dict[str, Any]],
         locations.append(entry)
 
     return locations, dropped_location_count
+
+
+def _artifact_location(location: dict[str, Any], uri: str) -> dict[str, Any]:
+    """The SARIF artifact location for a code location: its URI, plus the repository as a
+    symbolic base (``uriBaseId``) when the location names one. Two repositories can hold the
+    same path, and the URI alone cannot tell them apart."""
+    from strix.tools.reporting.tool import _valid_repo_name  # noqa: PLC0415
+
+    artifact: dict[str, Any] = {"uri": uri}
+    repo = _string_value(location.get("repo"))
+    if repo and _valid_repo_name(repo):
+        artifact["uriBaseId"] = f"{_REPO_BASE_PREFIX}{repo}"
+    return artifact
+
+
+_REPO_BASE_PREFIX = "repo:"
+
+
+def _repo_base_ids(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """``originalUriBaseIds`` entries for each repository base the locations or fixes use."""
+    found: dict[str, dict[str, Any]] = {}
+
+    def note(artifact: Any) -> None:
+        base = artifact.get("uriBaseId") if isinstance(artifact, dict) else None
+        if isinstance(base, str) and base.startswith(_REPO_BASE_PREFIX):
+            name = base.removeprefix(_REPO_BASE_PREFIX)
+            found.setdefault(base, {"description": {"text": f"Repository {name}"}})
+
+    for result in results:
+        for loc in result.get("locations") or []:
+            note((loc.get("physicalLocation") or {}).get("artifactLocation"))
+        for fix in result.get("fixes") or []:
+            for change in fix.get("artifactChanges") or []:
+                note(change.get("artifactLocation"))
+    return found
 
 
 def _sarif_uri(file_path: str) -> str | None:
@@ -986,9 +1026,12 @@ def _primary_fingerprint(
     """
     primary_physical = _first_physical_location(locations)
     uri = ""
+    uri_base = ""
     start_line: int | None = None
     if primary_physical:
-        uri = (primary_physical.get("artifactLocation") or {}).get("uri", "") or ""
+        artifact = primary_physical.get("artifactLocation") or {}
+        uri = artifact.get("uri", "") or ""
+        uri_base = artifact.get("uriBaseId", "") or ""
         region = primary_physical.get("region") or {}
         sl = region.get("startLine")
         if isinstance(sl, int) and sl >= 1:
@@ -1003,6 +1046,9 @@ def _primary_fingerprint(
 
     parts = [f"rule:{rule_id}"]
     if uri:
+        if uri_base:
+            # only a repository-qualified location adds this; every other location hashes as before
+            parts.append(f"base:{uri_base}")
         parts.append(f"uri:{uri}")
         if start_line is not None:
             # startLine in fingerprint is debatable: line shifts in

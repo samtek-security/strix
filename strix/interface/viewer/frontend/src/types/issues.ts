@@ -68,6 +68,7 @@ export const FIX_EFFORT_META: Record<FixEffort, { label: string; color: string }
 };
 
 export interface CodeLocation {
+  repo?: string;
   file: string;
   start_line: number;
   end_line?: number;
