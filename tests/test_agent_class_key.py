@@ -82,6 +82,20 @@ async def test_reports_carry_the_class_of_the_agent_that_filed_them(
     assert snapshot["metadata"][sqli]["class_key"] == "sqli"
 
 
+def test_a_keyed_specialists_proof_merge_attributes_an_unkeyed_report(
+    report_state: ReportState,
+) -> None:
+    report_state.agent_class_keys.update({"specialist": "sqli", "other": "xss"})
+    report_id = report_state.add_vulnerability_report(title="t", severity="low", agent_id="root")
+    for agent_id, proof in (("specialist", "proof one"), ("other", "proof two")):
+        merged = report_state.merge_proof_into_report(
+            report_id, {"poc_script_code": proof}, merged_by_agent_id=agent_id
+        )
+        assert merged is not None
+        # the first keyed merge names the class; a later one does not move it
+        assert merged["class_key"] == "sqli"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("given", "passed"), [(" SQLi ", "sqli"), ("path-traversal", "path-traversal"), (None, None)]

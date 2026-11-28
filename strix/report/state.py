@@ -764,6 +764,9 @@ class ReportState:
         history.append(entry)
 
         revised = {**report, **changed, "update_history": history}
+        class_key = self.agent_class_keys.get(merged_by_agent_id or "")
+        if class_key and not revised.get("class_key"):
+            revised["class_key"] = class_key
         for key in stale_capture:
             revised.pop(key, None)
         if (
