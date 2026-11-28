@@ -20,6 +20,7 @@ from agents import RunContextWrapper, function_tool
 from strix.report.origin import origin_of
 from strix.tools.nullish import clean_optional
 from strix.tools.proxy.tools import existing_request_ids
+from strix.tools.reporting.proof_signal import normalize_auth_role, normalize_proof_signal
 
 
 if TYPE_CHECKING:
@@ -529,6 +530,16 @@ def _collect_update_changes(  # noqa: PLR0912, PLR0915
     if raw_http_exchange_ids is not None and not http_exchange_errors:
         changes["http_exchange_ids"] = http_exchange_ids or []
 
+    proof_signal, signal_errors = normalize_proof_signal(fields.get("proof_signal"))
+    auth_role, role_errors = normalize_auth_role(fields.get("auth_role"))
+    errors.extend(signal_errors + role_errors)
+    if proof_signal:
+        changes["proof_signal"] = proof_signal
+    if auth_role:
+        changes["auth_role"] = auth_role
+    if fields.get("authz_bypass") is not None:
+        changes["authz_bypass"] = bool(fields["authz_bypass"])
+
     return changes, errors
 
 
@@ -540,6 +551,9 @@ _DYNAMIC_ONLY_UPDATE_FIELDS = (
     "poc_description",
     "poc_script_code",
     "http_exchange_ids",
+    "proof_signal",
+    "auth_role",
+    "authz_bypass",
 )
 
 # A dependency finding is rated in the context of the codebase that pins it, and
@@ -941,6 +955,9 @@ async def _do_create(  # noqa: PLR0911
     confidence_rationale: str | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
+    proof_signal: dict[str, Any] | None = None,
+    auth_role: str | None = None,
+    authz_bypass: bool | None = None,
     proof_status: str | None = None,
     proof_status_reason: str | None = None,
     proof_source: str | None = None,
@@ -993,6 +1010,15 @@ async def _do_create(  # noqa: PLR0911
         http_exchange_ids
     )
     errors.extend(http_exchange_errors)
+    proof_signal, signal_errors = normalize_proof_signal(proof_signal)
+    auth_role, role_errors = normalize_auth_role(auth_role)
+    errors.extend(signal_errors + role_errors)
+    # Stored only when set, so a report without them reads the same as before.
+    replay_fields: dict[str, Any] = {
+        "proof_signal": proof_signal,
+        "auth_role": auth_role,
+        "authz_bypass": True if authz_bypass else None,
+    }
     if capture_integrity_sha256 is not None and not _SHA256_HEX.fullmatch(capture_integrity_sha256):
         errors.append("capture_integrity_sha256 must be 64 lowercase hex characters")
     if proof_status is not None and proof_status not in _VALID_PROOF_STATUS:
@@ -1061,6 +1087,7 @@ async def _do_create(  # noqa: PLR0911
             "fix_verification": fix_verification,
             "fix_pr_body": fix_pr_body,
             "http_exchange_ids": normalized_http_exchange_ids,
+            **replay_fields,
         }
 
         dedupe = await check_duplicate(candidate, existing)
@@ -1085,6 +1112,7 @@ async def _do_create(  # noqa: PLR0911
                     "assumptions": assumptions,
                     "capture_integrity_sha256": capture_integrity_sha256,
                     "captured_at": captured_at,
+                    **replay_fields,
                 },
                 queue_item_id=queue_item_id,
                 agent_id=agent_id if isinstance(agent_id, str) else None,
@@ -1190,6 +1218,9 @@ async def create_vulnerability_report(
     confidence_rationale: str | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
+    proof_signal: dict[str, Any] | None = None,
+    auth_role: str | None = None,
+    authz_bypass: bool | None = None,
 ) -> str:
     """File a vulnerability report — one report per fully-verified finding.
 
@@ -1605,6 +1636,24 @@ async def create_vulnerability_report(
             fix (summary + rationale). Prose/markdown only — the code
             change itself belongs in ``code_locations``. Omit for
             black-box findings.
+        proof_signal: What in the response to the proving request shows
+            the vulnerability, so a later retest can tell whether it is
+            still there. Give it for any finding proven by one HTTP
+            request. An object with one or more of these checks, all of
+            which must hold for the finding to reproduce:
+            ``{"body_marker": "text in the response body"}``,
+            ``{"reflection": "payload echoed back unescaped"}``,
+            ``{"header": {"name": "X-Debug", "contains": "stack"}}``
+            (``contains`` is optional), or
+            ``{"timing": {"delay_ms": 5000, "baseline_ms": 120,
+            "tolerance_ms": 1000}}``. Pick something a fixed endpoint
+            would not return. Never put a credential, token or personal
+            data in it; omit the field when only such a value would prove
+            the finding.
+        auth_role: The role the proving request was authenticated as
+            (for example ``"member"``). Omit for an unauthenticated proof.
+        authz_bypass: True when the finding is an authorization bypass, so
+            that a later 401 or 403 means it is fixed.
     """
     _, http_exchange_errors = _normalize_http_exchange_ids(http_exchange_ids)
     if http_exchange_errors:
@@ -1649,6 +1698,9 @@ async def create_vulnerability_report(
         http_exchange_ids=http_exchange_ids,
         fix_verification=fix_verification,
         fix_pr_body=fix_pr_body,
+        proof_signal=proof_signal,
+        auth_role=auth_role,
+        authz_bypass=authz_bypass,
         agent_id=agent_id,
         agent_name=agent_name,
     )
@@ -1685,6 +1737,9 @@ async def update_vulnerability_report(
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
     contextual_cvss_reasoning: str | None = None,
+    proof_signal: dict[str, Any] | None = None,
+    auth_role: str | None = None,
+    authz_bypass: bool | None = None,
 ) -> str:
     """Revise a vulnerability report that is already filed, keeping its id.
 
@@ -1761,6 +1816,12 @@ async def update_vulnerability_report(
         contextual_cvss_reasoning: Dependency findings only. What you
             observed in this codebase that justifies the contextual
             ``cvss_breakdown``.
+        proof_signal: Replacement retest signal, in the shape
+            ``create_vulnerability_report`` takes. A new
+            ``poc_script_code``, ``endpoint`` or ``method`` drops the
+            stored signal unless you pass one here.
+        auth_role: Replacement role the proving request ran as.
+        authz_bypass: Whether the finding is an authorization bypass.
     """
     (
         http_exchange_ids,
@@ -1804,6 +1865,9 @@ async def update_vulnerability_report(
         "fix_verification": fix_verification,
         "fix_pr_body": fix_pr_body,
         "contextual_cvss_reasoning": contextual_cvss_reasoning,
+        "proof_signal": proof_signal,
+        "auth_role": auth_role,
+        "authz_bypass": authz_bypass,
     }
     if http_exchange_warning and all(value is None for value in fields.values()):
         return json.dumps(
