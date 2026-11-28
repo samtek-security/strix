@@ -15,6 +15,7 @@ from strix.tools.exploitation import tool as ex
 from strix.tools.proxy import tools as proxy_tools
 from strix.tools.reporting.proof_signal import (
     UNOBSERVED_WARNING,
+    UNTIMED_WARNING,
     normalize_auth_role,
     normalize_proof_signal,
     observed_proof_signal,
@@ -59,6 +60,7 @@ async def _create(**extra: Any) -> dict[str, Any]:
         "x",
     )
     extra.setdefault("proof_status", "exploited")
+    extra.setdefault("http_exchange_ids", ["1"])
     return await _do_create(
         **text,
         confidence="high",
@@ -108,7 +110,6 @@ def _capture(monkeypatch: pytest.MonkeyPatch, raw: bytes = _RESPONSE, roundtrip:
         ({"header": {"name": "X-Other"}}, 0, False),
         ({"timing": _TIMING}, 5100, True),
         ({"timing": _TIMING}, 200, False),
-        ({"timing": _TIMING}, 0, False),
         ({"body_marker": "root:x:0:0", "header": {"name": "X-Other"}}, 0, False),
     ],
 )
@@ -118,6 +119,57 @@ async def test_a_signal_is_kept_only_when_the_capture_shows_it(
     _capture(monkeypatch, roundtrip=roundtrip)
     expected = (signal, None) if kept else (None, UNOBSERVED_WARNING)
     assert await observed_proof_signal(cast("Any", None), signal, "1") == expected
+
+
+async def test_timing_is_reported_uncheckable_without_a_response_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _capture(monkeypatch, roundtrip=0)
+    result = await observed_proof_signal(cast("Any", None), {"timing": _TIMING}, "1")
+    assert result == (None, UNTIMED_WARNING)
+
+
+async def test_a_dropped_signal_leaves_no_key_for_a_retest_to_judge(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The retest runs its signal oracle only when the key exists. Absent, not null or empty,
+    # keeps the status rules, so a signal that was dropped can never mark a finding fixed.
+    _capture(monkeypatch)
+    signal, warning = await observed_proof_signal(
+        cast("Any", None), {"body_marker": "never seen"}, "1"
+    )
+    assert warning
+    await _create(proof_signal=signal, auth_role="member")
+    stored = json.loads((report_state.get_run_dir() / "vulnerabilities.json").read_text())[0]
+    assert "proof_signal" not in stored
+    assert "authz_bypass" not in stored
+
+
+@pytest.mark.parametrize("ids", [["2"], []])
+async def test_a_signal_checked_against_a_swapped_exchange_is_refused(
+    report_state: ReportState, ids: list[str]
+) -> None:
+    report_id = (await _create())["report_id"]
+    # Another revision lands between the capture check and this write.
+    assert _update(report_id, http_exchange_ids=ids)["success"]
+    assert not _update(report_id, proof_signal=_SIGNAL)["success"]
+    assert "proof_signal" not in report_state.vulnerability_reports[0]
+
+
+async def test_an_unchecked_signal_is_never_written(report_state: ReportState) -> None:
+    report_id = (await _create(http_exchange_ids=None))["report_id"]
+    result = _do_update(report_id=report_id, update_reason="r", fields={"proof_signal": _SIGNAL})
+    assert not result["success"]
+    assert "proof_signal" not in report_state.vulnerability_reports[0]
+
+
+@pytest.mark.parametrize("field", [{"authz_bypass": False}, {"authz_bypass": True}])
+async def test_a_lead_refuses_the_bypass_flag_either_way(
+    report_state: ReportState, field: dict[str, bool]
+) -> None:
+    report_id = (await _create(proof_status="lead"))["report_id"]
+    assert _update(report_id, **field)["rejected_fields"] == ["authz_bypass"]
+    assert "authz_bypass" not in report_state.vulnerability_reports[0]
 
 
 async def test_no_proving_exchange_keeps_no_signal() -> None:
@@ -149,7 +201,12 @@ async def test_the_update_tool_refuses_a_signal_the_capture_lacks(
 
 
 def _update(report_id: str, **fields: Any) -> dict[str, Any]:
-    return _do_update(report_id=report_id, update_reason="retested", fields=fields)
+    return _do_update(
+        report_id=report_id,
+        update_reason="retested",
+        fields=fields,
+        signal_checked_against="1",
+    )
 
 
 @pytest.mark.parametrize(

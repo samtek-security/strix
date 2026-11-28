@@ -670,7 +670,7 @@ def _fit_revision_to_class(
     if offending:
         return _reject_cross_class_revision(report_id, matched_class, offending)
     if matched_class == "dynamic":
-        replay = [k for k in ("proof_signal", "auth_role", "authz_bypass") if changes.get(k)]
+        replay = [k for k in ("proof_signal", "auth_role", "authz_bypass") if k in changes]
         if replay and matched.get("proof_status") != "exploited":
             return {
                 "success": False,
@@ -717,6 +717,7 @@ def _do_update(
     fields: dict[str, Any],
     agent_id: str | None = None,
     agent_name: str | None = None,
+    signal_checked_against: str | None = None,
 ) -> dict[str, Any]:
     """Apply an agent's own revision to a report it can name.
 
@@ -749,6 +750,7 @@ def _do_update(
             update_reason=update_reason,
             updated_by_agent_id=agent_id,
             updated_by_agent_name=agent_name,
+            signal_checked_against=signal_checked_against,
         )
     except Exception as e:
         logger.exception("update_vulnerability_report persistence failed")
@@ -1733,13 +1735,16 @@ async def create_vulnerability_report(
     return json.dumps(_with_warning(result, warnings), ensure_ascii=False, default=str)
 
 
-async def _reject_unobserved_signal(
+async def _check_revised_signal(
     ctx: RunContextWrapper,
     report_id: str,
     proof_signal: dict[str, Any] | None,
     http_exchange_ids: list[str] | None,
-) -> dict[str, Any] | None:
-    """Refuse a revised signal that the proving exchange of a proven report does not show."""
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Check a revised signal against the proving exchange of a proven report.
+
+    Returns ``(checked_id, rejection)``; the write refuses a signal without a matching id.
+    """
     from strix.report.state import get_global_report_state
 
     report_state = get_global_report_state()
@@ -1747,17 +1752,15 @@ async def _reject_unobserved_signal(
     matched = next((r for r in reports if r.get("id") == (report_id or "").strip()), None)
     # Any other report is refused by the revision itself.
     if not proof_signal or matched is None or matched.get("proof_status") != "exploited":
-        return None
+        return None, None
     ids = matched.get("http_exchange_ids") if http_exchange_ids is None else http_exchange_ids
-    _, warning = await observed_proof_signal(ctx, proof_signal, ids[0] if ids else None)
+    proving = ids[0] if ids else None
+    _, warning = await observed_proof_signal(ctx, proof_signal, proving)
     if warning is None:
-        return None
-    return {
+        return proving, None
+    return None, {
         "success": False,
-        "error": (
-            "proof_signal does not appear in the captured response of the report's first "
-            "cited exchange, so nothing was revised."
-        ),
+        "error": f"{warning} Nothing was revised.",
         "report_id": report_id,
     }
 
@@ -1932,13 +1935,16 @@ async def update_vulnerability_report(
             default=str,
         )
 
-    rejection = await _reject_unobserved_signal(ctx, report_id, proof_signal, http_exchange_ids)
+    checked_id, rejection = await _check_revised_signal(
+        ctx, report_id, proof_signal, http_exchange_ids
+    )
     if rejection is not None:
         return json.dumps(rejection, ensure_ascii=False, default=str)
 
     agent_id, agent_name = _caller_identity(ctx)
     result = await asyncio.to_thread(
         _do_update,
+        signal_checked_against=checked_id,
         report_id=report_id,
         update_reason=update_reason,
         fields=fields,

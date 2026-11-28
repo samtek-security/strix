@@ -25,6 +25,10 @@ UNOBSERVED_WARNING = (
     "id cited) does not show it. Copy the value from that response and set it with "
     "update_vulnerability_report."
 )
+UNTIMED_WARNING = (
+    "proof_signal was not stored: this capture records no response time, so timing cannot be "
+    "checked on it. Use a body, reflection or header check if the response shows one."
+)
 _CHECKS = ("body_marker", "reflection", "header", "timing")
 _MAX_LITERAL = 512
 _MAX_HEADER_NAME = 128
@@ -147,9 +151,10 @@ async def observed_proof_signal(
 ) -> tuple[Any, str | None]:
     """Keep a signal only when the captured proving response shows it.
 
-    A retest reads a missing signal as fixed, so a mistyped or remembered value would clear a
-    live finding. Returns ``(signal, warning)``. An unusable signal comes back untouched for the
-    caller's validation to reject.
+    A retest can clear a finding when the stored value is absent from the replayed response, so
+    a mistyped or remembered value could clear a live one. With no signal stored, the retest
+    judges by status as before. Returns ``(signal, warning)``. An unusable signal comes back
+    untouched for the caller's validation to reject.
     """
     from strix.tools.proxy import caido_api  # noqa: PLC0415
     from strix.tools.proxy.tools import _call, resolve_proxy_client  # noqa: PLC0415
@@ -168,9 +173,10 @@ async def observed_proof_signal(
             captured = getattr(response, "raw", None)
             if isinstance(captured, bytes | bytearray):
                 captured = bytes(captured).decode("utf-8", errors="replace")
-            if captured and _response_shows(
-                signal, captured, getattr(response, "roundtrip_time", None)
-            ):
+            roundtrip = getattr(response, "roundtrip_time", None)
+            if captured and "timing" in signal and not roundtrip:
+                return None, UNTIMED_WARNING
+            if captured and _response_shows(signal, captured, roundtrip):
                 return signal, None
     except Exception:  # noqa: BLE001 - an unreadable capture proves nothing about the signal
         logger.debug("proof signal check failed for %s", exchange_id, exc_info=True)
