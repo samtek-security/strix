@@ -672,6 +672,30 @@ def _read_revision(
     return changes, None
 
 
+def _report_by_id(report_id: str) -> dict[str, Any]:
+    from strix.report.state import get_global_report_state
+
+    state = get_global_report_state()
+    reports = state.vulnerability_reports if state is not None else []
+    return next((r for r in reports if r.get("id") == report_id), {})
+
+
+def _cited_ids(report_id: str) -> list[str]:
+    return list(_report_by_id(report_id).get("http_exchange_ids") or [])
+
+
+async def _capture_added_proof(ctx: RunContextWrapper, report_id: str, added: list[str]) -> None:
+    """A proven report can gain an exchange by update, usually the control. Its pair is kept
+    only if it passes the same check a filing does."""
+    from strix.tools.exploitation.tool import assess_proof, keep_proof_captures
+
+    if not added or _report_by_id(report_id).get("proof_status") != "exploited":
+        return
+    ids, status, _, _ = await assess_proof(ctx, list(added), require_all=False)
+    if status == "exploited":
+        await keep_proof_captures(ctx, report_id, ids or [])
+
+
 def _do_update(
     *,
     report_id: str,
@@ -1801,6 +1825,7 @@ async def update_vulnerability_report(
         )
 
     agent_id, agent_name = _caller_identity(ctx)
+    cited_before = _cited_ids(report_id)
     result = await asyncio.to_thread(
         _do_update,
         report_id=report_id,
@@ -1809,6 +1834,9 @@ async def update_vulnerability_report(
         agent_id=agent_id,
         agent_name=agent_name,
     )
+    if result.get("success") and http_exchange_ids:
+        added = [i for i in http_exchange_ids if i not in cited_before]
+        await _capture_added_proof(ctx, report_id, added)
     return json.dumps(_with_warning(result, http_exchange_warning), ensure_ascii=False, default=str)
 
 

@@ -16,6 +16,7 @@ from strix.tools.exploitation.tool import NO_EXCHANGE_SOURCE_REASON, PROOF_FAILE
 from strix.tools.reporting.tool import (
     _HTTP_EXCHANGE_UNVERIFIED_WARNING,
     create_vulnerability_report,
+    update_vulnerability_report,
 )
 
 
@@ -342,3 +343,26 @@ async def test_a_promotion_keeps_only_its_control_exchange(
     )
     assert report["proof_status"] == "exploited"
     assert list(states[0].proof_captures[report["id"]]) == [_OTHER]
+
+
+@pytest.mark.asyncio
+async def test_captures_follow_updates_and_deletion(report_state: ReportState) -> None:
+    client = _Marked({_GOOD, _OTHER})
+    await _file(client, http_exchange_ids=[_GOOD])
+    report_id = _filed(report_state)["id"]
+
+    async def cite(ids: list[str]) -> None:
+        out = await update_vulnerability_report.on_invoke_tool(
+            _ctx(client, "update_vulnerability_report"),
+            json.dumps(
+                {"report_id": report_id, "update_reason": "baseline", "http_exchange_ids": ids}
+            ),
+        )
+        assert json.loads(out)["success"] is True, out
+
+    await cite([_GOOD, _OTHER])
+    assert set(report_state.proof_captures[report_id]) == {_GOOD, _OTHER}
+    await cite([_OTHER])
+    assert set(report_state.proof_captures[report_id]) == {_OTHER}
+    report_state.delete_vulnerability_report(report_id, delete_reason="withdrawn")
+    assert report_state.proof_captures == {}
