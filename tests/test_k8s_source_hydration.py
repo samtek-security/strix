@@ -54,6 +54,34 @@ async def test_all_sources_travel_in_one_tar_stream(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_each_source_carries_its_own_hard_linked_files(tmp_path: Path) -> None:
+    app, lib = _tree(tmp_path, "app"), _tree(tmp_path, "lib")
+    (tmp_path / "lib" / "shared.py").hardlink_to(tmp_path / "app" / "main.py")
+    session = _Session()
+    await session_manager._hydrate_k8s_sources(session, [app, lib])
+    with tarfile.open(fileobj=io.BytesIO(session.calls[0][0])) as tf:
+        assert tf.getmember("lib/shared.py").isreg()
+
+
+@pytest.mark.asyncio
+async def test_links_inside_a_source_become_relative(tmp_path: Path) -> None:
+    source = _tree(tmp_path, "checkout")
+    source["workspace_subdir"] = "app"
+    root = tmp_path / "checkout"
+    (root / "pkg").mkdir()
+    (root / "pkg" / "absolute").symlink_to(root / "main.py")
+    (root / "pkg" / "round_trip").symlink_to("../../checkout/main.py")
+    (root / "outside").symlink_to("/etc/hostname")
+    session = _Session()
+    await session_manager._hydrate_k8s_sources(session, [source])
+    with tarfile.open(fileobj=io.BytesIO(session.calls[0][0])) as tf:
+        assert tf.getmember("app/pkg/absolute").linkname == "../main.py"
+        assert tf.getmember("app/pkg/round_trip").linkname == "../main.py"
+        # Left for the backend to refuse.
+        assert tf.getmember("app/outside").linkname == "/etc/hostname"
+
+
+@pytest.mark.asyncio
 async def test_hydration_error_is_raised(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="tar stream refused"):
         await session_manager._hydrate_k8s_sources(_Session(fail=True), [_tree(tmp_path)])
