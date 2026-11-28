@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import re
+import weakref
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -315,6 +316,154 @@ async def _assess_direct_report_proof(
         return cited or None, fields, None
     warning = _HTTP_EXCHANGE_UNVERIFIED_WARNING if status == "lead" and ids else None
     return ids, fields, warning
+
+
+# Fields that carry or describe the proof behind a report. A revision that changes
+# one of them on a proven report has to pass the exchange check again.
+_PROOF_BEARING_FIELDS = (
+    "evidence",
+    "target",
+    "endpoint",
+    "method",
+    "poc_description",
+    "poc_script_code",
+    "http_exchange_ids",
+)
+
+# What a promoted report stores from the capture itself.
+_CAPTURE_BOUND_FIELDS = ("evidence", "target", "endpoint", "method")
+
+PROOF_INVALIDATED_PREFIX = "proof_invalidated:"
+_EXCHANGE_SOURCE_DOWN = "could not be queried"
+
+
+_PROOF_UPDATE_LOCKS: weakref.WeakKeyDictionary[Any, asyncio.Lock] = weakref.WeakKeyDictionary()
+
+
+def _proof_update_lock() -> asyncio.Lock:
+    """One lock per event loop, so a proof check and the write it guards are one step.
+
+    Two agents revising the same proven report would otherwise each check their own
+    version of the ids and evidence, and the second write could land on a combination
+    nobody checked.
+    """
+    loop = asyncio.get_running_loop()
+    lock = _PROOF_UPDATE_LOCKS.get(loop)
+    if lock is None:
+        lock = _PROOF_UPDATE_LOCKS[loop] = asyncio.Lock()
+    return lock
+
+
+class _ProofUnavailableError(Exception):
+    """The exchange source did not answer, so the proof check has no verdict yet."""
+
+
+def _stored_report(report_id: str) -> dict[str, Any] | None:
+    from strix.report.state import get_global_report_state
+
+    state = get_global_report_state()
+    if state is None:
+        return None
+    return next((r for r in state.get_existing_vulnerabilities() if r.get("id") == report_id), None)
+
+
+def _replaces(report: dict[str, Any], fields: dict[str, Any], name: str) -> bool:
+    """Whether a revision carries a value for ``name`` that differs from the stored one."""
+    value = fields.get(name)
+    if value is None:
+        return False
+    if isinstance(value, str):
+        # The same placeholders the update itself ignores ("null", "none", blank).
+        cleaned = clean_optional(value)
+        if cleaned is None:
+            return False
+        value = cleaned
+    if name == "http_exchange_ids":
+        return list(value) != list(report.get(name) or [])
+    return bool(value != report.get(name))
+
+
+def _touches_proof(report: dict[str, Any], fields: dict[str, Any]) -> bool:
+    """Whether a revision replaces something a proven report's proof rests on."""
+    return any(_replaces(report, fields, name) for name in _PROOF_BEARING_FIELDS)
+
+
+async def _revalidate_proof(  # noqa: PLR0911
+    ctx: RunContextWrapper, report_id: str, fields: dict[str, Any]
+) -> dict[str, Any]:
+    """Proof fields to write with a revision of a proven report.
+
+    Returns ``{}`` when the report is not proven or the revision leaves its proof
+    alone. Otherwise the same exchange check that filed the report runs again over
+    the ids the revised report will carry. The report keeps ``exploited`` only when
+    that check passes, and demotes to ``lead`` with the reason recorded. Proof text
+    in ``evidence`` never counts: only ``http_exchange_ids`` can prove a report.
+    """
+    report = _stored_report(report_id)
+    if report is None or report.get("proof_status") != "exploited":
+        return {}
+    if not _touches_proof(report, fields):
+        return {}
+
+    promoted = bool(report.get("queue_item_id"))
+    if promoted and any(_replaces(report, fields, name) for name in _CAPTURE_BOUND_FIELDS):
+        # A promoted report's evidence is the captured exchange itself. Agent text in its
+        # place is no longer bound to the capture, and nothing can rebind it here.
+        return {
+            "proof_status": "lead",
+            "proof_status_reason": (
+                f"{PROOF_INVALIDATED_PREFIX} the captured evidence of a promoted "
+                "report was replaced"
+            ),
+        }
+
+    raw = fields.get("http_exchange_ids")
+    stored = list(report.get("http_exchange_ids") or [])
+    ids = raw if raw is not None else stored
+    if promoted and not set(stored) <= set(_normalize_http_exchange_ids(ids)[0] or []):
+        # The stored evidence belongs to the original trigger and control exchanges.
+        return {
+            "proof_status": "lead",
+            "proof_status_reason": (
+                f"{PROOF_INVALIDATED_PREFIX} a promoted report must keep its original exchange ids"
+            ),
+        }
+    from strix.tools.exploitation.tool import (
+        NO_EXCHANGE_SOURCE_REASON,
+        assess_proof_with_integrity,
+    )
+
+    cited, _ = _normalize_http_exchange_ids(ids)
+    if not cited:
+        # Nothing left to check: a definite failure, whatever the exchange source is doing.
+        return {
+            "proof_status": "lead",
+            "proof_status_reason": f"{PROOF_INVALIDATED_PREFIX} no exchange id remains",
+        }
+    # A promoted report was filed on trigger plus control, so every id must still verify.
+    verified, status, reason, source, sha, stamp = await assess_proof_with_integrity(
+        ctx, list(cited or []), require_all=promoted
+    )
+    if status == "exploited":
+        # The hash and capture time describe the capture now cited, not the one replaced.
+        kept: dict[str, Any] = {
+            "proof_source": source,
+            "capture_integrity_sha256": sha,
+            "captured_at": stamp,
+        }
+        if verified and list(verified) != list(cited):
+            # A capture that failed its hash must not stay linked as evidence beside one that
+            # passed, as at filing.
+            kept["http_exchange_ids"] = list(verified)
+        return {key: value for key, value in kept.items() if value}
+    if reason and (_EXCHANGE_SOURCE_DOWN in reason or reason == NO_EXCHANGE_SOURCE_REASON):
+        # No answer, or no source at all, is not a failed check. Refuse the update so a
+        # retry can still prove it.
+        raise _ProofUnavailableError(reason)
+    return {
+        "proof_status": "lead",
+        "proof_status_reason": f"{PROOF_INVALIDATED_PREFIX} {reason or ''}".strip(),
+    }
 
 
 def _with_warning(result: dict[str, Any], warning: str | None) -> dict[str, Any]:
@@ -677,6 +826,7 @@ def _do_update(
     report_id: str,
     update_reason: str,
     fields: dict[str, Any],
+    proof: dict[str, Any] | None = None,
     agent_id: str | None = None,
     agent_name: str | None = None,
 ) -> dict[str, Any]:
@@ -703,6 +853,9 @@ def _do_update(
     class_error = _fit_revision_to_class(report_state, report_id, changes)
     if class_error is not None:
         return class_error
+    if proof:
+        # Written with the revision, so a demotion never trails the content it judges.
+        changes.update(proof)
 
     try:
         updated = report_state.update_vulnerability_report(
@@ -729,6 +882,13 @@ def _do_update(
         else:
             error = f"Report '{report_id}' already says this - nothing in your update changes it"
         return {"success": False, "error": error, "report_id": report_id}
+
+    if proof and proof.get("proof_status") == "lead" and updated.get("queue_item_id"):
+        # The report is already demoted. The queue follows, and reads reconcile it again if a
+        # crash lands between the two writes.
+        from strix.tools.exploitation.tool import reconcile_queue_with_reports
+
+        reconcile_queue_with_reports()
 
     logger.info(
         "Vulnerability report %s revised by its author: severity=%s cvss=%s fields=%s",
@@ -1739,7 +1899,10 @@ async def update_vulnerability_report(
         cwe: Replacement CWE id.
         code_locations: Replacement code locations.
         http_exchange_ids: Replacement proxy request ids. Pass an empty
-            list to remove all linked exchanges.
+            list to remove all linked exchanges. On a proven report, changing
+            the ids, the evidence, the target, the endpoint, the method or
+            the PoC runs the exchange check again, and the report drops to a
+            lead when no cited id verifies.
         fix_verification: Verification statement for an applyable fix.
         fix_pr_body: Replacement fix PR body.
         contextual_cvss_reasoning: Dependency findings only. What you
@@ -1796,15 +1959,32 @@ async def update_vulnerability_report(
             default=str,
         )
 
-    agent_id, agent_name = _caller_identity(ctx)
-    result = await asyncio.to_thread(
-        _do_update,
-        report_id=report_id,
-        update_reason=update_reason,
-        fields=fields,
-        agent_id=agent_id,
-        agent_name=agent_name,
-    )
+    async with _proof_update_lock():
+        try:
+            proof = await _revalidate_proof(ctx, (report_id or "").strip(), fields)
+        except _ProofUnavailableError:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        "The exchange source did not answer, so this update could not be checked "
+                        "against the report's proof. The report is unchanged; retry the update."
+                    ),
+                    "report_id": report_id,
+                },
+                ensure_ascii=False,
+            )
+
+        agent_id, agent_name = _caller_identity(ctx)
+        result = await asyncio.to_thread(
+            _do_update,
+            report_id=report_id,
+            update_reason=update_reason,
+            fields=fields,
+            proof=proof,
+            agent_id=agent_id,
+            agent_name=agent_name,
+        )
     return json.dumps(_with_warning(result, http_exchange_warning), ensure_ascii=False, default=str)
 
 
