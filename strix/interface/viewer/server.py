@@ -31,6 +31,7 @@ from strix.core.paths import run_record_path
 from strix.interface.viewer import auth
 from strix.interface.viewer.transcript import (
     build_run_state,
+    lead_count_of,
     primary_target,
     read_report_markdown,
     read_run_summary,
@@ -67,6 +68,7 @@ def _iter_run_dirs(base_dir: Path) -> list[Path]:
 def run_list_entry(run_dir: Path) -> dict[str, Any]:
     """Compact summary of a single run for the history list."""
     record = read_run_summary(run_dir)
+    vulns = read_vulnerabilities(run_dir)  # read once so both counts come from the same list
     return {
         "name": record.get("run_name") or run_dir.name,
         "target": primary_target(record),
@@ -75,7 +77,8 @@ def run_list_entry(run_dir: Path) -> dict[str, Any]:
         "start_time": record.get("start_time"),
         "end_time": record.get("end_time"),
         "finished": bool(record.get("finished")),
-        "severity_counts": severity_counts(read_vulnerabilities(run_dir)),
+        "severity_counts": severity_counts(vulns),
+        "lead_count": lead_count_of(vulns),
     }
 
 

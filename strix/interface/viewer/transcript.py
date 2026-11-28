@@ -1,3 +1,4 @@
+# Modified by Samtek for Recon. Derived from Apache-2.0 Strix (OmniSecure Inc.). See NOTICE.
 """Build the JSON payloads the viewer SPA consumes from a run directory."""
 
 from __future__ import annotations
@@ -8,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from strix.core.paths import run_record_path
 from strix.interface.tui.live_view import TuiLiveView
+from strix.report.proof import is_validated, lead_count
 
 
 if TYPE_CHECKING:
@@ -21,6 +23,11 @@ _TERMINAL_STATUSES = {"completed", "stopped", "failed", "interrupted"}
 _KNOWN_SEVERITIES = ("critical", "high", "medium", "low")
 
 
+def lead_count_of(vulns: list[Any]) -> int:
+    """Reports that are not validated, shown beside the severity buckets, not inside them."""
+    return lead_count(vulns)
+
+
 def severity_counts(vulns: list[Any]) -> dict[str, int]:
     """Bucket vulnerabilities into critical/high/medium/low counts.
 
@@ -31,6 +38,8 @@ def severity_counts(vulns: list[Any]) -> dict[str, int]:
     """
     counts = dict.fromkeys(_KNOWN_SEVERITIES, 0)
     for vuln in vulns:
+        if not is_validated(vuln):
+            continue  # a lead is counted apart (``lead_count``), never in a severity bucket
         raw = vuln.get("severity") if isinstance(vuln, dict) else None
         severity = str(raw or "").lower().strip()
         if severity not in counts:

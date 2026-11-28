@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from agents import RunContextWrapper, function_tool
 
 from strix.report.origin import origin_of
+from strix.report.proof import is_validated, lead_count
 from strix.tools.nullish import clean_optional
 from strix.tools.proxy.tools import existing_request_ids
 from strix.tools.reporting.proof_signal import (
@@ -2677,6 +2678,7 @@ _REPORT_SUMMARY_FIELDS = (
     "id",
     "title",
     "severity",
+    "proof_status",
     "cvss",
     "confidence",
     "finding_class",
@@ -2750,6 +2752,8 @@ def _to_report_summary_entry(
 def _severity_counts(reports: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for report in reports:
+        if not is_validated(report):
+            continue  # a lead is counted apart (``lead_count``), never in a severity bucket
         sev = str(report.get("severity", "")).lower() or "none"
         counts[sev] = counts.get(sev, 0) + 1
     return {sev: counts[sev] for sev in _SEVERITY_ORDER if sev in counts}
@@ -2826,6 +2830,7 @@ def _do_list_reports(
         "filtered_count": len(reports),
         "total_count": len(all_reports),
         "severity_counts": _severity_counts(all_reports),
+        "lead_count": lead_count(all_reports),
     }
 
 
