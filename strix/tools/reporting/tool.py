@@ -717,7 +717,7 @@ def _do_update(
     fields: dict[str, Any],
     agent_id: str | None = None,
     agent_name: str | None = None,
-    signal_checked_against: str | None = None,
+    signal_checked_against: tuple[str, int] | None = None,
 ) -> dict[str, Any]:
     """Apply an agent's own revision to a report it can name.
 
@@ -1740,12 +1740,14 @@ async def _check_revised_signal(
     report_id: str,
     proof_signal: dict[str, Any] | None,
     http_exchange_ids: list[str] | None,
-) -> tuple[str | None, dict[str, Any] | None]:
+) -> tuple[tuple[str, int] | None, dict[str, Any] | None]:
     """Check a revised signal against the proving exchange of a proven report.
 
-    Returns ``(checked_id, rejection)``; the write refuses a signal without a matching id.
+    Returns ``(checked, rejection)``. ``checked`` is the exchange id and the report's revision
+    count before any wait; the write refuses a signal if either has moved.
     """
     from strix.report.state import get_global_report_state
+    from strix.tools.exploitation.tool import _exchange_source, _fetch_capture_integrity
 
     report_state = get_global_report_state()
     reports = report_state.get_existing_vulnerabilities() if report_state else []
@@ -1755,9 +1757,15 @@ async def _check_revised_signal(
         return None, None
     ids = matched.get("http_exchange_ids") if http_exchange_ids is None else http_exchange_ids
     proving = ids[0] if ids else None
+    revision = len(matched.get("update_history") or [])
     _, warning = await observed_proof_signal(ctx, proof_signal, proving)
+    # A replaced exchange has not been through the filing's integrity check.
+    if warning is None and proving and _exchange_source(proving) == "gateway_capture":
+        _, _, intact = await _fetch_capture_integrity(ctx, proving)
+        if not intact:
+            warning = "proof_signal was not stored: capture integrity could not be verified."
     if warning is None:
-        return proving, None
+        return (str(proving), revision), None
     return None, {
         "success": False,
         "error": f"{warning} Nothing was revised.",
@@ -1935,7 +1943,7 @@ async def update_vulnerability_report(
             default=str,
         )
 
-    checked_id, rejection = await _check_revised_signal(
+    checked, rejection = await _check_revised_signal(
         ctx, report_id, proof_signal, http_exchange_ids
     )
     if rejection is not None:
@@ -1944,7 +1952,7 @@ async def update_vulnerability_report(
     agent_id, agent_name = _caller_identity(ctx)
     result = await asyncio.to_thread(
         _do_update,
-        signal_checked_against=checked_id,
+        signal_checked_against=checked,
         report_id=report_id,
         update_reason=update_reason,
         fields=fields,

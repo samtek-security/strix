@@ -539,7 +539,7 @@ class ReportState:
         update_reason: str | None = None,
         updated_by_agent_id: str | None = None,
         updated_by_agent_name: str | None = None,
-        signal_checked_against: str | None = None,
+        signal_checked_against: tuple[str, int] | None = None,
     ) -> dict[str, Any] | None:
         """Apply a revision to an existing report, keeping its id.
 
@@ -619,15 +619,13 @@ class ReportState:
         revised["update_history"] = history
         revised["updated_at"] = entry["timestamp"]
 
-        # The signal was checked against one capture before this write. Another revision may have
-        # changed the cited exchanges since, so compare against exactly what is about to be stored.
-        if fields.get("proof_signal") and (
-            signal_checked_against is None
-            or (revised.get("http_exchange_ids") or [None])[0] != signal_checked_against
+        # The signal was checked before this write, as (proving exchange, revisions so far).
+        # Any revision or merge since then may have changed the proof it was checked for.
+        if fields.get("proof_signal") and signal_checked_against != (
+            (revised.get("http_exchange_ids") or [None])[0],
+            len(history) - 1,
         ):
-            raise ValueError(
-                "proof_signal was not checked against the report's first cited exchange"
-            )
+            raise ValueError("proof_signal was not checked against the report as it now stands")
 
         # Persistence must accept the revision before local state changes. A
         # failed callback leaves the old evidence intact and the update retryable.

@@ -10,9 +10,10 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from agents.tool_context import ToolContext
 
-from strix.report.state import ReportState, set_global_report_state
+from strix.report.state import ReportState, get_global_report_state, set_global_report_state
 from strix.tools.exploitation import tool as ex
 from strix.tools.proxy import tools as proxy_tools
+from strix.tools.reporting import tool as reporting_tool
 from strix.tools.reporting.proof_signal import (
     UNOBSERVED_WARNING,
     UNTIMED_WARNING,
@@ -121,6 +122,32 @@ async def test_a_signal_is_kept_only_when_the_capture_shows_it(
     assert await observed_proof_signal(cast("Any", None), signal, "1") == expected
 
 
+@pytest.mark.parametrize("intact", [True, False])
+async def test_a_revised_signal_needs_an_intact_gateway_capture(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch, intact: bool
+) -> None:
+    capture_id = "gw-a-" + "0" * 32
+    report_id = (await _create(http_exchange_ids=[capture_id]))["report_id"]
+    _capture(monkeypatch)
+
+    async def integrity(*_args: Any) -> tuple[str | None, str | None, bool]:
+        return None, None, intact
+
+    monkeypatch.setattr(ex, "_fetch_capture_integrity", integrity)
+    ctx = ToolContext(
+        context={}, tool_name="update_vulnerability_report", tool_call_id="c", tool_arguments="{}"
+    )
+    args = {"report_id": report_id, "update_reason": "r", "proof_signal": _SIGNAL}
+
+    async def exists(*_args: Any) -> set[str]:
+        return {capture_id}
+
+    monkeypatch.setattr(reporting_tool, "existing_request_ids", exists)
+    out = json.loads(await update_vulnerability_report.on_invoke_tool(ctx, json.dumps(args)))
+    assert out["success"] is intact
+    assert ("proof_signal" in report_state.vulnerability_reports[0]) is intact
+
+
 async def test_timing_is_reported_uncheckable_without_a_response_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -145,14 +172,25 @@ async def test_a_dropped_signal_leaves_no_key_for_a_retest_to_judge(
     assert "authz_bypass" not in stored
 
 
-@pytest.mark.parametrize("ids", [["2"], []])
-async def test_a_signal_checked_against_a_swapped_exchange_is_refused(
-    report_state: ReportState, ids: list[str]
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"http_exchange_ids": ["2"]},
+        {"http_exchange_ids": []},
+        {"endpoint": "/other"},
+        {"method": "POST"},
+        {"poc_script_code": "y"},
+        {"evidence": "y"},
+    ],
+)
+async def test_a_signal_checked_before_another_revision_is_refused(
+    report_state: ReportState, change: dict[str, Any]
 ) -> None:
     report_id = (await _create())["report_id"]
+    checked = _checked(report_id)
     # Another revision lands between the capture check and this write.
-    assert _update(report_id, http_exchange_ids=ids)["success"]
-    assert not _update(report_id, proof_signal=_SIGNAL)["success"]
+    assert _update(report_id, **change)["success"]
+    assert not _update(report_id, checked, proof_signal=_SIGNAL)["success"]
     assert "proof_signal" not in report_state.vulnerability_reports[0]
 
 
@@ -200,12 +238,21 @@ async def test_the_update_tool_refuses_a_signal_the_capture_lacks(
     assert report_state.vulnerability_reports[0]["proof_signal"] == _SIGNAL
 
 
-def _update(report_id: str, **fields: Any) -> dict[str, Any]:
+def _checked(report_id: str) -> tuple[str, int]:
+    state = get_global_report_state()
+    assert state is not None
+    report = next(r for r in state.vulnerability_reports if r["id"] == report_id)
+    return "1", len(report.get("update_history") or [])
+
+
+def _update(
+    report_id: str, checked: tuple[str, int] | None = None, **fields: Any
+) -> dict[str, Any]:
     return _do_update(
         report_id=report_id,
         update_reason="retested",
         fields=fields,
-        signal_checked_against="1",
+        signal_checked_against=checked or _checked(report_id),
     )
 
 
