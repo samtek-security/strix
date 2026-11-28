@@ -2966,3 +2966,20 @@ async def test_repeated_merge_with_a_hash_is_idempotent(
     after_first = json.dumps(report_state.vulnerability_reports, sort_keys=True)
     await _create_with(report_state, **kwargs)
     assert json.dumps(report_state.vulnerability_reports, sort_keys=True) == after_first
+
+
+async def test_unverified_gateway_proof_leaves_the_matched_lead_a_lead(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lead_id = await _file_lead(report_state, capture_integrity_sha256=_HASH_A, captured_at=_STAMP)
+    _duplicate_of(lead_id, monkeypatch)
+    before = json.dumps(report_state.vulnerability_reports, sort_keys=True)
+    result = await _create_with(
+        report_state,
+        proof_status="exploited",
+        proof_status_reason="verified",
+        proof_source="gateway_capture",
+        **_PROOF_TARGET,
+    )
+    assert result["success"] is False
+    assert json.dumps(report_state.vulnerability_reports, sort_keys=True) == before

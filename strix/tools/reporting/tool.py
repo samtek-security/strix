@@ -881,6 +881,9 @@ def _merge_stronger_proof(
     matched = next((r for r in existing if r.get("id") == duplicate_id), None)
     if matched is None or not _proof_is_stronger(proof.get("proof_status"), matched):
         return None, None
+    # A gateway capture proves nothing until its hash verified, so it cannot promote a lead.
+    if proof.get("proof_source") == "gateway_capture" and not proof.get("capture_integrity_sha256"):
+        return None, None
     if not _same_identity(report_fields, report_fields.get("cwe"), matched):
         return None, duplicate_id
     merged = report_state.merge_proof_into_report(
