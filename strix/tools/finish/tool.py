@@ -6,11 +6,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agents import RunContextWrapper, function_tool
 
 from strix.core.agents import coordinator_from_context
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from strix.core.agents import AgentCoordinator
 
 
 logger = logging.getLogger(__name__)
@@ -24,6 +30,7 @@ def _do_finish(
     technical_analysis: str,
     recommendations: str,
     agent_graph: dict[str, Any],
+    scan_stop_reason: Callable[[], str | None] = lambda: None,
 ) -> dict[str, Any]:
     if parent_id is not None:
         return {
@@ -58,6 +65,11 @@ def _do_finish(
                 "message": "Scan completed (not persisted)",
                 "warning": "Results could not be persisted - report state unavailable",
             }
+        # A scan-wide stop that landed during this turn cut the run short. Record it
+        # first, or saving the report would claim the run finished by itself.
+        stopped = scan_stop_reason()
+        if stopped and report_state.scan_ended_exit_reason is None:
+            report_state.scan_ended_exit_reason = stopped
         report_state.update_scan_final_fields(
             executive_summary=executive_summary.strip(),
             methodology=methodology.strip(),
@@ -82,6 +94,12 @@ def _do_finish(
         }
         result.update(coverage_summary)
         return result
+
+
+def _scan_stop_reason(coordinator: AgentCoordinator | None) -> str | None:
+    if coordinator is None or not coordinator.budget_stopped:
+        return None
+    return coordinator.stop_reason or "budget_exceeded"
 
 
 def _coverage_summary(agent_graph: dict[str, Any]) -> dict[str, Any]:
@@ -343,6 +361,7 @@ async def finish_scan(
         technical_analysis=technical_analysis,
         recommendations=recommendations,
         agent_graph=await coordinator.snapshot() if coordinator is not None else {},
+        scan_stop_reason=lambda: _scan_stop_reason(coordinator),
     )
     if (
         result.get("success")
