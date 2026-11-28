@@ -451,3 +451,21 @@ async def test_a_capture_that_fails_its_hash_is_not_retried(state: ReportState) 
     result = await _promote(_Tampered())
     assert result["verdict"] == "lead"
     assert "http_exchange_ids" not in state.vulnerability_reports[0]
+
+
+@pytest.mark.asyncio
+async def test_a_direct_report_keeps_its_ids_when_the_integrity_fetch_fails() -> None:
+    class _Unreadable(_Capture):
+        async def view_request(self, request_id: str, *, part: str = "request") -> Any:
+            raise TimeoutError("capture integrity fetch timed out")
+
+    ctx = ToolContext(
+        context={"caido_client": _Unreadable()},
+        tool_name="create_vulnerability_report",
+        tool_call_id="c1",
+        tool_arguments="{}",
+    )
+    ids, status, reason, *_ = await ex.assess_proof_with_integrity(ctx, [_GOOD], require_all=False)
+
+    assert (ids, status) == ([_GOOD], "lead")
+    assert ex.proof_failure_kind(reason) == "transient"
