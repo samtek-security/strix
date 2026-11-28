@@ -138,6 +138,18 @@ async def test_a_queued_candidate_keeps_its_class_through_promotion_by_the_root(
     assert [u["class_key"] for u in updates] == ["sqli"]
 
 
+def test_a_failing_listener_does_not_stop_the_attribution(report_state: ReportState) -> None:
+    report_id = report_state.add_vulnerability_report(title="t", severity="low", agent_id="root")
+
+    def _fail(_: dict[str, Any]) -> None:
+        raise RuntimeError("listener down")
+
+    report_state.vulnerability_updated_callback = _fail
+    report_state.attribute_report(report_id, "sqli")
+
+    assert report_state.vulnerability_reports[0]["class_key"] == "sqli"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("given", "passed"), [(" SQLi ", "sqli"), ("path-traversal", "path-traversal"), (None, None)]

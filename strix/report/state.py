@@ -682,10 +682,14 @@ class ReportState:
         report = next((r for r in self.vulnerability_reports if r.get("id") == report_id), None)
         if report is None or report.get("class_key"):
             return
-        revised = {**report, "class_key": class_key}
         if self.vulnerability_updated_callback:
-            self.vulnerability_updated_callback(revised)
-        report.update(revised)
+            try:
+                self.vulnerability_updated_callback({**report, "class_key": class_key})
+            except Exception:
+                # Callers are part-way through resolving a queue item. The run's own record still
+                # takes the class, so the finding is not lost from it.
+                logger.exception("could not announce the class of report %s", report_id)
+        report["class_key"] = class_key
         self.save_run_data()
 
     @_one_writer
