@@ -363,6 +363,10 @@ async def _resolve_extra_file_archive(
     return build_extra_file_archive(files, local_sources) if files else None
 
 
+def _source_mount_enabled() -> bool:
+    return os.environ.get("RECON_MOUNT_SOURCE", "1") not in ("0", "false", "no")
+
+
 async def _hydrate_k8s_sources(session: Any, local_sources: list[dict[str, Any]]) -> None:
     """Tar every local source into ``/workspace/<subdir>`` of a Kubernetes sandbox.
 
@@ -372,7 +376,7 @@ async def _hydrate_k8s_sources(session: Any, local_sources: list[dict[str, Any]]
     tar stream. Any failure raises: a run that expects source must not start
     without it. Gated on ``RECON_MOUNT_SOURCE`` (default on).
     """
-    if os.environ.get("RECON_MOUNT_SOURCE", "1") in ("0", "false", "no"):
+    if not _source_mount_enabled():
         return
 
     def _skip_vcs(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
@@ -604,7 +608,9 @@ async def create_or_reuse(  # noqa: PLR0915
         report("Starting sandbox container")
         # Only the Kubernetes backend takes sources, so it can size-check them
         # before it creates any cluster object.
-        source_kwargs: dict[str, Any] = {"local_sources": local_sources} if is_k8s else {}
+        source_kwargs: dict[str, Any] = (
+            {"local_sources": local_sources} if is_k8s and _source_mount_enabled() else {}
+        )
         client, session = await _create_or_discard(
             backend(
                 image=image,

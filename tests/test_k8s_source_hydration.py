@@ -100,11 +100,12 @@ def _fake_backend(session: _Session, client: _Client, seen: list[dict[str, Any]]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("is_k8s", [True, False])
-async def test_only_k8s_backend_receives_local_sources(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, is_k8s: bool
+@pytest.mark.parametrize(("is_k8s", "mount"), [(True, "1"), (False, "1"), (True, "0")])
+async def test_only_a_mounting_k8s_backend_receives_local_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, is_k8s: bool, mount: str
 ) -> None:
-    name = f"hydration-{is_k8s}"
+    monkeypatch.setenv("RECON_MOUNT_SOURCE", mount)
+    name = f"hydration-{is_k8s}-{mount}"
     seen: list[dict[str, Any]] = []
     register_backend(name, _fake_backend(_Session(), _Client(), seen), supports_bind_mounts=True)
     monkeypatch.setattr(session_manager, "bootstrap_caido", _no_caido)
@@ -113,15 +114,16 @@ async def test_only_k8s_backend_receives_local_sources(
     settings = _Settings()
     settings.runtime.backend = name
     monkeypatch.setattr(session_manager, "load_settings", lambda: settings)
-    scan_id = f"hydration-scan-{is_k8s}"
+    scan_id = f"hydration-scan-{is_k8s}-{mount}"
     sources = [_tree(tmp_path)]
     try:
         await session_manager.create_or_reuse(scan_id, image="img", local_sources=sources)
     finally:
         await session_manager.cleanup(scan_id)
         _BACKENDS.pop(name, None)
-    assert ("local_sources" in seen[0]) is is_k8s
-    if is_k8s:
+    handed_over = is_k8s and mount == "1"
+    assert ("local_sources" in seen[0]) is handed_over
+    if handed_over:
         assert seen[0]["local_sources"] == sources
 
 
