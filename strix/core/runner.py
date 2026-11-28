@@ -17,6 +17,8 @@ import contextlib
 import io
 import json
 import logging
+import threading
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
@@ -269,6 +271,116 @@ def _sanitized_failure(exc: BaseException) -> BaseException:
         return RuntimeError(f"{type(exc).__module__}.{type(exc).__name__}: {safe}")
 
 
+# The engine touches this file while a scan runs. The sandbox containers carry its path in
+# recon.heartbeat_path, so both reapers can tell a live run (fresh) from a crashed worker (stale).
+# The interval is far below the 900s staleness window.
+_HEARTBEAT_INTERVAL_SEC = 30
+
+
+def _attempt_heartbeat_path(run_dir: Path) -> Path:
+    """A heartbeat file unique to this attempt.
+
+    Containers left by a crashed attempt keep pointing at their own file, which stops advancing.
+    A retry sharing one file would refresh the dead owner's signal, so the orphan never reaps.
+    """
+    return run_dir / f".heartbeat-{uuid.uuid4().hex[:8]}"
+
+
+def _touch_heartbeat(path: Path) -> None:
+    """Write the current time to ``path``. A failure is logged and never fails the run."""
+    try:
+        path.write_text(str(int(time.time())))
+    except OSError:
+        logger.warning("could not write heartbeat file %s", path, exc_info=True)
+
+
+async def _heartbeat_writer(
+    path: Path,
+    interval: float = _HEARTBEAT_INTERVAL_SEC,
+    alive: Callable[[], bool] | None = None,
+) -> None:
+    """Touch ``path`` every ``interval`` seconds while ``alive`` (when given) says the run lives."""
+    while True:
+        if alive is None or alive():
+            _touch_heartbeat(path)
+        await asyncio.sleep(interval)
+
+
+class _SandboxHeartbeat:
+    """The heartbeat of one scan's sandbox, owned by the session cache until cleanup.
+
+    It runs on its own thread, not as a task on the event loop: the contained backend makes
+    blocking docker calls (``containers.run``, ``helper.wait``, exec probes) on that loop, and a
+    heartbeat that stops while one of them runs would let a retry reap a live setup.
+
+    ``alive`` is the active phase's liveness check (the engine's progress watchdog). While it says
+    the run has stalled the file stops advancing, so a retry elsewhere can reap it. Between
+    phases ``alive`` is None and the writer keeps going, so a retained sandbox stays protected.
+    """
+
+    _JOIN_TIMEOUT_SEC = 5.0
+
+    def __init__(self, path: Path, interval: float = _HEARTBEAT_INTERVAL_SEC) -> None:
+        self.path = path
+        self.alive: Callable[[], bool] | None = None
+        self._interval = interval
+        self._halt = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _is_alive(self) -> bool:
+        check = self.alive
+        if check is None:
+            return True
+        try:
+            return bool(check())
+        except Exception:  # noqa: BLE001 - an unknown state keeps a live run protected
+            return True
+
+    def _run(self) -> None:
+        while not self._halt.wait(self._interval):
+            if self._is_alive():
+                _touch_heartbeat(self.path)
+
+    @property
+    def stopped(self) -> bool:
+        return self._thread is None or not self._thread.is_alive()
+
+    def start(self, name: str) -> None:
+        _touch_heartbeat(self.path)
+        self._halt.clear()
+        self._thread = threading.Thread(target=self._run, name=name, daemon=True)
+        self._thread.start()
+
+    async def stop(self) -> None:
+        thread = self._thread
+        if thread is None:
+            return
+        self._halt.set()
+        with contextlib.suppress(BaseException):
+            await asyncio.to_thread(thread.join, self._JOIN_TIMEOUT_SEC)
+
+
+_HEARTBEAT_STOPS: set[asyncio.Task[None]] = set()
+
+
+def _stop_heartbeat_after_discards(heartbeat: _SandboxHeartbeat) -> None:
+    """Stop ``heartbeat`` once any sandbox teardown still running for it has finished.
+
+    A cancelled bring-up leaves the shielded creation running and discards it afterwards. Until that
+    delete ends the boundary is still in use, so it must keep looking live to the reaper.
+    """
+    pending = set(session_manager._DISCARD_TASKS)
+
+    async def _stop() -> None:
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        await heartbeat.stop()
+
+    task = asyncio.get_running_loop().create_task(_stop(), name="heartbeat-stop")
+    _HEARTBEAT_STOPS.add(task)
+    task.add_done_callback(_HEARTBEAT_STOPS.discard)
+
+
 async def _run_scan(
     *,
     scan_config: dict[str, Any],
@@ -297,6 +409,8 @@ async def _run_scan(
     gateway_spec_path: str = "",
     gateway_spec_json: str = "",
     gateway_target_ports: tuple[int, ...] = (),
+    engagement_id: str = "",
+    heartbeat_alive: Callable[[], bool] | None = None,
     coverage_context: Any = None,
     run_coverage_worker_on_exit: bool = False,
     interception_rules: Sequence[InterceptionRule] | None = None,
@@ -467,20 +581,45 @@ async def _run_scan(
 
     logger.info("Bringing up sandbox session for scan %s", scan_id)
     set_scan_phase("sandbox_init")
-    bundle = await session_manager.create_or_reuse(
-        scan_id,
-        image=image,
-        local_sources=local_sources or [],
-        extra_files=extra_files,
-        status_sink=status_sink,
-        gateway_spec_path=gateway_spec_path,
-        gateway_spec_json=gateway_spec_json,
-        gateway_target_ports=gateway_target_ports,
-        # Brokered credentials injected into the sandbox env, not the prompt (#34):
-        # {RECON_CRED_<role>: password} lands in the container Environment so the
-        # agent (and the header-auth authz probes) read the secret from env.
-        extra_env=scan_config.get("sandbox_env") or {},
-    )
+    # Written before anything is created, so no container carries a path with no file. A later phase
+    # that reuses the cached sandbox keeps feeding the file its containers' labels already name.
+    cached = session_manager._SESSION_CACHE.get(scan_id) or {}
+    heartbeat = cached.get("_heartbeat")
+    started_heartbeat = heartbeat is None or heartbeat.stopped
+    if started_heartbeat:
+        heartbeat = _SandboxHeartbeat(
+            Path(cached["_heartbeat_path"])
+            if cached.get("_heartbeat_path")
+            else _attempt_heartbeat_path(run_dir)
+        )
+    # The active owner's liveness check stays in place until create_or_reuse has accepted this call:
+    # a call it rejects (another engagement, a changed gateway policy) must not swap the callback of
+    # the run that really owns the cached sandbox.
+    if started_heartbeat:
+        heartbeat.start(f"heartbeat-{scan_id}")
+    try:
+        bundle = await session_manager.create_or_reuse(
+            scan_id,
+            image=image,
+            local_sources=local_sources or [],
+            extra_files=extra_files,
+            status_sink=status_sink,
+            gateway_spec_path=gateway_spec_path,
+            gateway_spec_json=gateway_spec_json,
+            gateway_target_ports=gateway_target_ports,
+            engagement_id=engagement_id,
+            heartbeat_path=str(heartbeat.path),
+            # Brokered credentials injected into the sandbox env, not the prompt (#34):
+            # {RECON_CRED_<role>: password} lands in the container Environment so the
+            # agent (and the header-auth authz probes) read the secret from env.
+            extra_env=scan_config.get("sandbox_env") or {},
+        )
+    except BaseException:
+        if started_heartbeat:
+            _stop_heartbeat_after_discards(heartbeat)
+        raise
+    heartbeat.alive = heartbeat_alive
+    bundle["_heartbeat"] = heartbeat
     report("Waiting for the first model response")
     logger.info("Sandbox ready for scan %s", scan_id)
     set_scan_phase("agent_setup")
@@ -502,7 +641,7 @@ async def _run_scan(
     sessions_to_close: list[SQLiteSession] = []
     mcp_registry: McpRegistry | None = None
     scan_cancelled = False
-
+    scan_abnormal = False
     try:
         targets = scan_config.get("targets") or []
         scan_mode = str(scan_config.get("scan_mode") or "deep")
@@ -797,12 +936,14 @@ async def _run_scan(
     except (asyncio.CancelledError, KeyboardInterrupt):
         logger.info("Scan %s interrupted by the user", scan_id)
         scan_cancelled = True
+        scan_abnormal = True
         if root_id is not None:
             with contextlib.suppress(Exception):
                 await coordinator.set_status(root_id, "running")
         raise
     except BaseException as exc:
         logger.exception("Strix scan %s failed", scan_id)
+        scan_abnormal = True
         if root_id is not None:
             with contextlib.suppress(Exception):
                 await coordinator.set_status(root_id, "failed")
@@ -862,6 +1003,19 @@ async def _run_scan(
                 await session_manager.cleanup(scan_id)
             if not scan_cancelled:
                 _save_stop_artifacts()
+            # Last, so the sandbox looks live to the reaper through coverage and teardown. A phase
+            # that retains the sandbox keeps the heartbeat for the gap before the next phase, unless
+            # it ended abnormally: then nothing owns the sandbox and the reaper may take it.
+            if cleanup_on_exit:
+                await heartbeat.stop()
+            elif scan_abnormal:
+                # The failed attempt's sandbox would otherwise stay cached: a retry in this worker
+                # would reuse it without going near the reaper, and its heartbeat is gone.
+                with contextlib.suppress(Exception):
+                    await session_manager.cleanup(scan_id)  # stops the heartbeat once it is done
+                await heartbeat.stop()
+            else:
+                heartbeat.alive = None
             logger.info("Strix scan %s done", scan_id)
             teardown_logging()
 
@@ -1089,6 +1243,8 @@ async def run_recon_scan(
     gateway_spec_path: str = "",
     gateway_spec_json: str = "",
     gateway_target_ports: tuple[int, ...] = (),
+    engagement_id: str = "",
+    heartbeat_alive: Callable[[], bool] | None = None,
     coverage_context: Any = None,
     run_coverage_worker_on_exit: bool = False,
     interception_rules: Sequence[InterceptionRule] | None = None,
@@ -1102,7 +1258,9 @@ async def run_recon_scan(
     ``gateway_spec_path`` / ``gateway_spec_json`` carry the engagement's
     rules-of-engagement egress policy to the sandbox. Exactly one may be set
     (path for the docker-contained backend's mounted spec, JSON for the k8s
-    sibling-gateway Pod). ``gateway_target_ports`` pins the non-standard target
+    sibling-gateway Pod). ``engagement_id`` is the owning engagement; the contained docker
+    backend uses it, with ``scan_id``, to reap that engagement's orphaned boundary on retry.
+    ``gateway_target_ports`` pins the non-standard target
     port(s) the gateway allows. These are forwarded unchanged to
     :func:`strix.runtime.session_manager.create_or_reuse`, which validates them
     fail-closed; an empty policy leaves the sandbox exactly as a plain scan.
@@ -1151,6 +1309,8 @@ async def run_recon_scan(
         gateway_spec_path=gateway_spec_path,
         gateway_spec_json=gateway_spec_json,
         gateway_target_ports=gateway_target_ports,
+        engagement_id=engagement_id,
+        heartbeat_alive=heartbeat_alive,
         coverage_context=coverage_context,
         run_coverage_worker_on_exit=run_coverage_worker_on_exit,
         interception_rules=interception_rules,

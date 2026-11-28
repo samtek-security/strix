@@ -46,10 +46,15 @@ class _FakeDocker:
     def __init__(self) -> None:
         self.run_calls: list[dict[str, Any]] = []
         self.exec_code = 0
-        self.networks = SimpleNamespace(create=self._create_network)
+        self.networks = SimpleNamespace(create=self._create_network, list=lambda **_: [])
         self.version = lambda: {"Version": "29.9.2"}
-        self.volumes = SimpleNamespace(create=self._create_volume)
-        self.containers = SimpleNamespace(run=self._run)
+        self.volumes = SimpleNamespace(
+            create=self._create_volume, get=self._no_volume, list=lambda **_: []
+        )
+        self.containers = SimpleNamespace(run=self._run, list=lambda **_: [])
+
+    def _no_volume(self, _name: str) -> Any:
+        raise docker.errors.NotFound("no such volume")
 
     def _create_network(self, name: str, **kw: Any) -> _FakeNetwork:
         return _FakeNetwork(name, kw["labels"])

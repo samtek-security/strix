@@ -294,6 +294,9 @@ def _start(
     client.networks.get.side_effect = lambda name: report if name == NAME else egress
     client.volumes.create.return_value = volume
     client.containers.run.return_value = gateway
+    client.networks.list.return_value = []
+    client.containers.list.return_value = []
+    client.volumes.get.side_effect = docker.errors.NotFound("no such volume")
     monkeypatch.setattr(docker, "from_env", lambda: client)
     monkeypatch.setattr(backends, "_wait_gateway_ready", lambda *_a, **_k: True)
 

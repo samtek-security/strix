@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
 import time
+import uuid
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
 from stat import S_IMODE, S_ISREG
 from typing import TYPE_CHECKING, Any
@@ -39,6 +42,7 @@ async def _docker_backend(
     gateway_spec_path: str = "",
     gateway_spec_json: str = "",
     gateway_target_ports: tuple[int, ...] = (),
+    engagement_id: str = "",
 ) -> tuple[Any, Any]:
     """Bring up a session backed by the local Docker daemon.
 
@@ -66,6 +70,7 @@ async def _docker_backend(
 
     client = StrixDockerSandboxClient(connect_docker())
     client.strix_bind_mounts = bind_mounts or []
+    client.recon_engagement_id = engagement_id
     client.recon_scan_id = scan_id  # stamped onto the container's recon.scan_id label for the reaper
     client.recon_heartbeat_path = heartbeat_path  # recon.heartbeat_path label (liveness signal)
     options = DockerSandboxClientOptions(image=image, exposed_ports=exposed_ports)
@@ -196,6 +201,190 @@ def _reporter_settings() -> tuple[str, Path]:
     return url, token_file.resolve()
 
 
+def _owned_by(labels: dict[str, str] | None, expected: dict[str, str]) -> bool:
+    """True only when every expected label is present with exactly the expected value."""
+    labels = labels or {}
+    return all(k in labels and labels[k] == v for k, v in expected.items())
+
+
+_HEARTBEAT_STALE_DEFAULT_SEC = 900
+# 4x the engine's 30s write interval, as in the control-plane reaper.
+_HEARTBEAT_STALE_FLOOR_SEC = 120
+
+
+def _heartbeat_stale_sec() -> int:
+    raw = (os.environ.get("RECON_HEARTBEAT_STALE_SEC") or "").strip()
+    value = int(raw) if raw.isdigit() else _HEARTBEAT_STALE_DEFAULT_SEC
+    return max(value, _HEARTBEAT_STALE_FLOOR_SEC)
+
+
+def _owner_is_dead(container: Any, now: float) -> bool:
+    """True only on positive evidence the engine behind this container is gone.
+
+    A passed ``recon.ttl_deadline`` is the hard ceiling and wins over any heartbeat: a run that
+    keeps beating past it is not a healthy engagement. Before it, a readable stale heartbeat
+    proves the owner is gone and a fresh one proves it is live. Everything else (no deadline, no
+    readable heartbeat, bad value) is uncertain and counts as alive.
+    """
+    labels = container.labels or {}
+    try:
+        if now > int(labels.get("recon.ttl_deadline", "")):
+            return True
+    except ValueError:
+        pass
+    path = labels.get("recon.heartbeat_path") or ""
+    if path:
+        try:
+            return now - Path(path).stat().st_mtime > _heartbeat_stale_sec()
+        except OSError:
+            pass
+    return False
+
+
+def _created_before(attrs: dict[str, Any], key: str, now: float, window: int) -> bool:
+    """True when Docker's creation time in ``attrs[key]`` is older than ``window`` seconds.
+
+    A missing or unparseable time is not old: the resource may belong to a setup still in progress.
+    """
+    raw = str(attrs.get(key) or "")
+    # Docker prints nanoseconds; datetime takes at most microseconds.
+    raw = re.sub(r"(\.\d{6})\d+", r"\1", raw)
+    try:
+        created = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if created.tzinfo is None:
+        return False
+    return now - created.timestamp() > window
+
+
+def _owners_gone(containers: list[Any], net: Any, volumes: list[Any]) -> bool:
+    now = time.time()
+    if containers:
+        return all(_owner_is_dead(c, now) for c in containers)
+    # No owner container yet: a retry overlapping the first worker between creating the network and
+    # starting the gateway would look orphaned. Only a boundary older than the staleness window, by
+    # Docker's own creation time, is.
+    window = _heartbeat_stale_sec()
+    return all(
+        _created_before(res.attrs, key, now, window)
+        for res, key in [(net, "Created"), *((v, "CreatedAt") for v in volumes)]
+        if res is not None
+    )
+
+
+def _reap_orphaned_boundary(
+    dc: Any,
+    *,
+    scan_id: str,
+    engagement_id: str,
+    net_name: str,
+    gw_name: str,
+) -> None:
+    """Remove the sandbox boundary a crashed worker left behind for THIS engagement.
+
+    A leftover is never reused: labels cannot prove the gateway's image, mounts, capabilities or
+    peers, so it is removed and the caller builds a fresh one. Ownership is the exact
+    ``recon.scan_id`` AND ``recon.engagement_id`` pair (never a name prefix). A resource of
+    another engagement, or one missing or mismatching either label, is left alone and the
+    retry fails with a clear error. Without both ids nothing can be proven, so nothing is
+    removed and a name collision fails the same way.
+    """
+    import docker
+
+    owner = {
+        "recon.sandbox": "true",
+        "recon.scan_id": scan_id,
+        "recon.engagement_id": engagement_id,
+        "recon.owner": "contained-egress",
+    }
+    can_reap = bool(scan_id and engagement_id)
+
+    # Docker's name filter is a substring match, so resolve exact names client-side.
+    networks = [n for n in dc.networks.list(names=[net_name]) if n.name == net_name]
+    if len(networks) > 1:
+        # Docker allows duplicate names. Which one belongs to a live attempt cannot be told from
+        # here, and removing the first would leave the retry failing on the rest: touch nothing.
+        logger.warning(
+            "Not reaping scan %s: %d networks are named %r", scan_id, len(networks), net_name
+        )
+        raise RuntimeError(
+            f"{len(networks)} networks are named {net_name!r}; refusing to touch any of them. "
+            "Remove the extras by hand"
+        )
+    net = networks[0] if networks else None
+    # CA volumes are named per attempt, so they are found by this engagement's exact labels.
+    volumes = []
+    if can_reap:
+        volumes = [
+            v
+            for v in dc.volumes.list(
+                filters={"label": [f"{k}={val}" for k, val in owner.items()]}
+            )
+            if _owned_by(v.attrs.get("Labels"), {**owner, "recon.role": "gateway-ca-volume"})
+        ]
+
+    foreign: list[str] = []
+    if net is not None and not (can_reap and _owned_by(net.attrs.get("Labels"), owner)):
+        foreign.append(f"network {net_name!r}")
+    containers = []
+    if can_reap:
+        containers = [
+            c
+            for c in dc.containers.list(
+                all=True, filters={"label": [f"{k}={v}" for k, v in owner.items()]}
+            )
+            if _owned_by(c.labels, owner)
+        ]
+    owned_ids = {c.id for c in containers}
+    if any(
+        c.name == gw_name and c.id not in owned_ids
+        for c in dc.containers.list(all=True, filters={"name": [gw_name]})
+    ):
+        foreign.append(f"container {gw_name!r}")
+    if foreign:
+        raise RuntimeError(
+            f"{', '.join(foreign)} already exist without this engagement's exact "
+            f"recon.scan_id={scan_id!r} / recon.engagement_id={engagement_id!r} labels; "
+            "refusing to touch them. Remove them by hand or retry under a new scan id"
+        )
+
+    owners_gone = _owners_gone(containers, net, volumes)
+    if not owners_gone:
+        logger.warning(
+            "Not reaping scan %s: an owning container has a fresh heartbeat or its liveness "
+            "cannot be verified",
+            scan_id,
+        )
+        raise RuntimeError(
+            f"the sandbox boundary for scan {scan_id!r} still has a live or unverifiable owner "
+            "(fresh heartbeat, or no readable heartbeat before its TTL deadline); not reaping. "
+            "Retry once the heartbeat has been stale for "
+            f"{_heartbeat_stale_sec()}s"
+        )
+    # The old worker's own teardown may have removed any of these since the lookup: that is the
+    # outcome wanted, not a failure.
+    for c in containers:
+        logger.warning("Reaping orphaned sandbox container %s for scan %s", c.name, scan_id)
+        with contextlib.suppress(docker.errors.NotFound):
+            c.remove(force=True)
+    for v in volumes:
+        logger.warning("Reaping orphaned CA volume %s for scan %s", v.name, scan_id)
+        with contextlib.suppress(docker.errors.NotFound):
+            v.remove(force=True)
+    if net is not None:
+        logger.warning("Reaping orphaned sandbox network %s for scan %s", net_name, scan_id)
+        try:
+            net.remove()
+        except docker.errors.NotFound:
+            pass
+        except docker.errors.APIError as exc:
+            raise RuntimeError(
+                f"orphaned network {net_name!r} could not be removed (a container without this "
+                f"engagement's labels may still be attached): {exc}"
+            ) from exc
+
+
 async def _contained_docker_backend(
     *,
     image: str,
@@ -207,6 +396,7 @@ async def _contained_docker_backend(
     gateway_spec_path: str = "",
     gateway_spec_json: str = "",
     gateway_target_ports: tuple[int, ...] = (),
+    engagement_id: str = "",
 ) -> tuple[Any, Any]:
     """Own-netns contained backend (P0-2, opt-in via RECON_CONTAINED_EGRESS).
 
@@ -253,13 +443,27 @@ async def _contained_docker_backend(
     report_net_name, report_net_subnet = report_network.settings()
     report_net = report_network.ensure_network(dc, report_net_name, report_net_subnet)
     net_name = "recon-net-" + (scan_id or "default")
-    ca_name = "recon-ca-" + (scan_id or "default")
+    # Volumes have no ID and the daemon resolves them by name, so a name every attempt shares
+    # would let a stale handle delete a retry's volume. One name per attempt is the identity.
+    ca_name = f"recon-ca-{scan_id or 'default'}-{uuid.uuid4().hex[:8]}"
     gw_name = _gateway_name(scan_id)
     boundary_labels = {
         "recon.sandbox": "true",
         "recon.scan_id": scan_id or "",
         "recon.owner": "contained-egress",
     }
+    if engagement_id:
+        boundary_labels["recon.engagement_id"] = engagement_id
+
+    # 0. A crashed worker leaves its network, gateway and CA volume behind. Reap this engagement's
+    #    leftovers (exact label match) so the retry starts from a fresh boundary, never a reuse.
+    _reap_orphaned_boundary(
+        dc,
+        scan_id=scan_id,
+        engagement_id=engagement_id,
+        net_name=net_name,
+        gw_name=gw_name,
+    )
 
     # 1. Internal-only network (no NAT/gateway to host or internet).
     network_created = False
@@ -273,13 +477,8 @@ async def _contained_docker_backend(
             labels={**boundary_labels, "recon.role": "agent-gateway-network"},
         )
         network_created = True
-    except docker.errors.APIError:
-        matches = dc.networks.list(names=[net_name])
-        if len(matches) != 1:
-            raise RuntimeError(
-                f"contained network {net_name!r} could not be created or uniquely resolved"
-            )
-        internal_net = matches[0]
+    except docker.errors.APIError as exc:
+        raise RuntimeError(f"contained network {net_name!r} could not be created: {exc}") from exc
     internal_net.reload()
     net_attrs = internal_net.attrs
     try:
@@ -310,8 +509,10 @@ async def _contained_docker_backend(
     try:
         ca_volume = dc.volumes.create(name=ca_name, labels=expected_ca_labels)
         ca_created = True
-    except docker.errors.APIError:
-        ca_volume = dc.volumes.get(ca_name)
+    except docker.errors.APIError as exc:
+        with _suppress():
+            internal_net.remove()
+        raise RuntimeError(f"gateway CA volume {ca_name!r} could not be created: {exc}") from exc
     ca_volume.reload()
     if any((ca_volume.attrs.get("Labels") or {}).get(k) != v for k, v in expected_ca_labels.items()):
         if ca_created:
@@ -497,6 +698,7 @@ async def _contained_docker_backend(
     client = ReconDockerSandboxClient(dc)
     client.strix_bind_mounts = bind_mounts or []
     client.recon_scan_id = scan_id
+    client.recon_engagement_id = engagement_id
     client.recon_heartbeat_path = heartbeat_path
     client.recon_contained = True
     client.recon_network = net_name

@@ -359,6 +359,11 @@ class StrixDockerSandboxClient(DockerSandboxClient):
                 {
                     "recon.sandbox": "true",
                     "recon.scan_id": str(getattr(self, "recon_scan_id", "") or ""),
+                    **(
+                        {"recon.engagement_id": str(self.recon_engagement_id)}
+                        if getattr(self, "recon_engagement_id", "")
+                        else {}
+                    ),
                     "recon.created_at": str(now),
                     "recon.ttl_deadline": str(now + _sandbox_ttl_sec()),
                     # Host path to the run's heartbeat file. The reaper keeps any container whose

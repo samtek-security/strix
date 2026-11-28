@@ -46,6 +46,9 @@ def _gateway_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> dict
     client.networks.create.return_value = net
     client.volumes.create.return_value = volume
     client.containers.run.side_effect = _StopError
+    client.networks.list.return_value = []
+    client.containers.list.return_value = []
+    client.volumes.get.side_effect = docker.errors.NotFound("no such volume")
     monkeypatch.setattr(docker, "from_env", lambda: client)
     monkeypatch.setattr(gateway_staging, "needs_staging", lambda *_a, **_k: False)
     monkeypatch.delenv("RECON_GATEWAY_CAPTURE", raising=False)

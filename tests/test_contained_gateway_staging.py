@@ -32,7 +32,9 @@ OTHER_UID = os.geteuid() + 1
 class _Volume:
     def __init__(self, name: str, labels: dict[str, str]) -> None:
         self.name = name
-        self.attrs = {"Labels": labels}
+        self.attrs = {"Labels": labels, "CreatedAt": f"created-{name}"}
+        # Volumes have no ID: the backend removes one only if the daemon still holds this same one.
+        self.client = SimpleNamespace(volumes=SimpleNamespace(get=lambda _name: self))
         self.removed = False
 
     def reload(self) -> None:
@@ -73,12 +75,15 @@ class _FakeDocker:
         self.helper_error: Exception | None = None
         self.helper_status = 0
         self.version = lambda: {"Version": "29.9.2"}
-        self.networks = SimpleNamespace(create=self._net)
-        self.volumes = SimpleNamespace(create=self._vol, list=self._list)
+        self.networks = SimpleNamespace(create=self._net, list=lambda **_kw: [])
+        self.volumes = SimpleNamespace(create=self._vol, list=self._list, get=self._no_volume)
         self.containers = SimpleNamespace(run=self._run, list=self._list_containers)
         self.stale_helpers: list[SimpleNamespace] = []
         self.container_filters: list[dict[str, Any]] = []
         self.helpers_removed = 0
+
+    def _no_volume(self, _name: str) -> Any:
+        raise docker.errors.NotFound("no such volume")
 
     def _net(self, name: str, **kw: Any) -> _Network:
         net = _Network(name, kw["labels"])
@@ -91,11 +96,17 @@ class _FakeDocker:
         return volume
 
     def _list(self, filters: dict[str, Any] | None = None) -> list[_Volume]:
-        self.list_filters.append(filters or {})
+        filters = filters or {}
+        if filters.get("label") != [f"recon.role={gateway_staging.STAGE_ROLE}"]:
+            return []  # the orphan reaper's own lookup
+        self.list_filters.append(filters)
         return self.stale
 
     def _list_containers(self, filters: dict[str, Any] | None = None, **_kw: Any) -> list:
-        self.container_filters.append(filters or {})
+        filters = filters or {}
+        if filters.get("label") != [f"recon.role={gateway_staging.HELPER_ROLE}"]:
+            return []  # the orphan reaper's own lookups
+        self.container_filters.append(filters)
         return self.stale_helpers
 
     def _run(self, _image: str, **kw: Any) -> Any:
