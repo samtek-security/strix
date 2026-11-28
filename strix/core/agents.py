@@ -295,6 +295,7 @@ class AgentCoordinator:
         *,
         task: str | None = None,
         skills: list[str] | None = None,
+        class_key: str | None = None,
     ) -> None:
         async with self._lock:
             self.statuses[agent_id] = "running"
@@ -305,6 +306,8 @@ class AgentCoordinator:
                 "task": task or "",
                 "skills": list(skills or []),
             }
+            if class_key:
+                self.metadata[agent_id]["class_key"] = class_key
             self.runtimes.setdefault(agent_id, AgentRuntime())
         logger.info("agent.register %s (%s) parent=%s", agent_id, name, parent_id or "-")
         await self._maybe_snapshot()

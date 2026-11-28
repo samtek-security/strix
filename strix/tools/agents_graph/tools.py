@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from collections import Counter
 from datetime import UTC, datetime
@@ -23,6 +24,8 @@ from strix.tools.output_store import bound_text
 
 
 logger = logging.getLogger(__name__)
+
+_CLASS_KEY_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 
 def _ctx(ctx: RunContextWrapper) -> dict[str, Any]:
@@ -704,6 +707,7 @@ async def create_agent(
     task: str,
     inherit_context: bool = True,
     skills: list[str] | None = None,
+    class_key: str | None = None,
 ) -> str:
     """Spawn a specialist child agent to run in parallel.
 
@@ -748,6 +752,10 @@ async def create_agent(
             when starting a clean-slate task.
         skills: List of skill names (e.g. ``["xss", "sql_injection"]``).
             Max 5; prefer 1-3.
+        class_key: The vulnerability class this child works on, when the
+            scan plan names one. Lower-case key exactly as the plan lists
+            it. Every report the child (or its own children) files is
+            recorded under it. Omit for work that spans classes.
     """
     inner = _ctx(ctx)
     coordinator = coordinator_from_context(inner)
@@ -779,6 +787,14 @@ async def create_agent(
             default=str,
         )
 
+    key = (class_key or "").strip().lower()
+    if key and not _CLASS_KEY_RE.fullmatch(key):
+        return json.dumps(
+            {"success": False, "error": f"invalid class_key: {class_key!r}", "agent_id": None},
+            ensure_ascii=False,
+            default=str,
+        )
+
     parent_history = list(ctx.turn_input) if inherit_context and ctx.turn_input else []
     try:
         result = await spawner(
@@ -787,6 +803,7 @@ async def create_agent(
             task=task,
             skills=skill_list,
             parent_history=parent_history,
+            **({"class_key": key} if key else {}),
         )
     except Exception as e:
         logger.exception("create_agent: scan runner failed to spawn child '%s'", name)

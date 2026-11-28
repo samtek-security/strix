@@ -268,6 +268,8 @@ class ReportState:
         self.vulnerability_reports: list[dict[str, Any]] = []
         self._revision_lock = threading.RLock()
         self.final_scan_result: str | None = None
+        # agent id -> the vulnerability class its parent spawned it to work on
+        self.agent_class_keys: dict[str, str] = {}
 
         self.scan_results: dict[str, Any] | None = None
         self.scan_config: dict[str, Any] | None = None
@@ -518,6 +520,8 @@ class ReportState:
             report["agent_id"] = agent_id
         if agent_name:
             report["agent_name"] = agent_name
+        if agent_id and (class_key := self.agent_class_keys.get(agent_id)):
+            report["class_key"] = class_key
 
         if self.vulnerability_found_callback:
             self.vulnerability_found_callback(report)

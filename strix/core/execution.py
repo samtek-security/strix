@@ -55,6 +55,7 @@ from strix.core.sessions import (
 )
 from strix.llm import request_log
 from strix.llm.compaction import is_context_overflow, maybe_compact
+from strix.report.state import get_global_report_state
 from strix.skills import skill_turn_limit
 
 
@@ -674,6 +675,7 @@ async def spawn_child_agent(
     task: str,
     skills: list[str],
     parent_history: list[Any],
+    class_key: str | None = None,
     event_sink: StreamEventSink | None = None,
     hooks: RunHooks[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -689,6 +691,7 @@ async def spawn_child_agent(
         parent_id,
         task=task,
         skills=skills,
+        class_key=class_key or coordinator.metadata.get(parent_id, {}).get("class_key"),
     )
 
     await _start_child_runner(
@@ -1509,6 +1512,10 @@ async def _start_child_runner(
 ) -> None:
     session = open_agent_session(child_id, agents_db_path)
     sessions_to_close.append(session)
+    class_key = coordinator.metadata.get(child_id, {}).get("class_key")
+    report_state = get_global_report_state()
+    if class_key and report_state is not None:
+        report_state.agent_class_keys[child_id] = class_key
     # The runner has not started, but it will write to this session (the seed
     # at least). Leaving turn_settled at its settled default would let a stop in
     # this window report the empty session as final, so it is cleared in the
