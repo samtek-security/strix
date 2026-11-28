@@ -104,6 +104,8 @@ async def test_a_queued_candidate_keeps_its_class_through_promotion_by_the_root(
     monkeypatch.setattr(exploitation, "_queue", {})
     monkeypatch.setattr(exploitation, "_persist", lambda: None)
     report_state.agent_class_keys["specialist"] = "sqli"
+    updates: list[dict[str, Any]] = []
+    report_state.vulnerability_updated_callback = updates.append
 
     async def _invoke(tool: Any, agent_id: str, args: dict[str, Any]) -> dict[str, Any]:
         ctx = ToolContext(
@@ -133,6 +135,7 @@ async def test_a_queued_candidate_keeps_its_class_through_promotion_by_the_root(
 
     report = next(r for r in report_state.vulnerability_reports if r["id"] == promoted["report_id"])
     assert report["class_key"] == "sqli"
+    assert [u["class_key"] for u in updates] == ["sqli"]
 
 
 @pytest.mark.asyncio

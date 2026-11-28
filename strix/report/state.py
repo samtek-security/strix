@@ -680,9 +680,13 @@ class ReportState:
     def attribute_report(self, report_id: str, class_key: str) -> None:
         """Name the class of a report that has none."""
         report = next((r for r in self.vulnerability_reports if r.get("id") == report_id), None)
-        if report is not None and not report.get("class_key"):
-            report["class_key"] = class_key
-            self.save_run_data()
+        if report is None or report.get("class_key"):
+            return
+        revised = {**report, "class_key": class_key}
+        if self.vulnerability_updated_callback:
+            self.vulnerability_updated_callback(revised)
+        report.update(revised)
+        self.save_run_data()
 
     @_one_writer
     def merge_proof_into_report(
