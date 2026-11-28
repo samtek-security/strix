@@ -128,9 +128,9 @@ MERGEABLE_PROOF_FIELDS = frozenset(
 # as a unit and never one without the other.
 _CAPTURE_FIELDS = ("capture_integrity_sha256", "captured_at")
 
-# What lets a retest call a finding fixed. Both describe one proof, so neither outlives it.
-# ``auth_role`` stays: keeping it only ever asks more of a retest.
-_PROOF_BOUND_FIELDS = ("proof_signal", "authz_bypass")
+# What a retest compares a replay against. The three describe one proof: they are written
+# together, with the signal, and none of them outlives it.
+_PROOF_BOUND_FIELDS = ("proof_signal", "auth_role", "authz_bypass")
 
 _LOWERCASE_REPORT_FIELDS = frozenset({"severity", "confidence", "fix_effort"})
 
@@ -586,6 +586,13 @@ class ReportState:
             and not (dependent in _PROOF_BOUND_FIELDS and fields.get("proof_signal"))
             and report.get(dependent) not in (None, "", [], {})
         }
+        # A signal write states the whole proof: a role or bypass it leaves out does not apply.
+        if fields.get("proof_signal"):
+            superseded |= {
+                key
+                for key in ("auth_role", "authz_bypass")
+                if fields.get(key) is None and report.get(key)
+            }
 
         if not changed and not superseded:
             logger.info("update for %s carried no new content; keeping it as is", report_id)

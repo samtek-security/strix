@@ -20,6 +20,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+DENIED_BYPASS_WARNING = (
+    "authz_bypass was not stored: the proving response is itself a 401 or 403, so a later "
+    "denial would not show the finding is fixed."
+)
+
 UNOBSERVED_WARNING = (
     "proof_signal was not stored: the captured response of the proving exchange (the first "
     "id cited) does not show it. Copy the value from that response and set it with "
@@ -146,22 +151,28 @@ def _response_shows(signal: dict[str, Any], raw: str, roundtrip_ms: float | None
     return True
 
 
+def _is_denial(raw: str) -> bool:
+    status_line = raw.split("\n", 1)[0].split()
+    return len(status_line) > 1 and status_line[1] in ("401", "403")
+
+
 async def observed_proof_signal(
-    ctx: RunContextWrapper, raw: Any, exchange_id: str | None
-) -> tuple[Any, str | None]:
+    ctx: RunContextWrapper, raw: Any, exchange_id: str | None, authz_bypass: bool | None = None
+) -> tuple[Any, bool | None, str | None]:
     """Keep a signal only when the captured proving response shows it.
 
     A retest can clear a finding when the stored value is absent from the replayed response, so
     a mistyped or remembered value could clear a live one. With no signal stored, the retest
-    judges by status as before. Returns ``(signal, warning)``. An unusable signal comes back
-    untouched for the caller's validation to reject.
+    judges by status as before. Returns ``(signal, authz_bypass, warning)``. An unusable signal
+    comes back untouched for the caller's validation to reject. A bypass proven through a
+    denial response loses its flag, since a retest reads a denial as the fix.
     """
     from strix.tools.proxy import caido_api  # noqa: PLC0415
     from strix.tools.proxy.tools import _call, resolve_proxy_client  # noqa: PLC0415
 
     signal, errors = normalize_proof_signal(raw)
     if errors or signal is None:
-        return raw, None
+        return raw, authz_bypass, None
     try:
         client = await resolve_proxy_client(ctx) if exchange_id else None
         if client is not None:
@@ -175,9 +186,11 @@ async def observed_proof_signal(
                 captured = bytes(captured).decode("utf-8", errors="replace")
             roundtrip = getattr(response, "roundtrip_time", None)
             if captured and "timing" in signal and not roundtrip:
-                return None, UNTIMED_WARNING
+                return None, None, UNTIMED_WARNING
             if captured and _response_shows(signal, captured, roundtrip):
-                return signal, None
+                if authz_bypass and _is_denial(captured):
+                    return signal, False, DENIED_BYPASS_WARNING
+                return signal, authz_bypass, None
     except Exception:  # noqa: BLE001 - an unreadable capture proves nothing about the signal
         logger.debug("proof signal check failed for %s", exchange_id, exc_info=True)
-    return None, UNOBSERVED_WARNING
+    return None, None, UNOBSERVED_WARNING

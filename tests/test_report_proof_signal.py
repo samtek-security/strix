@@ -15,6 +15,7 @@ from strix.tools.exploitation import tool as ex
 from strix.tools.proxy import tools as proxy_tools
 from strix.tools.reporting import tool as reporting_tool
 from strix.tools.reporting.proof_signal import (
+    DENIED_BYPASS_WARNING,
     UNOBSERVED_WARNING,
     UNTIMED_WARNING,
     normalize_auth_role,
@@ -118,7 +119,7 @@ async def test_a_signal_is_kept_only_when_the_capture_shows_it(
     monkeypatch: pytest.MonkeyPatch, signal: dict[str, Any], roundtrip: int, kept: bool
 ) -> None:
     _capture(monkeypatch, roundtrip=roundtrip)
-    expected = (signal, None) if kept else (None, UNOBSERVED_WARNING)
+    expected = (signal, None, None) if kept else (None, None, UNOBSERVED_WARNING)
     assert await observed_proof_signal(cast("Any", None), signal, "1") == expected
 
 
@@ -153,7 +154,7 @@ async def test_timing_is_reported_uncheckable_without_a_response_time(
 ) -> None:
     _capture(monkeypatch, roundtrip=0)
     result = await observed_proof_signal(cast("Any", None), {"timing": _TIMING}, "1")
-    assert result == (None, UNTIMED_WARNING)
+    assert result == (None, None, UNTIMED_WARNING)
 
 
 async def test_a_dropped_signal_leaves_no_key_for_a_retest_to_judge(
@@ -162,7 +163,7 @@ async def test_a_dropped_signal_leaves_no_key_for_a_retest_to_judge(
     # The retest runs its signal oracle only when the key exists. Absent, not null or empty,
     # keeps the status rules, so a signal that was dropped can never mark a finding fixed.
     _capture(monkeypatch)
-    signal, warning = await observed_proof_signal(
+    signal, _, warning = await observed_proof_signal(
         cast("Any", None), {"body_marker": "never seen"}, "1"
     )
     assert warning
@@ -201,18 +202,19 @@ async def test_an_unchecked_signal_is_never_written(report_state: ReportState) -
     assert "proof_signal" not in report_state.vulnerability_reports[0]
 
 
-@pytest.mark.parametrize("field", [{"authz_bypass": False}, {"authz_bypass": True}])
+@pytest.mark.parametrize("bypass", [False, True])
 async def test_a_lead_refuses_the_bypass_flag_either_way(
-    report_state: ReportState, field: dict[str, bool]
+    report_state: ReportState, bypass: bool
 ) -> None:
     report_id = (await _create(proof_status="lead"))["report_id"]
-    assert _update(report_id, **field)["rejected_fields"] == ["authz_bypass"]
+    result = _update(report_id, proof_signal=_SIGNAL, authz_bypass=bypass)
+    assert result["rejected_fields"] == ["proof_signal", "authz_bypass"]
     assert "authz_bypass" not in report_state.vulnerability_reports[0]
 
 
 async def test_no_proving_exchange_keeps_no_signal() -> None:
     result = await observed_proof_signal(cast("Any", None), _SIGNAL, None)
-    assert result == (None, UNOBSERVED_WARNING)
+    assert result == (None, None, UNOBSERVED_WARNING)
 
 
 async def test_the_update_tool_refuses_a_signal_the_capture_lacks(
@@ -315,7 +317,7 @@ async def test_report_carries_the_signal_only_when_given(report_state: ReportSta
 
 
 async def test_report_without_a_signal_has_no_replay_keys(report_state: ReportState) -> None:
-    await _create(authz_bypass=False)
+    await _create(auth_role="member", authz_bypass=True)
     report = report_state.vulnerability_reports[0]
     assert not {"proof_signal", "auth_role", "authz_bypass"} & set(report)
 
@@ -347,8 +349,7 @@ async def test_revising_the_proof_drops_what_described_it(
     )
     assert _update(created["report_id"], **change)["success"]
     report = report_state.vulnerability_reports[0]
-    assert not {"proof_signal", "authz_bypass"} & set(report)
-    assert report["auth_role"] == "member"
+    assert not {"proof_signal", "auth_role", "authz_bypass"} & set(report)
 
 
 async def test_attaching_a_baseline_exchange_keeps_the_signal(report_state: ReportState) -> None:
@@ -365,6 +366,7 @@ async def test_a_lead_never_carries_replay_fields(report_state: ReportState) -> 
     assert not {"proof_signal", "auth_role", "authz_bypass"} & set(report)
     result = _update(created["report_id"], proof_signal=_SIGNAL)
     assert result["rejected_fields"] == ["proof_signal"]
+    assert not _update(created["report_id"], auth_role="member")["success"]
     assert "proof_signal" not in report_state.vulnerability_reports[0]
 
 
@@ -383,12 +385,41 @@ async def test_a_merge_keeping_the_same_poc_still_drops_the_old_signal(
 
 
 async def test_update_replaces_and_validates_the_fields(report_state: ReportState) -> None:
-    report_id = (await _create(authz_bypass=True))["report_id"]
+    report_id = (await _create(proof_signal=_SIGNAL, auth_role="member", authz_bypass=True))[
+        "report_id"
+    ]
     assert not _update(report_id, proof_signal={"body_marker": _SECRET})["success"]
     assert _update(report_id, proof_signal={"timing": _TIMING}, authz_bypass=False)["success"]
     report = report_state.vulnerability_reports[0]
     assert report["proof_signal"] == {"timing": _TIMING}
     assert report["authz_bypass"] is False
+    assert "auth_role" not in report
+
+
+@pytest.mark.parametrize("field", [{"auth_role": "member"}, {"authz_bypass": True}])
+async def test_role_and_bypass_are_never_written_without_a_signal(
+    report_state: ReportState, field: dict[str, Any]
+) -> None:
+    report_id = (await _create(proof_signal=_SIGNAL))["report_id"]
+    assert not _update(report_id, **field)["success"]
+    assert not set(field) & set(report_state.vulnerability_reports[0])
+
+
+async def test_a_new_unauthenticated_proof_drops_the_old_role(report_state: ReportState) -> None:
+    created = await _create(proof_signal=_SIGNAL, auth_role="member", authz_bypass=True)
+    assert _update(created["report_id"], poc_script_code="anon", proof_signal=_SIGNAL)["success"]
+    report = report_state.vulnerability_reports[0]
+    assert report["proof_signal"] == _SIGNAL
+    assert not {"auth_role", "authz_bypass"} & set(report)
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_a_bypass_proven_through_a_denial_loses_its_flag(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    _capture(monkeypatch, raw=f"HTTP/1.1 {status}\r\n\r\nroot:x:0:0".encode())
+    result = await observed_proof_signal(cast("Any", None), _SIGNAL, "1", authz_bypass=True)
+    assert result == (_SIGNAL, False, DENIED_BYPASS_WARNING)
 
 
 async def test_a_merged_proof_replaces_the_old_replay_fields(report_state: ReportState) -> None:

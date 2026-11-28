@@ -543,6 +543,8 @@ def _collect_update_changes(  # noqa: PLR0912, PLR0915
         changes["auth_role"] = auth_role
     if fields.get("authz_bypass") is not None:
         changes["authz_bypass"] = bool(fields["authz_bypass"])
+    if not proof_signal and not signal_errors and ({"auth_role", "authz_bypass"} & set(changes)):
+        errors.append("auth_role and authz_bypass are only written together with proof_signal")
 
     return changes, errors
 
@@ -1032,11 +1034,11 @@ async def _do_create(  # noqa: PLR0911
     errors.extend(signal_errors + role_errors)
     # A lead's signal was never observed through a verified proof, so a retest must not clear
     # the finding on its absence. Unset keys are not stored.
-    proven = proof_status == "exploited"
+    kept = proof_status == "exploited" and proof_signal is not None
     replay_fields: dict[str, Any] = {
-        "proof_signal": proof_signal if proven else None,
-        "auth_role": auth_role if proven else None,
-        "authz_bypass": True if proven and authz_bypass else None,
+        "proof_signal": proof_signal if kept else None,
+        "auth_role": auth_role if kept else None,
+        "authz_bypass": True if kept and authz_bypass else None,
     }
     if capture_integrity_sha256 is not None and not _SHA256_HEX.fullmatch(capture_integrity_sha256):
         errors.append("capture_integrity_sha256 must be 64 lowercase hex characters")
@@ -1655,8 +1657,8 @@ async def create_vulnerability_report(
             fix (summary + rationale). Prose/markdown only — the code
             change itself belongs in ``code_locations``. Omit for
             black-box findings.
-        proof_signal: Kept, like ``auth_role`` and ``authz_bypass``, only
-            when the report files as proven. What in the response to the
+        proof_signal: ``auth_role`` and ``authz_bypass`` are kept only
+            with it, and all three only when the report files as proven. What in the response to the
             proving request shows the vulnerability, so a later retest can tell whether it is
             still there. Give it for any finding proven by one HTTP
             request. An object with one or more of these checks, all of
@@ -1674,7 +1676,8 @@ async def create_vulnerability_report(
             captured response shows it.
         auth_role: The role the proving request was authenticated as
             (for example ``"member"``). Omit for an unauthenticated proof.
-        authz_bypass: True when the finding is an authorization bypass, so
+        authz_bypass: Never for a bypass whose proving response is itself a
+            401 or 403. True when the finding is an authorization bypass, so
             that a later 401 or 403 means it is fixed.
     """
     _, http_exchange_errors = _normalize_http_exchange_ids(http_exchange_ids)
@@ -1695,7 +1698,9 @@ async def create_vulnerability_report(
     signal_warning = None
     if proof_fields.get("proof_status") == "exploited":
         proving = cited[0] if cited and cited[0] in (http_exchange_ids or []) else None
-        proof_signal, signal_warning = await observed_proof_signal(ctx, proof_signal, proving)
+        proof_signal, authz_bypass, signal_warning = await observed_proof_signal(
+            ctx, proof_signal, proving, authz_bypass
+        )
 
     agent_id, agent_name = _caller_identity(ctx)
 
@@ -1740,6 +1745,7 @@ async def _check_revised_signal(
     report_id: str,
     proof_signal: dict[str, Any] | None,
     http_exchange_ids: list[str] | None,
+    authz_bypass: bool | None,
 ) -> tuple[tuple[str, int] | None, dict[str, Any] | None]:
     """Check a revised signal against the proving exchange of a proven report.
 
@@ -1758,7 +1764,7 @@ async def _check_revised_signal(
     ids = matched.get("http_exchange_ids") if http_exchange_ids is None else http_exchange_ids
     proving = ids[0] if ids else None
     revision = len(matched.get("update_history") or [])
-    _, warning = await observed_proof_signal(ctx, proof_signal, proving)
+    _, _, warning = await observed_proof_signal(ctx, proof_signal, proving, authz_bypass)
     # A replaced exchange has not been through the filing's integrity check.
     if warning is None and proving and _exchange_source(proving) == "gateway_capture":
         _, _, intact = await _fetch_capture_integrity(ctx, proving)
@@ -1886,9 +1892,14 @@ async def update_vulnerability_report(
             ``create_vulnerability_report`` takes. Proven findings only.
             Changing the target, endpoint, method, PoC, evidence or the
             cited exchanges (appending ids is fine) drops the stored
-            signal and ``authz_bypass`` unless you pass a signal here.
-        auth_role: Replacement role the proving request ran as.
-        authz_bypass: Whether the finding is an authorization bypass.
+            signal, ``auth_role`` and ``authz_bypass`` unless you pass a
+            signal here. Writing a signal replaces all three, so pass the
+            role and the flag again if they still apply.
+        auth_role: Role the proving request ran as. Only with
+            ``proof_signal``; omit for an unauthenticated proof.
+        authz_bypass: Whether the finding is an authorization bypass. Only
+            with ``proof_signal``; not when the proving response is a 401 or
+            403.
     """
     (
         http_exchange_ids,
@@ -1944,7 +1955,7 @@ async def update_vulnerability_report(
         )
 
     checked, rejection = await _check_revised_signal(
-        ctx, report_id, proof_signal, http_exchange_ids
+        ctx, report_id, proof_signal, http_exchange_ids, authz_bypass
     )
     if rejection is not None:
         return json.dumps(rejection, ensure_ascii=False, default=str)
