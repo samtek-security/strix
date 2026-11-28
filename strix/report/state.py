@@ -128,8 +128,9 @@ MERGEABLE_PROOF_FIELDS = frozenset(
 # as a unit and never one without the other.
 _CAPTURE_FIELDS = ("capture_integrity_sha256", "captured_at")
 
-# What a retest compares a replay against. It describes one proof, so it never outlives it.
-_REPLAY_FIELDS = ("proof_signal", "auth_role", "authz_bypass")
+# What lets a retest call a finding fixed. Both describe one proof, so neither outlives it.
+# ``auth_role`` stays: keeping it only ever asks more of a retest.
+_PROOF_BOUND_FIELDS = ("proof_signal", "authz_bypass")
 
 _LOWERCASE_REPORT_FIELDS = frozenset({"severity", "confidence", "fix_effort"})
 
@@ -144,9 +145,10 @@ _DEPENDENT_REPORT_FIELDS: dict[str, tuple[str, ...]] = {
     "severity": ("severity_change_conditions",),
     "cvss": ("cvss_breakdown",),
     "code_locations": ("fix_verification",),
-    "poc_script_code": ("proof_signal",),
-    "endpoint": ("proof_signal",),
-    "method": ("proof_signal",),
+    **dict.fromkeys(
+        ("target", "endpoint", "method", "poc_description", "poc_script_code", "evidence"),
+        _PROOF_BOUND_FIELDS,
+    ),
 }
 
 
@@ -567,14 +569,20 @@ class ReportState:
                 continue
             changed[key] = value
 
+        replaced_primaries = set(changed)
+        # Appending a baseline keeps the proof; dropping or swapping an exchange replaces it.
+        cited = report.get("http_exchange_ids") or []
+        new_ids = changed.get("http_exchange_ids")
+        if new_ids is not None and new_ids[: len(cited)] != cited:
+            replaced_primaries.add("target")
         superseded = {
             dependent
             for primary, dependents in _DEPENDENT_REPORT_FIELDS.items()
-            if primary in changed
+            if primary in replaced_primaries
             for dependent in dependents
             if dependent not in changed
-            # Restating the same signal keeps it: it still describes the new proof.
-            and not (dependent == "proof_signal" and fields.get(dependent))
+            # Restating the signal says it still describes the new proof.
+            and not (dependent in _PROOF_BOUND_FIELDS and fields.get("proof_signal"))
             and report.get(dependent) not in (None, "", [], {})
         }
 
@@ -699,12 +707,8 @@ class ReportState:
             replaced["confidence_rationale"] = report["confidence_rationale"]
         for key in stale_capture:
             replaced[key] = report[key]
-        stale_replay = [
-            key
-            for key in _REPLAY_FIELDS
-            if "poc_script_code" in changed and key not in supplied and report.get(key)
-        ]
-        replaced.update({key: report[key] for key in stale_replay})
+        stale = [key for key in _PROOF_BOUND_FIELDS if key not in supplied and report.get(key)]
+        replaced.update({key: report[key] for key in stale})
         if replaced:
             entry["replaced"] = replaced
         if merged_from_queue_item:
@@ -727,7 +731,7 @@ class ReportState:
             "confidence" in changed or "proof_status" in changed
         ) and "confidence_rationale" not in supplied:
             revised.pop("confidence_rationale", None)
-        for key in stale_replay:
+        for key in stale:
             revised.pop(key)
         if "proof_status" in changed and "proof_status_reason" not in changed:
             # The old reason explained why the earlier status fell short.

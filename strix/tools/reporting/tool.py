@@ -666,6 +666,17 @@ def _fit_revision_to_class(
     if offending:
         return _reject_cross_class_revision(report_id, matched_class, offending)
     if matched_class == "dynamic":
+        replay = [k for k in ("proof_signal", "auth_role", "authz_bypass") if changes.get(k)]
+        if replay and matched.get("proof_status") != "exploited":
+            return {
+                "success": False,
+                "error": (
+                    f"Report '{report_id}' is not a proven finding, so it cannot carry "
+                    f"{', '.join(replay)}."
+                ),
+                "report_id": report_id,
+                "rejected_fields": replay,
+            }
         return None
     return _rate_dependency_revision(report_id, matched, changes)
 
@@ -1013,11 +1024,13 @@ async def _do_create(  # noqa: PLR0911
     proof_signal, signal_errors = normalize_proof_signal(proof_signal)
     auth_role, role_errors = normalize_auth_role(auth_role)
     errors.extend(signal_errors + role_errors)
-    # Stored only when set, so a report without them reads the same as before.
+    # A lead's signal was never observed through a verified proof, so a retest must not clear
+    # the finding on its absence. Unset keys are not stored.
+    proven = proof_status == "exploited"
     replay_fields: dict[str, Any] = {
-        "proof_signal": proof_signal,
-        "auth_role": auth_role,
-        "authz_bypass": True if authz_bypass else None,
+        "proof_signal": proof_signal if proven else None,
+        "auth_role": auth_role if proven else None,
+        "authz_bypass": True if proven and authz_bypass else None,
     }
     if capture_integrity_sha256 is not None and not _SHA256_HEX.fullmatch(capture_integrity_sha256):
         errors.append("capture_integrity_sha256 must be 64 lowercase hex characters")
@@ -1636,8 +1649,9 @@ async def create_vulnerability_report(
             fix (summary + rationale). Prose/markdown only — the code
             change itself belongs in ``code_locations``. Omit for
             black-box findings.
-        proof_signal: What in the response to the proving request shows
-            the vulnerability, so a later retest can tell whether it is
+        proof_signal: Kept, like ``auth_role`` and ``authz_bypass``, only
+            when the report files as proven. What in the response to the
+            proving request shows the vulnerability, so a later retest can tell whether it is
             still there. Give it for any finding proven by one HTTP
             request. An object with one or more of these checks, all of
             which must hold for the finding to reproduce:
@@ -1817,9 +1831,10 @@ async def update_vulnerability_report(
             observed in this codebase that justifies the contextual
             ``cvss_breakdown``.
         proof_signal: Replacement retest signal, in the shape
-            ``create_vulnerability_report`` takes. A new
-            ``poc_script_code``, ``endpoint`` or ``method`` drops the
-            stored signal unless you pass one here.
+            ``create_vulnerability_report`` takes. Proven findings only.
+            Changing the target, endpoint, method, PoC, evidence or the
+            cited exchanges (appending ids is fine) drops the stored
+            signal and ``authz_bypass`` unless you pass a signal here.
         auth_role: Replacement role the proving request ran as.
         authz_bypass: Whether the finding is an authorization bypass.
     """

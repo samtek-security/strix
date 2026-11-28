@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from strix.report.state import ReportState, set_global_report_state
+from strix.tools.exploitation import tool as ex
 from strix.tools.reporting.proof_signal import normalize_auth_role, normalize_proof_signal
 from strix.tools.reporting.tool import _do_create, _do_update
 from tests.test_promotion_code_locations import _exploited, _promote
@@ -49,6 +50,7 @@ async def _create(**extra: Any) -> dict[str, Any]:
         ),
         "x",
     )
+    extra.setdefault("proof_status", "exploited")
     return await _do_create(
         **text,
         confidence="high",
@@ -147,22 +149,59 @@ async def test_secret_signal_files_nothing(report_state: ReportState) -> None:
 
 
 @pytest.mark.parametrize(
-    "change", [{"poc_script_code": "y"}, {"endpoint": "/other"}, {"method": "POST"}]
+    "change",
+    [
+        {"target": "https://other.test"},
+        {"endpoint": "/other"},
+        {"method": "POST"},
+        {"poc_description": "y"},
+        {"poc_script_code": "y"},
+        {"evidence": "y"},
+        {"http_exchange_ids": ["2"]},
+        {"http_exchange_ids": []},
+    ],
 )
-async def test_revising_the_proof_drops_its_signal(
-    report_state: ReportState, change: dict[str, str]
+async def test_revising_the_proof_drops_what_described_it(
+    report_state: ReportState, change: dict[str, Any]
 ) -> None:
-    report_id = (await _create(proof_signal=_SIGNAL, auth_role="member"))["report_id"]
-    assert _update(report_id, **change)["success"]
+    created = await _create(
+        proof_signal=_SIGNAL, auth_role="member", authz_bypass=True, http_exchange_ids=["1"]
+    )
+    assert _update(created["report_id"], **change)["success"]
     report = report_state.vulnerability_reports[0]
-    assert "proof_signal" not in report
+    assert not {"proof_signal", "authz_bypass"} & set(report)
     assert report["auth_role"] == "member"
+
+
+async def test_attaching_a_baseline_exchange_keeps_the_signal(report_state: ReportState) -> None:
+    created = await _create(proof_signal=_SIGNAL, http_exchange_ids=["1"])
+    assert _update(created["report_id"], http_exchange_ids=["1", "2"])["success"]
+    assert report_state.vulnerability_reports[0]["proof_signal"] == _SIGNAL
+
+
+async def test_a_lead_never_carries_replay_fields(report_state: ReportState) -> None:
+    created = await _create(
+        proof_status="lead", proof_signal=_SIGNAL, auth_role="member", authz_bypass=True
+    )
+    report = report_state.vulnerability_reports[0]
+    assert not {"proof_signal", "auth_role", "authz_bypass"} & set(report)
+    result = _update(created["report_id"], proof_signal=_SIGNAL)
+    assert result["rejected_fields"] == ["proof_signal"]
+    assert "proof_signal" not in report_state.vulnerability_reports[0]
 
 
 async def test_restating_the_signal_with_a_new_proof_keeps_it(report_state: ReportState) -> None:
     report_id = (await _create(proof_signal=_SIGNAL))["report_id"]
     assert _update(report_id, poc_script_code="y", proof_signal=_SIGNAL)["success"]
     assert report_state.vulnerability_reports[0]["proof_signal"] == _SIGNAL
+
+
+async def test_a_merge_keeping_the_same_poc_still_drops_the_old_signal(
+    report_state: ReportState,
+) -> None:
+    report_id = (await _create(proof_signal=_SIGNAL, authz_bypass=True))["report_id"]
+    report_state.merge_proof_into_report(report_id, {"evidence": "captured"})
+    assert not {"proof_signal", "authz_bypass"} & set(report_state.vulnerability_reports[0])
 
 
 async def test_update_replaces_and_validates_the_fields(report_state: ReportState) -> None:
@@ -189,6 +228,10 @@ async def test_a_merged_proof_replaces_the_old_replay_fields(report_state: Repor
 async def test_promotion_carries_the_signal_onto_the_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    async def verified(*_args: Any, **_kwargs: Any) -> tuple[Any, ...]:
+        return ["1"], "exploited", None, "caido", None, None
+
+    monkeypatch.setattr(ex, "assess_proof_with_integrity", verified)
     args = _exploited(proof_signal=_SIGNAL, auth_role="member", authz_bypass=True)
     out, rs = await _promote(args, {}, tmp_path, monkeypatch)
     assert out["success"], out
