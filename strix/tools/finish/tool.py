@@ -14,8 +14,6 @@ from strix.core.agents import coordinator_from_context
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from strix.core.agents import AgentCoordinator
 
 
@@ -30,7 +28,6 @@ def _do_finish(
     technical_analysis: str,
     recommendations: str,
     agent_graph: dict[str, Any],
-    scan_stop_reason: Callable[[], str | None] = lambda: None,
 ) -> dict[str, Any]:
     if parent_id is not None:
         return {
@@ -65,11 +62,6 @@ def _do_finish(
                 "message": "Scan completed (not persisted)",
                 "warning": "Results could not be persisted - report state unavailable",
             }
-        # A scan-wide stop that landed during this turn cut the run short. Record it
-        # first, or saving the report would claim the run finished by itself.
-        stopped = scan_stop_reason()
-        if stopped and report_state.scan_ended_exit_reason is None:
-            report_state.scan_ended_exit_reason = stopped
         report_state.update_scan_final_fields(
             executive_summary=executive_summary.strip(),
             methodology=methodology.strip(),
@@ -96,10 +88,23 @@ def _do_finish(
         return result
 
 
-def _scan_stop_reason(coordinator: AgentCoordinator | None) -> str | None:
-    if coordinator is None or not coordinator.budget_stopped:
-        return None
-    return coordinator.stop_reason or "budget_exceeded"
+async def _record_scan_end(coordinator: AgentCoordinator | None) -> None:
+    """Record why a finished scan ended: a scan-wide stop that landed first, else the tool.
+
+    The reason is chosen on the event loop, where stops are raised, and only after the report
+    is written, so a stop cannot land between the choice and the report being complete.
+    """
+    from strix.report.state import get_global_report_state
+
+    report_state = get_global_report_state()
+    if report_state is None:
+        return
+    if report_state.scan_ended_exit_reason is None:
+        reason = "finished_by_tool"
+        if coordinator is not None and coordinator.budget_stopped:
+            reason = coordinator.stop_reason or "budget_exceeded"
+        report_state.scan_ended_exit_reason = reason
+    await asyncio.to_thread(report_state.record_scan_end)
 
 
 def _coverage_summary(agent_graph: dict[str, Any]) -> dict[str, Any]:
@@ -361,8 +366,9 @@ async def finish_scan(
         technical_analysis=technical_analysis,
         recommendations=recommendations,
         agent_graph=await coordinator.snapshot() if coordinator is not None else {},
-        scan_stop_reason=lambda: _scan_stop_reason(coordinator),
     )
+    if result.get("success") and result.get("scan_completed"):
+        await _record_scan_end(coordinator)
     if (
         result.get("success")
         and result.get("scan_completed")

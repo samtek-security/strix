@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -72,6 +73,26 @@ async def test_a_stop_before_finish_scan_completes_is_the_exit_reason(
     assert _recorded_reason(report_state) == reason
 
 
+async def test_a_stop_while_the_report_is_being_written_is_the_exit_reason(
+    report_state: ReportState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coordinator = await _coordinator()
+    loop = asyncio.get_running_loop()
+    write = report_state.update_scan_final_fields
+
+    def write_then_stop(**fields: str) -> None:
+        write(**fields)
+        stop = coordinator.trigger_budget_stop("elapsed_budget")
+        asyncio.run_coroutine_threadsafe(stop, loop).result(timeout=5)
+
+    monkeypatch.setattr(report_state, "update_scan_final_fields", write_then_stop)
+
+    assert (await _finish(coordinator))["scan_completed"]
+
+    assert report_state.scan_ended_exit_reason == "elapsed_budget"
+    assert _recorded_reason(report_state) == "elapsed_budget"
+
+
 async def test_a_finish_that_completes_before_the_stop_keeps_finished_by_tool(
     report_state: ReportState,
 ) -> None:
@@ -81,3 +102,4 @@ async def test_a_finish_that_completes_before_the_stop_keeps_finished_by_tool(
     await coordinator.trigger_budget_stop("elapsed_budget")
 
     assert report_state.scan_ended_exit_reason == "finished_by_tool"
+    assert _recorded_reason(report_state) == "finished_by_tool"
